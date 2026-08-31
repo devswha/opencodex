@@ -91,3 +91,53 @@ Extends `gui/tests/models-provider-head.test.ts`:
 4. The cluster contains three interactive elements, so the grouping did not
    silently become one control.
 
+Assertion 4 was **wrong as written** and the audit caught it: the custom-cap
+editor lives inside the cluster too, so a count of interactive children is a
+moving target. What is asserted instead is that the switch, the select, and the
+per-model button are all present as descendants, with the editor optional.
+
+## What the third audit round changed
+
+Two blockers, both fixed before implementation.
+
+**The cluster must wrap.** The drafted `min-width: 0` with no `flex-wrap` is the
+`011` clip wearing a new name. As one flex item of `.models-provider-actions` the
+cluster can be squeezed, and none of its children shrink: the labeled switch is
+`flex: 0 0 auto`, `.btn` is `white-space: nowrap`, the `Select` is `inline-block`.
+The overflow would then be swallowed by `.models-provider-card { overflow: hidden }`
+while a page-level `scrollWidth === clientWidth` assertion still reported success.
+That is why the measurement below records **card clip and cluster clip separately**
+from page overflow: the failure this phase risks is invisible at page level.
+
+**The custom-cap editor could outlive the cap.** `providerCapCustomOpen` is
+independent per-provider state and nothing clears it when the cap is switched off.
+With Custom already open, flipping the switch left the 120px input and its Apply
+button standing under an off cluster — and `applyProviderCustomCap` sends
+`enabled: true`, so that field would turn the cap back on. This was already
+reachable for the native group; always-rendering the Select would have spread it to
+every routed card. The editor is now gated on `capOn` as well.
+
+## Measured after the change
+
+`evidence/wp3-geometry.json` (harness `evidence/040-geometry-harness.ts`),
+ko/de/en x 780/1024/1280/1440 against the built GUI on the live proxy:
+
+| check | result |
+|---|---|
+| page `hOverflow` | `false` at every locale and width |
+| card `scrollWidth - clientWidth` | `0` everywhere |
+| `.models-cap-cluster` clip | `0` everywhere |
+| cap slot present on every card | `true` everywhere |
+| actions children under 6px | `0` everywhere |
+| `maxHeadH` at 780 | rose to 194.4 (de), 160.4 (en), 125.5 (ko) |
+
+The 780px height increase is the recorded **cost**, not a regression: the gate is
+overflow and clipping, and an extra wrap line in a row that is already full-width
+is what buying occupancy costs.
+
+`evidence/wp3-state.json` confirms the per-card behaviour the phase exists for:
+`openai` cap on with an enabled Select, and `anthropic`, `cursor`,
+`google-antigravity`, `opencode-free`, `woong`, `xai` all cap off with the slot
+**present and disabled** — where before they rendered nothing at all. Cluster tab
+stops read `Default window / cap`, `Default 1.05M`, `Custom windows`: three stops,
+in the order the controls are seen.
