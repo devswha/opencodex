@@ -77,10 +77,22 @@ affordance.** Those are different features that share a word.
   pointer proximity to *explain* it — the row lifts its own labels and tooltips
   into view. Nothing is hidden, so there is nothing to discover.
 
-Adopted: **no control leaves the resting layout.** Tier 2 becomes a *disclosure
-of meaning*, not a disclosure of existence. The auditor's Tier-1 assignment is
-adopted verbatim; its recommendation to land `020` first is also adopted, which
-is why the label work moves ahead of this doc in the order.
+Adopted: **no control leaves the resting layout.** Tier 2 is empty. The auditor's
+Tier-1 assignment is adopted verbatim; its recommendation to land `020` first is
+also adopted, which is why the label work moves ahead of this doc in the order.
+
+**`020`'s label text is visible at rest. Hover only emphasizes; it never
+introduces the label.** That sentence is the whole contract, and the second audit
+round demanded it because an earlier phrasing here ("raises labels into view")
+re-created the defect in a new place:
+
+> If `050` rest-hides that text and reveals it on hover, blocker 1 returns as
+> meaning-gating: a labeled control that is unlabeled until hover.
+
+So the affordance is deliberately small: pencil idle-dim, and the `title`
+tooltips `020` already specifies. Nothing in `050` may make `020`'s visible text
+conditional on pointer state. If that leaves `050` with little label work, that is
+the correct outcome — `020` already did it.
 
 That also resolves blocker 3 without further argument: if no control is added to
 or removed from the resting row, the 780px case cannot be made worse by
@@ -107,10 +119,34 @@ control carrying a real value instead of a ghost. The preset control keeps
 `if (!preset) return null`; a provider with nothing to curate still shows nothing,
 because a dead segmented is worse than an absent one.
 
-At 780px this ADDS no width in the aggregate: the 780px viewport still carries the
-232px sidebar, so the workspace container sits under the 720px container query and
-the actions row is already a full-width wrap row. One always-present `Select`
-replaces one sometimes-present `Select`; the two conditional slots are not summed.
+### What this does and does not fix, measured
+
+The second audit round corrected an overclaim in the first draft of this section,
+using the captured baseline. Both corrections are adopted:
+
+> Always rendering the Select ADDS a control to 8 of 10 cards (not "replaces"
+> one). At 780 that is extra wrap height, not overflow — `010` still holds — but it
+> is not aggregate-neutral. After the Select is always present, anthropic still has
+> the preset and cursor still does not, so the 1280 left-edge spread cannot go to
+> zero.
+
+Precisely, from `evidence/030-baseline.json`:
+
+- **780px is the wrong proof for alignment.** Every card already reports
+  `actsLeft: 281` there, because `@container (max-width: 720px)` has already
+  wrapped the actions to full width. Alignment cannot regress or improve at a
+  width where it is already uniform, so **the column gate lives at 1280 and 1440.**
+- **The 114.8px spread is two missing pieces, not one.** `openai`/`kiro` carry a
+  `custom-select`; `anthropic`/`openrouter` carry a `segmented`; the other six
+  carry neither.
+
+So the honest scope: always rendering the cap `Select` fixes the
+**openai-shows-a-number / anthropic-does-not** mismatch the user actually
+reported, and it costs wrap height at 780 rather than being free. It does **not**
+drive the left-edge spread to zero, because the preset control legitimately
+remains absent on providers with nothing to curate. **That residual
+preset-driven delta is accepted, not fixed**, and the `050` gate must state it as
+an accepted delta instead of asserting equal left edges.
 
 ## What this phase must NOT do
 
@@ -149,18 +185,39 @@ are disambiguated by label, not removed.
 1. `020` — visible labels for the three opaque controls (already written; the
    auditor requires it first).
 2. `040` — merge the context-window triple into one labeled cluster.
-3. `050` — hover-as-affordance on the actions row: pointer/focus-within raises
-   labels and tooltips, with `@media (hover: none)` keeping the resting state
-   fully usable and `prefers-reduced-motion` removing the transition. Plus the
-   column-stability work, expressed as `min-width` floors on the two conditional
-   slots so a cap-off card lines up with a cap-on card.
+3. `050` — hover-as-affordance on the actions row: pointer/`focus-within`
+   emphasizes controls that are already labeled and already present (pencil
+   idle-dim, `020`'s tooltips), with `@media (hover: none)` keeping the resting
+   state fully usable and `prefers-reduced-motion` making any opacity change
+   instant.
+
+   **No `min-width` floors on the conditional slots.** The first draft proposed
+   them and the audit correctly identified that as the ghost placeholder in CSS
+   form, contradicting this doc's own "no shipped preset -> no control" and
+   reviving the child-floor move `011` already killed. An always-rendered
+   `Select` needs no floor, and a floor for an absent preset is a dead slot.
 
 ## Verification contract
 
-Inherited from `000` and unchanged: re-measure the sweep at 780/1280/1440,
-require `scrollWidth === clientWidth`, no child under 6px, and the actions-row
-left edge within a stated tolerance across cards in the same list. Focused
-`gui/tests` regression per phase, driven red first. Remote gates only
+Inherited from `000`, with the column gate corrected by the second audit round:
+
+- Re-measure at 780/1280/1440. Require `scrollWidth === clientWidth` and no child
+  under 6px at every width.
+- **Column gate at 1280/1440 only** — 780 is already uniform at `actsLeft: 281`
+  and proves nothing about alignment.
+- The cap-value slot must be occupied on every card. The remaining left-edge
+  delta between a preset-carrying and a preset-free provider is recorded as an
+  accepted delta, with its measured magnitude.
+- 780 is allowed to gain wrap HEIGHT from the always-present `Select`; it is not
+  allowed to overflow.
+- Implementation guard, from the audit: the strings the existing tests pin must
+  stay byte-exact — `className="row models-provider-toggle"`,
+  `className="row models-provider-actions"`, `t("models.contextSettings")`, the
+  720/768 wrap rules, and the toggle's `flex: "1 1 auto"`. A template-literal
+  className or a hover wrapper around the actions row fails
+  `gui/tests/models-provider-head.test.ts` even if the design is right.
+
+Focused `gui/tests` regression per phase, driven red first. Remote gates only
 (`ssh lidge`); the local full suite is forbidden by the user. Push `--no-verify`.
 
 Dials: `DESIGN_VARIANCE 2`, `MOTION_INTENSITY 1`, density D6 — unchanged from
