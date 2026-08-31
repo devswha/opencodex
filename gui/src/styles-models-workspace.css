@@ -309,6 +309,29 @@
   max-width: 100%;
 }
 
+/* ── Cap cluster (040) ──
+   The provider-wide context window is one setting wearing three sibling controls.
+   This groups them visually: the gap is tighter than the row own var(--space-2),
+   which is what makes the trio read as one control instead of three.
+
+   Grouping only, never a functional merge. The per-model overrides button opens a
+   different SCOPE than the switch and select, which are the provider-wide default,
+   so all three keep their own tab stop.
+
+   flex-wrap is load-bearing, not tidiness. As one flex item of a wrapping actions
+   row the cluster can be squeezed, and its children do not shrink: the labeled
+   switch is flex: 0 0 auto, .btn is white-space: nowrap, the Select is inline-block.
+   A nowrap cluster would overflow, and .models-provider-card is overflow: hidden, so
+   the clip would be swallowed silently while a page-level scrollWidth === clientWidth
+   assertion still passed. Wrapping prevents that; a min-width floor would be the
+   child-floor design 011 killed. */
+.models-cap-cluster {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
 /* ── Alias-edit emphasis (050) ──
    The user asked for a hover affordance. Two independent audits rejected the first
    reading of that — hover that GATES, controls hidden until the pointer arrives —
