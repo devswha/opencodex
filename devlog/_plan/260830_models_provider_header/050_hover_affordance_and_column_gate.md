@@ -15,11 +15,24 @@ small:
 /* The pencil is the one control that is genuinely secondary: a provider alias is
    set once and then left alone. It stays in layout, in tab order, and in the
    accessibility tree - only its resting contrast drops. */
-.models-provider-actions .btn-ghost.models-alias-edit { opacity: .65; }
-.models-provider-head:hover .models-alias-edit,
-.models-provider-head:focus-within .models-alias-edit,
-.models-alias-edit:focus-visible { opacity: 1; }
+.models-provider-actions .btn-ghost.models-alias-edit { opacity: 0.75; }
+.models-provider-head:hover .models-provider-actions .btn-ghost.models-alias-edit,
+.models-provider-head:focus-within .models-provider-actions .btn-ghost.models-alias-edit,
+.models-provider-actions .btn-ghost.models-alias-edit:focus-visible { opacity: 1; }
 ```
+
+**Corrected by the third audit round, and this is the whole reason the block above
+repeats itself.** The first draft wrote the resting rule at `0,3,0` and every
+override at `0,2,0`. Same origin, lower specificity - so `(hover: none)` never won
+and the dim was permanent on touch, and `:focus-visible` was a silent no-op rescued
+only by `:focus-within` happening to sit later in the file. A rule that exists but
+cannot win is worse than a missing one, because it reads as covered. Every state now
+carries the full chain.
+
+Rest is `0.75`, not the drafted `0.65`. Contrast was never the constraint: at `0.65`
+the glyph measures roughly 6.1:1 in light and 6.3:1 in dark against the card, where
+1.4.11 asks for 3:1. The problem is that `.btn:disabled` is `opacity: 0.55`, so a
+deeper dim reads as *maybe-disabled* rather than secondary.
 
 Three properties of that rule, each load-bearing:
 
@@ -83,6 +96,26 @@ assertions:
 3. A `@media (hover: none)` block restores full opacity.
 4. A `prefers-reduced-motion` block removes the transition.
 
+5. Every emphasis state uses the full `0,3,0` chain, and no bare
+   `.models-alias-edit` rule exists - the assertion that keeps blocker 1 from
+   returning as a "simplification".
+
+## Measured, not argued
+
+A stylesheet cannot prove a cascade. `evidence/wp2-touch.json`, produced by
+`evidence/050-state-harness.ts` against the rendered build:
+
+| state | computed opacity |
+|---|---|
+| rest, pointer parked away | `0.75` |
+| header `:hover` | `1` |
+| `:focus-within` from a sibling switch | `1` |
+| mobile emulation, `matchMedia('(hover: none)')` true | `1` |
+| `prefers-reduced-motion: reduce` | `transitionDuration 0s`, opacity `0.75` |
+
+Note the touch row needs `Emulation.setDeviceMetricsOverride` with `mobile: true`;
+setting `hover` through `setEmulatedMedia` leaves `matchMedia` false and silently
+reports a pass-looking `0.75`.
 Read with `effectiveDeclaration` from `tests/helpers/css-declarations`, which
 already handles duplicate selectors and commented-out values, and each assertion
 driven red against current CSS first.
@@ -99,4 +132,3 @@ refactor breaks them without touching the design:
 - The 720px container query and 768px media query wrap rules stay.
 - The toggle keeps `flex: "1 1 auto"`.
 - The active/total count stays inside `.models-provider-toggle`.
-
