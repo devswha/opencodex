@@ -35,10 +35,10 @@
     "scrollW": 1280,
     "clientW": 1280,
     "hOverflow": false,
-    "spread": 5.4,
+    "spread": 0,
     "worstOvf": -13,
     "zeroW": 0,
-    "maxHeadH": 117.4,
+    "maxHeadH": 117.8,
     "labelText": [
       "기본 별칭 사용",
       "기본 창 / 상한"
@@ -170,7 +170,7 @@
     "scrollW": 1440,
     "clientW": 1440,
     "hOverflow": false,
-    "spread": 63.3,
+    "spread": 60.8,
     "worstOvf": -13,
     "zeroW": 0,
     "maxHeadH": 117.4,

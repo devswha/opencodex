@@ -8,27 +8,30 @@ import { effectiveDeclaration, withoutComments } from "./helpers/css-declaration
  * every switch in the app was, to a sighted user, an unlabeled knob.
  *
  * These are source-text assertions; happy-dom performs no layout. The rendered
- * proof lives in the unit's evidence directory.
+ * behaviour — that the visible label actually toggles the switch — is proven in
+ * gui/tests/switch-labeled-dom.test.tsx, and the geometry proof lives in the
+ * unit's evidence directory.
  */
 
 const read = (p: string) => Bun.file(new URL(p, import.meta.url)).text();
 
-test("Switch can render its label as visible text, and falls back to a title", async () => {
+test("Switch renders its label as visible text inside the control", async () => {
   const ui = await read("../src/ui.tsx");
 
   // The visible-label path exists...
   expect(ui).toContain("showLabel");
-  expect(ui).toContain('className="switch-labeled"');
   expect(ui).toContain("switch-labeled-text");
 
-  // ...and the accessible name is still exactly one name. The visible copy is
-  // aria-hidden, so the control is not announced twice.
-  expect(ui).toMatch(/switch-labeled-text[^>]*aria-hidden="true"/);
-  // A <label> element would compete for the accessible name; a span cannot.
-  expect(ui).not.toMatch(/<label className="switch-labeled"/);
+  // ...and the visible words are the accessible name, not a decorative copy of it.
+  // aria-hidden here would leave the button nameless; aria-label would override the
+  // words and break Label-in-Name.
+  expect(ui).not.toMatch(/switch-labeled-text[^>]*aria-hidden/);
+  expect(ui).toContain("aria-label={labeled ? undefined :");
 
-  // Every bare Switch in the app gains a hover explanation without being touched.
-  expect(ui).toMatch(/title=\{title \?\? \(showLabel \? undefined : label\)\}/);
+  // `title` is strictly opt-in: defaulting it to `label` gave every untouched
+  // Switch in the app an accessible description that merely repeats its name.
+  expect(ui).toContain("title={title}");
+  expect(ui).not.toMatch(/title=\{title \?\? /);
 });
 
 test("a labeled switch stays one atomic flex item", async () => {
@@ -37,9 +40,13 @@ test("a labeled switch stays one atomic flex item", async () => {
   // Without this the knob and its text become two shrinkable items inside
   // .models-provider-actions and the text collapses to a min-content column —
   // the same class of defect 010 fixed for the toggle's children.
-  expect(effectiveDeclaration(css, ".switch-labeled", "flex")).toBe("0 0 auto");
-  expect(effectiveDeclaration(css, ".switch-labeled", "display")).toBe("inline-flex");
+  expect(effectiveDeclaration(css, ".switch.switch-labeled", "flex")).toBe("0 0 auto");
   expect(effectiveDeclaration(css, ".switch-labeled-text", "white-space")).toBe("nowrap");
+
+  // The label lives inside the button, so the pill geometry moves to ::before —
+  // otherwise the text would sit on the coloured track.
+  expect(effectiveDeclaration(css, ".switch.switch-labeled", "width")).toBe("auto");
+  expect(effectiveDeclaration(css, ".switch.switch-labeled::before", "width")).toBe("34px");
 });
 
 test("the three opaque provider-header controls now carry visible meaning", async () => {
@@ -54,7 +61,8 @@ test("the three opaque provider-header controls now carry visible meaning", asyn
 
   // 2. custom-add: a visible text label, not a tooltip. `title` is undiscoverable
   //    on touch, and wrapping it in Tooltip would nest <button> inside <button>.
-  expect(page).toContain('>+ {t("models.customAdd")}</button>');
+  //    The glyph is aria-hidden so the accessible name is the visible words.
+  expect(page).toContain('><span aria-hidden="true">+</span> {t("models.customAdd")}</button>');
 
   // 3. cap switch: the label must name the FUNCTION. It used to be
   //    models.capValue ("기본 128k"), a value masquerading as a name.
@@ -75,4 +83,3 @@ test("no new i18n key was invented: every string used already exists in all loca
     }
   }
 });
-

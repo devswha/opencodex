@@ -12,28 +12,31 @@ import { computeSelectMenuStyle } from "./select-position";
  * user could not tell what they toggled (devlog/_plan/260830_models_provider_header/
  * 020_control_affordances.md).
  *
- * Two opt-in affordances, neither of which changes an existing call site:
- * - `showLabel` renders the label as visible text beside the knob.
- * - otherwise the label becomes a `title`, so every bare `Switch` in the app
- *   gains a hover explanation without being touched.
+ * `showLabel` renders the label as visible text INSIDE the button, so the words
+ * both name the control and toggle it. An earlier revision put that text in an
+ * `aria-hidden` sibling span; the audit caught that clicking the visible label did
+ * nothing, because the hit target stayed the 34x20 knob. Text inside the button is
+ * the element's own content, so it supplies the accessible name on its own and
+ * `aria-label` must be dropped — otherwise `aria-label` would override the visible
+ * words and break Label-in-Name.
+ *
+ * `title` stays strictly opt-in. Defaulting it to `label` was rejected for the same
+ * reason: HTML-AAM maps `title` to the accessible description when
+ * `aria-describedby` is absent, so every untouched bare `Switch` would have been
+ * announced twice with a description that repeats its own name.
  */
 export function Switch({ on, mixed = false, onClick, disabled, label, showLabel = false, title }: { on: boolean; mixed?: boolean; onClick: () => void; disabled?: boolean; label?: string; showLabel?: boolean; title?: string }) {
-  const control = (
-    <button type="button" className={`switch${on ? " on" : ""}${mixed ? " mixed" : ""}`} onClick={onClick} disabled={disabled}
-      aria-pressed={mixed ? "mixed" : on} aria-label={label ?? (on ? "enabled" : "disabled")}
-      title={title ?? (showLabel ? undefined : label)}>
-      <span className="knob" />
-    </button>
-  );
-  if (!showLabel || !label) return control;
-  // A <span> wrapper, NOT a <label>: a <label> would compete for the accessible
-  // name. The button's aria-label stays the single accessible name and the visible
-  // text is aria-hidden, so the control is announced once rather than twice.
+  const labeled = showLabel && !!label;
   return (
-    <span className="switch-labeled">
-      {control}
-      <span className="switch-labeled-text text-label muted" aria-hidden="true">{label}</span>
-    </span>
+    <button type="button"
+      className={`switch${on ? " on" : ""}${mixed ? " mixed" : ""}${labeled ? " switch-labeled" : ""}`}
+      onClick={onClick} disabled={disabled}
+      aria-pressed={mixed ? "mixed" : on}
+      aria-label={labeled ? undefined : (label ?? (on ? "enabled" : "disabled"))}
+      title={title}>
+      <span className="knob" />
+      {labeled ? <span className="switch-labeled-text text-label muted">{label}</span> : null}
+    </button>
   );
 }
 

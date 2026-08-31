@@ -1282,9 +1282,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                    setCustomError("");
                    setCustomModalOpen(true);
                  }}
-                aria-label={t("models.customAdd")}
                 aria-haspopup="dialog"
-              >+ {t("models.customAdd")}</button>
+              ><span aria-hidden="true">+</span> {t("models.customAdd")}</button>
              }
              {(() => {
                // #2465: Preset / All / Custom. Only providers with a shipped preset get the
