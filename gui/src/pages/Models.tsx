@@ -1246,11 +1246,12 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
           </button>
            <div className="row models-provider-actions">
              <button type="button" className="btn btn-ghost btn-sm" aria-label={t("models.editProviderAlias")} title={t("models.editProviderAlias")} onClick={() => void saveProviderAlias(provider)}><IconPencil style={{ width: 14, height: 14 }} /></button>
-             <Switch
-               on={aliases.defaults.providers[provider] ?? aliases.defaults.global}
-               onClick={() => void setDefaultAliases(!(aliases.defaults.providers[provider] ?? aliases.defaults.global), provider)}
-               label={t("models.useDefaultAliases")}
-             />
+            <Switch
+              on={aliases.defaults.providers[provider] ?? aliases.defaults.global}
+              onClick={() => void setDefaultAliases(!(aliases.defaults.providers[provider] ?? aliases.defaults.global), provider)}
+              label={t("models.useDefaultAliases")}
+              showLabel
+            />
              {/* Available on every card, including the native one: the canonical `openai` seed
                  check now admits contextWindow/modelContextWindows as user-owned overlays, and
                  the native accessors only ever narrow the measured window with them. The cap
@@ -1283,7 +1284,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                  }}
                 aria-label={t("models.customAdd")}
                 aria-haspopup="dialog"
-              >+</button>
+              >+ {t("models.customAdd")}</button>
              }
              {(() => {
                // #2465: Preset / All / Custom. Only providers with a shipped preset get the
@@ -1352,7 +1353,12 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
              <button type="button" className="btn btn-ghost btn-sm text-caption" disabled={busy || allOn} onClick={() => bulkToggle(true)}>{t("models.allOn")}</button>
              <button type="button" className="btn btn-ghost btn-sm text-caption" disabled={busy || allOff} onClick={() => bulkToggle(false)}>{t("models.allOff")}</button>
              <>
-               <Switch on={capOn} onClick={() => toggleProviderCap(provider, nativeProviderGroup)} disabled={busy} label={t("models.capValue", { value: fmtK(capDisplayValue) })} />
+               {/* The label names the FUNCTION. It used to be `models.capValue` -
+                   "기본 128k" - which is a value masquerading as a name: even a
+                   screen-reader user was not told this governs the context window.
+                   The number belongs to the adjacent Select, which is where a value
+                   goes (020_control_affordances.md). */}
+               <Switch on={capOn} onClick={() => toggleProviderCap(provider, nativeProviderGroup)} disabled={busy} label={t("models.contextCapLabel")} showLabel />
                {/* The native group keeps the value visible with the cap off: its rows always
                    advertise SOME window, so hiding the number leaves the card saying nothing
                    about the context Codex will actually see. Routed providers keep the old
@@ -1374,6 +1380,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                      onChange={v => onSelectProviderCap(provider, v)}
                      disabled={busy || !capOn}
                      label={t("models.capValue", { value: fmtK(capDisplayValue) })}
+                     title={t("models.contextCapLabel")}
                    />
                    {providerCapCustomOpen[provider] && (
                      <>

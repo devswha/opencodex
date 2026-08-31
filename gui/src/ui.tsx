@@ -5,12 +5,35 @@ import { IconCheck, IconAlert } from "./icons";
 import { IconChevron } from "./icons";
 import { computeSelectMenuStyle } from "./select-position";
 
-export function Switch({ on, mixed = false, onClick, disabled, label }: { on: boolean; mixed?: boolean; onClick: () => void; disabled?: boolean; label?: string }) {
-  return (
+/**
+ * `label` is the accessible name. It is NOT rendered by default, which is correct
+ * for a switch inside an already-labeled row and was also a defect: the two
+ * provider-header switches passed a label and rendered a bare knob, so a sighted
+ * user could not tell what they toggled (devlog/_plan/260830_models_provider_header/
+ * 020_control_affordances.md).
+ *
+ * Two opt-in affordances, neither of which changes an existing call site:
+ * - `showLabel` renders the label as visible text beside the knob.
+ * - otherwise the label becomes a `title`, so every bare `Switch` in the app
+ *   gains a hover explanation without being touched.
+ */
+export function Switch({ on, mixed = false, onClick, disabled, label, showLabel = false, title }: { on: boolean; mixed?: boolean; onClick: () => void; disabled?: boolean; label?: string; showLabel?: boolean; title?: string }) {
+  const control = (
     <button type="button" className={`switch${on ? " on" : ""}${mixed ? " mixed" : ""}`} onClick={onClick} disabled={disabled}
-      aria-pressed={mixed ? "mixed" : on} aria-label={label ?? (on ? "enabled" : "disabled")}>
+      aria-pressed={mixed ? "mixed" : on} aria-label={label ?? (on ? "enabled" : "disabled")}
+      title={title ?? (showLabel ? undefined : label)}>
       <span className="knob" />
     </button>
+  );
+  if (!showLabel || !label) return control;
+  // A <span> wrapper, NOT a <label>: a <label> would compete for the accessible
+  // name. The button's aria-label stays the single accessible name and the visible
+  // text is aria-hidden, so the control is announced once rather than twice.
+  return (
+    <span className="switch-labeled">
+      {control}
+      <span className="switch-labeled-text text-label muted" aria-hidden="true">{label}</span>
+    </span>
   );
 }
 
