@@ -309,6 +309,46 @@
   max-width: 100%;
 }
 
+/* ── Alias-edit emphasis (050) ──
+   The user asked for a hover affordance. Two independent audits rejected the first
+   reading of that — hover that GATES, controls hidden until the pointer arrives —
+   because it deletes the pencil, the alias-defaults switch and custom-add from the
+   default visual inventory and worsens the exact opacity 020 exists to fix. What is
+   left is emphasis on the ONE genuinely secondary control: a provider alias is set
+   once and then left alone.
+
+   Every state below is written at the SAME 0,3,0 specificity as the resting rule.
+   The audit caught the earlier draft writing the overrides at 0,2,0, which meant a
+   (hover: none) device kept the dim forever and :focus-visible was a no-op — the two
+   failures those rules exist to prevent.
+
+   Rest is 0.75, not the drafted 0.65: .btn:disabled is opacity 0.55, so a deeper dim
+   reads as maybe-disabled. Contrast is not the constraint — 0.65 already cleared
+   1.4.11's 3:1 in both themes — legibility of INTENT is. */
+.models-provider-actions .btn-ghost.models-alias-edit {
+  opacity: 0.75;
+  transition: opacity var(--motion-fast);
+}
+.models-provider-head:hover .models-provider-actions .btn-ghost.models-alias-edit,
+.models-provider-head:focus-within .models-provider-actions .btn-ghost.models-alias-edit,
+.models-provider-actions .btn-ghost.models-alias-edit:focus-visible {
+  opacity: 1;
+}
+/* A pointer that cannot hover never triggers the emphasis rule, so the resting dim
+   would be permanent. Full contrast is the resting state there. */
+@media (hover: none) {
+  .models-provider-actions .btn-ghost.models-alias-edit {
+    opacity: 1;
+  }
+}
+/* Reduced motion removes the ANIMATION, never the emphasis: the contrast change is
+   information, the fade is decoration. */
+@media (prefers-reduced-motion: reduce) {
+  .models-provider-actions .btn-ghost.models-alias-edit {
+    transition: none;
+  }
+}
+
 /* ── Spacing rhythm (tight within clusters, loose between sections) ──
    Keep spacing in CSS classes — inline px floods Impeccable’s page scan. */
 

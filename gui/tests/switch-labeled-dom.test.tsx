@@ -23,12 +23,15 @@ let host: HTMLElement;
 
 function mount(node: React.ReactElement) {
   win = new Window({ url: "http://localhost/" });
-  previous = Object.fromEntries(globals.map(k => [k, (globalThis as never as Record<string, unknown>)[k]])) as typeof previous;
-  const g = globalThis as never as Record<string, unknown>;
-  g.document = win.document;
-  g.window = win;
-  g.navigator = win.navigator;
-  g.IS_REACT_ACT_ENVIRONMENT = true;
+  previous = Object.fromEntries(globals.map(k => [k, Reflect.get(globalThis, k)])) as typeof previous;
+  // Plain assignment fails in a whole-suite run: an earlier DOM test leaves
+  // `document` installed as a non-writable global, so only defineProperty works.
+  Object.defineProperties(globalThis, {
+    document: { configurable: true, value: win.document },
+    window: { configurable: true, value: win },
+    navigator: { configurable: true, value: win.navigator },
+    IS_REACT_ACT_ENVIRONMENT: { configurable: true, value: true },
+  });
   host = win.document.createElement("div") as never as HTMLElement;
   win.document.body.appendChild(host as never);
   act(() => { root = createRoot(host); root.render(node); });
@@ -38,8 +41,9 @@ function mount(node: React.ReactElement) {
 afterEach(() => {
   if (root) act(() => root!.unmount());
   root = null;
-  const g = globalThis as never as Record<string, unknown>;
-  for (const k of globals) g[k] = previous?.[k];
+  for (const k of globals) {
+    Object.defineProperty(globalThis, k, { configurable: true, value: previous?.[k] });
+  }
 });
 
 test("clicking the visible label toggles the switch", () => {

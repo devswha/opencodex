@@ -1245,7 +1245,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
           {recentForProvider.length > 0 && <span className="models-chip mono text-caption">{t("models.newCount", { count: recentForProvider.length })}</span>}
           </button>
            <div className="row models-provider-actions">
-             <button type="button" className="btn btn-ghost btn-sm" aria-label={t("models.editProviderAlias")} title={t("models.editProviderAlias")} onClick={() => void saveProviderAlias(provider)}><IconPencil style={{ width: 14, height: 14 }} /></button>
+             <button type="button" className="btn btn-ghost btn-sm models-alias-edit" aria-label={t("models.editProviderAlias")} title={t("models.editProviderAlias")} onClick={() => void saveProviderAlias(provider)}><IconPencil style={{ width: 14, height: 14 }} /></button>
             <Switch
               on={aliases.defaults.providers[provider] ?? aliases.defaults.global}
               onClick={() => void setDefaultAliases(!(aliases.defaults.providers[provider] ?? aliases.defaults.global), provider)}
