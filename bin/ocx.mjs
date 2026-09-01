@@ -9,6 +9,9 @@
  * src/cli/index.ts — only the published npm `bin` routes through here.)
  */
 import { spawn, spawnSync } from "node:child_process";
+import { STOP_HISTORY_INCOMPLETE_EXIT_CODE } from "../src/update/stop-contract.mjs";
+import { probeProxyLiveness } from "../src/update/proxy-liveness-probe.mjs";
+import { decidePostStopUpdate } from "../src/update/stop-decision.mjs";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -17,6 +20,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isRealBunBinary } from "../src/lib/bun-binary-validator.mjs";
 import { npmInvocation } from "../src/update/npm-invocation.mjs";
+import { hasPendingTeardownIn } from "../src/config/pending-teardown-names.mjs";
 import {
   npmCachePreflightFailureMessage,
   runNpmCachePreflight,
@@ -202,7 +206,12 @@ function runNpmSelfUpdate() {
   // Capture listen target before stop clears runtime-port.json (mirrors GUI/CLI update worker).
   // Do not treat a live runtime port of 10100 as "missing" — track whether the read succeeded.
   let bakePort = 10100;
+  // The hostname travels with the port: a proxy bound to ::1 or a specific interface is
+  // invisible to a probe that assumes 127.0.0.1, and "no answer" would then read as
+  // "stopped" for exactly the proxy the probe exists to find.
+  let bakeHostname = "127.0.0.1";
   let sawRuntimePort = false;
+  let sawRuntimeHostname = false;
   try {
     const rt = JSON.parse(readFileSync(join(configDir(), "runtime-port.json"), "utf8"));
     if (Number.isFinite(rt?.port) && rt.port > 0 && rt.port <= 65535) {
@@ -219,16 +228,29 @@ function runNpmSelfUpdate() {
       }
       if (runtimeLive) {
         bakePort = Math.trunc(rt.port);
+        if (typeof rt?.hostname === "string" && rt.hostname.trim() !== "") {
+          bakeHostname = rt.hostname.trim();
+          sawRuntimeHostname = true;
+        }
         sawRuntimePort = true;
       }
     }
   } catch { /* fall through to config */ }
-  if (!sawRuntimePort) {
+  // Port and hostname resolve INDEPENDENTLY: a legacy runtime record carries a port and no
+  // hostname, and skipping config in that case probed 127.0.0.1 for a proxy bound to ::1.
+  if (!sawRuntimePort || bakeHostname === "127.0.0.1") {
     try {
       const cfg = JSON.parse(readFileSync(join(configDir(), "config.json"), "utf8"));
-      if (Number.isFinite(cfg?.port) && cfg.port > 0 && cfg.port <= 65535) bakePort = Math.trunc(cfg.port);
+      if (!sawRuntimePort && Number.isFinite(cfg?.port) && cfg.port > 0 && cfg.port <= 65535) {
+        bakePort = Math.trunc(cfg.port);
+      }
+      if (!sawRuntimeHostname && typeof cfg?.hostname === "string" && cfg.hostname.trim() !== "") {
+        bakeHostname = cfg.hostname.trim();
+      }
     } catch { /* keep default */ }
   }
+  // Wildcard and bracketed-IPv6 normalization lives in probeProxyLiveness, so both lanes
+  // get it from one place.
 
   const launcher = fileURLToPath(import.meta.url);
 
@@ -343,17 +365,47 @@ function runNpmSelfUpdate() {
     }
   }
 
-  if (serviceWasInstalled || hasRuntimeState) {
+  // An outstanding pending-teardown receipt is a fourth reason to run the stop. After a
+  // parent crashed mid-deferral the service, pid and runtime records can all be absent
+  // while the shared client config still points at a proxy that is gone; installing over
+  // that silently skips the recovery the receipt was written to trigger (#3008). Presence
+  // is the whole test here — the launcher cannot parse it, and `ocx stop` is what decides
+  // whether the obligation is safe to finish.
+  const hasPendingTeardown = hasPendingTeardownIn(readdirSync, configDir());
+  if (serviceWasInstalled || hasRuntimeState || hasPendingTeardown) {
     console.log("⏹  Stopping the running proxy before updating...");
     const stopRes = spawnSync(process.execPath, [launcher, "stop"], { stdio: "inherit", windowsHide: true });
     const stillHasRuntimeState =
       existsSync(join(configDir(), "ocx.pid")) || existsSync(join(configDir(), "runtime-port.json"));
-    if (stopRes.status !== 0 || stillHasRuntimeState) {
+    // A history-only failure means teardown succeeded and a backup manifest is waiting for
+    // review: the proxy is down and replacing package files is safe. Every other nonzero
+    // status is a stop that did not finish, and a signal kill (status null) says nothing
+    // about whether it did - both abort, because replacing files under a live server
+    // leaves it running mixed old and new modules (#3008).
+    // The same decision the Bun updater makes, from the same module (#3008). Absent PID and
+    // runtime files are weak evidence, so the captured endpoint is asked; "unknown" aborts
+    // because a silent listener is exactly the state where replacing files is dangerous.
+    const decision = decidePostStopUpdate({
+      status: stopRes.status,
+      hasRuntimeState: stillHasRuntimeState,
+      // Re-checked AFTER the stop: a quarantined receipt lets the stop itself succeed
+      // (there is nothing left to stop), so a pre-stop check alone let the retry install
+      // over a teardown that never ran.
+      teardownOutstanding: hasPendingTeardownIn(readdirSync, configDir()),
+      liveness: probeProxyLiveness(bakePort, bakeHostname),
+    });
+    const historyOnlyStop = decision.reason === "history-only";
+    if (!decision.proceed) {
       if (trayBeforeUpdate.restoreOnFailure) runTrayLifecycle(launcher, "start");
-      console.error("opencodex: could not stop the running proxy; aborting the update. Run 'ocx stop' and retry.");
+      if (decision.reason === "teardown-outstanding") {
+        console.error("opencodex: a shared teardown from an earlier stop is still outstanding and needs manual review; aborting the update.");
+        console.error("opencodex: confirm no proxy is running, run 'ocx restore', then remove the pending-teardown file in the opencodex home.");
+      } else console.error(decision.reason === "proxy-unknown"
+        ? `opencodex: could not confirm the proxy on ${bakeHostname}:${bakePort} is stopped; aborting the update. Run 'ocx stop' and retry.`
+        : "opencodex: could not stop the running proxy; aborting the update. Run 'ocx stop' and retry.");
       process.exit(1);
     }
-    if (historyRestoreIncomplete()) {
+    if (historyOnlyStop || historyRestoreIncomplete()) {
       console.warn(
         "opencodex: WARNING — Codex resume-history metadata restore is incomplete (a backup manifest remains).\n" +
         "  The DB may be busy or the manifest/target may need review; untracked routed history is intentionally unchanged.\n" +

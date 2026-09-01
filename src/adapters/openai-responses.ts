@@ -237,6 +237,30 @@ function stripCanonicalOnlyToolFields(body: unknown, includeCapabilityGated: boo
 }
 
 /**
+ * Codex keeps this ChatGPT-internal item metadata when its configured provider name is `openai`.
+ * Loopback OpenCodex injection intentionally retains that provider identity for history continuity,
+ * even when the proxy ultimately routes the request to a public Responses destination. Those
+ * destinations reject the private field as an unknown `input[*]` parameter, so remove it at the
+ * noncanonical boundary without mutating the caller-owned raw body.
+ */
+function stripInternalChatMessageMetadataPassthrough(body: unknown): unknown {
+  if (!isPlainObject(body) || !Array.isArray(body.input)) return body;
+
+  let changed = false;
+  const input = body.input.map(item => {
+    if (!isPlainObject(item) || !Object.hasOwn(item, "internal_chat_message_metadata_passthrough")) {
+      return item;
+    }
+    changed = true;
+    const next = { ...item };
+    delete next.internal_chat_message_metadata_passthrough;
+    return next;
+  });
+
+  return changed ? { ...body, input } : body;
+}
+
+/**
  * When `store` is false, the upstream API does not persist response items. Any item ID
  * forwarded in `input` is then interpreted as a reference to a stored item that does not
  * exist, producing a 404. Strip all item IDs in this case — `call_id` pairing is unaffected.
@@ -901,13 +925,23 @@ function annotateEmptyResponsesToolOutputs(body: unknown, enabled: boolean): unk
  * Runs on every forward request; with intact pairs it returns the original reference.
  */
 /**
- * Backfill `queries` on a replayed single-query `web_search_call`.
+ * Repair a replayed `web_search_call` action that is missing either key.
  *
  * `webSearchAction()` in the bridge now emits both keys, but that only helps items
  * created after the fix. A conversation that already recorded
- * `{type:"search", query:"..."}` replays that stored item on every subsequent turn, and
- * DeepSeek's native Responses parser requires `queries` — so upgrading alone leaves
- * those threads permanently 400ing with `missing field 'queries'` (#930).
+ * `{type:"search", query:"..."}` or `{type:"search", queries:[...]}` replays that stored
+ * item on every subsequent turn. DeepSeek's native Responses parser requires `queries`
+ * (#930) and Console Go's validator requires `query` (#3071), so upgrading alone leaves
+ * those threads permanently 400ing in one direction or the other. The repair runs both
+ * ways.
+ *
+ * Input items carry a loose schema, so a stored `queries` is not necessarily an array of
+ * strings. A partly- or wholly-malformed array is left alone rather than used as a source
+ * for the singular field: writing `query: 123` would satisfy the presence check and still
+ * fail the validator this repair exists to satisfy, and deriving `query` from
+ * `["a", 42]` would satisfy Console Go while leaving DeepSeek to reject the same replay.
+ * An empty `queries: []` canonicalizes to the shape the bridge emits for an empty search,
+ * keeping an existing `query` when the item has one.
  *
  * Runs on every Responses request, on both `input` items and the `action` nested inside
  * them. Returns the original reference when nothing needs repair, so the common path
@@ -920,9 +954,35 @@ function backfillWebSearchQueries(body: unknown): unknown {
     if (!isPlainObject(item) || item.type !== "web_search_call") return item;
     const action = item.action;
     if (!isPlainObject(action) || action.type !== "search") return item;
-    if (typeof action.query !== "string" || Array.isArray(action.queries)) return item;
-    changed = true;
-    return { ...item, action: { ...action, queries: [action.query] } };
+    // Repair whichever side is missing so both strict parsers pass:
+    // DeepSeek native Responses requires `queries`; Console Go requires `query`.
+    const rep: Record<string, unknown> = { ...action };
+    let itemChanged = false;
+    const hasQuery = typeof action.query === "string";
+    const queries = Array.isArray(action.queries) ? action.queries : undefined;
+    if (queries !== undefined && queries.length === 0) {
+      // An empty array satisfies neither validator. Canonicalize to the empty-search
+      // shape the bridge emits, keeping an existing query rather than discarding it.
+      const query = hasQuery ? action.query as string : "";
+      rep.query = query;
+      rep.queries = [query];
+      itemChanged = true;
+    } else if (!hasQuery && queries !== undefined) {
+      // A plural array is only a usable source for the singular field when EVERY member
+      // is a string: deriving `query` from a partly-malformed array would satisfy Console
+      // Go while leaving DeepSeek to reject the same replay. Wholly malformed arrays are
+      // left untouched — coercing or dropping members would invent semantics the stored
+      // item never had.
+      if (queries.every(entry => typeof entry === "string")) {
+        rep.query = queries[0];            // multi-query item recorded before the fix
+        itemChanged = true;
+      }
+    } else if (hasQuery && queries === undefined) {
+      rep.queries = [action.query];        // single-query item recorded before the fix
+      itemChanged = true;
+    }
+    if (itemChanged) changed = true;
+    return itemChanged ? { ...item, action: rep } : item;
   });
   return changed ? { ...body, input } : body;
 }
@@ -2097,11 +2157,13 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         outBody = repairOversizedReplayCallIds(outBody);
       }
       outBody = stripUnsupportedReasoningSummaryDelivery(outBody, parsed.modelId);
-      // Repair stored history from before the bridge emitted both keys: a conversation
-      // that already recorded a single-query web_search_call replays it every turn, and
-      // a strict parser rejects the whole request over it (#930).
+      // Repair stored history from before the bridge emitted both keys, in either
+      // direction: a conversation that already recorded a web_search_call replays it
+      // every turn, and a strict parser rejects the whole request over the missing key —
+      // `queries` for DeepSeek (#930), `query` for Console Go (#3071).
       outBody = backfillWebSearchQueries(outBody);
       if (!isCanonicalOpenAiForwardProvider(provider)) {
+        outBody = stripInternalChatMessageMetadataPassthrough(outBody);
         outBody = promoteClientLoadedTools(outBody);
       }
       if (!isCanonicalOpenAiForwardProvider(provider)) {

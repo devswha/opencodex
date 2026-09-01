@@ -47,6 +47,7 @@ import {
   updateAccountQuota,
 } from "../src/codex/auth-api";
 import { CODEX_UNKNOWN_USAGE_SCORE, isCodexQuotaExhausted } from "../src/codex/quota";
+import { setCodexAccountPriority } from "../src/codex/account-priority";
 import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/main-account";
 import { routeModel } from "../src/router";
 import { consumeForInspection } from "../src/server/relay";
@@ -136,6 +137,98 @@ describe("codex routing", () => {
     // Once a governing window is known, the burst still wins when it is hotter.
     expect(computeCodexUsageScore({ weeklyPercent: 1, shortPercent: 100 })).toBe(100);
     expect(computeCodexUsageScore({ weeklyPercent: 40, shortPercent: 0 })).toBe(40);
+  });
+
+  test("a full burst window scores terminal while it is still in force (#3029)", () => {
+    // A FULL short window is not an optimistic guess about an unobserved long window - it
+    // is a direct observation that the account cannot serve a request right now. Leaving it
+    // unknown keeps the account selectable and suppresses auto-switch, which is exactly the
+    // pool wedge #3029 reports.
+    const now = 1_700_000_000_000;
+    expect(computeCodexUsageScore({ shortPercent: 100, shortResetAt: now + 60_000 }, undefined, now)).toBe(100);
+
+    // Freshness is the other half. getAccountQuota performs no expiry check, partial
+    // updates carry the old short tuple forward, and disk hydration accepts a persisted
+    // reading for hours - so a reset window must go back to unknown, or #3029 is simply
+    // inverted into a recovered account that stays excluded.
+    expect(computeCodexUsageScore({ shortPercent: 100, shortResetAt: now - 60_000 }, undefined, now))
+      .toBe(CODEX_UNKNOWN_USAGE_SCORE);
+    // No resetAt at all cannot be aged, so it stays unknown: a wrongly-selected account
+    // fails one request, a wrongly-excluded one is invisible until someone reads the pool.
+    expect(computeCodexUsageScore({ shortPercent: 100 }, undefined, now)).toBe(CODEX_UNKNOWN_USAGE_SCORE);
+    // Still narrow: a non-terminal short-only reading is unchanged.
+    expect(computeCodexUsageScore({ shortPercent: 99, shortResetAt: now + 60_000 }, undefined, now))
+      .toBe(CODEX_UNKNOWN_USAGE_SCORE);
+  });
+
+  test("a terminal burst window is read in either unit (#3029)", () => {
+    // normalizeResetAt does not scale, and the GUI disambiguates by magnitude at read time,
+    // so both seconds and milliseconds reach storage. A comparison written against one
+    // assumption is off by 1000x against the other - and in the seconds-read-as-ms
+    // direction every terminal reading looks like it reset in 1970, which is a fix that
+    // passes its own test and does nothing.
+    const now = 1_700_000_000_000;
+    expect(computeCodexUsageScore({ shortPercent: 100, shortResetAt: now + 60_000 }, undefined, now)).toBe(100);
+    expect(computeCodexUsageScore({ shortPercent: 100, shortResetAt: (now + 60_000) / 1000 }, undefined, now)).toBe(100);
+  });
+
+  test("a live full burst window moves selection off the account (#3029)", () => {
+    // The scorer assertions above prove the value; this proves the pool acts on it. A
+    // clock far from wall time is the point: a fixture whose now matches Date.now() cannot
+    // tell a threaded clock from one that was dropped somewhere in the helper chain.
+    const now = 1_700_000_000_000;
+    const config = makeConfig({ activeCodexAccountId: "a" });
+
+    // A is full for the next hour, recorded in SECONDS. B has ordinary headroom.
+    setAccountQuotaFromParsed("a", { shortPercent: 100, shortResetAt: (now + 3_600_000) / 1000 });
+    updateAccountQuota("b", 10);
+    expect(resolveCodexAccountForThread("thread-terminal-new", config, now)).toBe("b");
+
+    // Same pool, but a thread already BOUND to A. Bind it while A is cool, so the rebind
+    // below is a real transition rather than a first selection that happened to pick B.
+    clearAccountQuota("a");
+    clearAccountQuota("b");
+    updateAccountQuota("a", 10);
+    updateAccountQuota("b", 20);
+    const bound = makeConfig({ activeCodexAccountId: "a" });
+    expect(resolveCodexAccountForThread("thread-terminal-bound", bound, now)).toBe("a");
+    // A's burst window fills, in MILLISECONDS this time so both units run through the real
+    // selection path. The bound thread must move rather than keep an account that cannot
+    // serve it.
+    clearAccountQuota("a");
+    setAccountQuotaFromParsed("a", { shortPercent: 100, shortResetAt: now + 3_600_000 });
+    expect(resolveCodexAccountForThread("thread-terminal-bound", bound, now)).toBe("b");
+
+    // And once the window resets, A stays selected. B carries KNOWN headroom here on
+    // purpose: with both accounts unknown, A would be kept by default and the assertion
+    // would hold even against a freshness-blind scorer. Against one, expired-A scores 100
+    // and the request moves to B.
+    clearAccountQuota("a");
+    clearAccountQuota("b");
+    setAccountQuotaFromParsed("a", { shortPercent: 100, shortResetAt: now - 60_000 });
+    updateAccountQuota("b", 20);
+    const recovered = makeConfig({ activeCodexAccountId: "a" });
+    expect(resolveCodexAccountForThread("thread-terminal-recovered", recovered, now)).toBe("a");
+  });
+
+  test("the priority tier reads the request clock, not wall time (#3029)", () => {
+    // selectPriorityTier consults hasCodexQuotaHeadroom only when the pool carries
+    // DIFFERENT priorities, so a clock dropped in that lambda is invisible to an ordinary
+    // pool. Higher numbers run earlier, so A (2) outranks B (1).
+    //
+    // The clock is historical, well before wall time. A's window is full for an hour after
+    // THAT instant, so it is live against the request clock and long expired against
+    // Date.now(). With the correct clock the tier sees A drained and descends to B; reading
+    // wall time makes A look unknown, the tier keeps it, and fill-first hands back A.
+    const now = 1_700_000_000_000;
+    const config = makeConfig({ activeCodexAccountId: "a", accountPoolStrategy: "fill-first" });
+    setCodexAccountPriority(config, "a", 2);
+    setCodexAccountPriority(config, "b", 1);
+
+    setAccountQuotaFromParsed("a", { shortPercent: 100, shortResetAt: now + 3_600_000 });
+    updateAccountQuota("b", 20);
+
+    expect(resolveCodexAccountForThread("thread-priority-terminal", config, now)).toBe("b");
   });
 
   test("exact-account failures record health without rotating the active Pool account", () => {

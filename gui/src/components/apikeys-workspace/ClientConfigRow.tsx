@@ -7,7 +7,8 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { useT } from "../../i18n/shared";
-import { CLIENT_LABEL_KEYS, CLIENT_MARKS, MONOCHROME_CLIENT_MARKS, type ClientConfigEnvelope, type ExportClientId } from "./client-config-clients";
+import ClientMark from "../ClientMark";
+import { CLIENT_LABEL_KEYS, CLIENT_MARKS, type ClientConfigEnvelope, type ExportClientId } from "./client-config-clients";
 
 export default function ClientConfigRow({
   client,
@@ -77,7 +78,6 @@ export default function ClientConfigRow({
 
   const label = t(CLIENT_LABEL_KEYS[client]);
   const mark = CLIENT_MARKS[client];
-  const monochrome = MONOCHROME_CLIENT_MARKS.has(client);
   // The server renders the client's own format; re-serializing as JSON here
   // would hand a TOML or YAML client bytes its parser cannot read.
   const json = data?.text ?? "";
@@ -88,12 +88,14 @@ export default function ClientConfigRow({
 
   return (
     <li className="awi-clientconfig-row">
-      <span className="awi-clientconfig-mark" aria-hidden="true">
-        {mark
-          ? monochrome
-            ? <span className="awi-clientconfig-mark-mask" style={{ maskImage: `url(${mark})`, WebkitMaskImage: `url(${mark})` }} />
-            : <img src={mark} alt="" width={20} height={20} />
-          : <span className="awi-clientconfig-monogram">{label.slice(0, 1)}</span>}
+      {/*
+        The img-versus-mask decision moved to ClientMark, which four surfaces now
+        share. It was inline here while this was the only surface drawing marks;
+        four copies of a ternary whose wrong branch renders nothing is how the
+        invisible-logo bug would come back.
+      */}
+      <span className="awi-clientconfig-mark">
+        <ClientMark src={mark ?? null} label={label} size={20} />
       </span>
 
       <span className="awi-clientconfig-identity">

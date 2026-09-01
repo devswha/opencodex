@@ -7,8 +7,10 @@ this train, so suite receipts name `lidge`.
 ## wp0 — roadmap (docs-only)
 
 - Status: closing.
-- Deliverable: 12 docs — `000` plan, `001`-`003` research, `004`-`006` audit
-  syntheses, `010`/`020`/`030`/`040`/`050` decade docs, `070` receipts.
+- Deliverable at the time wp0 closed: 12 docs — `000` plan, `001`-`003` research,
+  `004`-`006` audit syntheses, `010`/`020`/`030`/`040`/`050` decade docs, `070`
+  receipts. The unit now holds **14**: audit rounds 4-8 added `007`-`009`, and wp2's
+  implementation split out as `060`.
 - Branch: `codex/prio70-train-260831` at `903243d04`.
 - Research: three read-only `gpt-5.6-sol` high-effort lanes. Every load-bearing
   claim was re-verified in-tree by the main session before it entered a doc.
@@ -143,10 +145,11 @@ a warm roster and all carry the gated rows. #3023 is about what happens once
 the warm path is intact and the wp6 work is scoped to expiry, not to the rows
 themselves.
 
-## wp3 — LANDED (pending merge of PR #3044)
+## wp3 — LANDED
 
 #3011 fixed by carrying Ingwannu's `aec717722` and closing the shutdown boundary it
-opened. His commit is the base of the branch, unmodified and credited.
+opened. His commit is the base of the branch, unmodified and credited. PR #3044 is
+merged into `dev` as `e5d588669`.
 
 Five review rounds, each returning FAIL until the last, and every finding was a real
 defect rather than a style note. Worth recording as a sequence, because each fix
@@ -191,3 +194,57 @@ rather than by editing the version by hand.
 
 Residual risk: a real Windows host is still needed for NTFS unlink semantics and
 `icacls` timeout behaviour while a path is held.
+
+## wp6 / wp5 / wp4 — the entitlement stack (landed 260831)
+
+Three phases landed as a dependency-ordered stack on top of the spill work.
+
+**wp6 (#3054, `0844dc9a9`) closed #3023.** A credential mutation epoch binds an
+entitlement snapshot to the credential state that produced it; a read is a hit
+only when both epoch and expiry still match. Steady state stays free: 0 extra
+credential snapshots, 0 token refreshes, 0 network calls on the ~24/min polling
+path.
+
+The review round that mattered was the second one. The first submission's two
+race regressions returned *usable* credentials, so they never reached the
+negative-memo publication fence at all — **deleting the epoch and identity fences
+left both tests green.** A third test could not distinguish absence-observation
+time from settlement time. The implementation was correct; the tests guarding its
+riskiest lines were worthless. Three replacements were driven red by removing
+each fence in turn, and the reviewer reproduced every red independently rather
+than trusting the report.
+
+**wp5 (#3057) removes the #3022 class, not its instance.** wp1 fixed the current
+failure by asking under a measured `0.144.0`. wp5 makes absence evidence only
+when the question was capable of producing an answer: below-minimum omission is
+`unknown` on the 15s failure TTL, at-or-above omission is `denied`, a present row
+is `granted` regardless of version, and `gpt-daybreak-blue-latest` — which has no
+row in `upstream-models.json` — keeps omission-as-denial rather than being handed
+a guessed minimum. Projections still return only `granted`; that is what keeps
+the gate fail-closed. One widening bug surfaced during implementation (an
+unconfirmed present row briefly read as `granted`) and the guard test now pins it.
+
+**wp4 (#3058) answers the part of #3023 that was never about rows.** The reporter
+saw `discovery: {"status":"ok"}` beside missing models and read it as the proxy
+lying. It was answering a different question, and nothing reported entitlement
+freshness at all. Provenance had to come first: the parsed-empty path and the
+catch path produced byte-identical cache entries, so reporting them as two states
+would have been the same fabrication in a new field.
+
+### Two CI defects found along the way
+
+Neither was ours, and both were real.
+
+`shutdown cleanup failure still persists unrelated response state` used a real
+80ms wall-clock fallback reserve. Drain expiry is forced by an `icacls` gate and
+is deterministic; the reserve was not. Under load it expired first, terminalizing
+the unrelated response into a `spill-failed` tombstone. Measured on Linux at
+`origin/dev`: eight parallel runs of that single test spanned **2.08s to 109.38s**,
+and a six-way run reproduced the failure 1-in-6. Fixed in #3055 by sizing the
+reserve so it can never be the thing that runs out; 10/10 parallel runs pass
+afterwards, the longest at 45.51s.
+
+`Unix install rejects delayed detached redispatch` failed once on macOS CI and
+passed on rerun and on three local macOS runs. It pairs a 1500ms observation
+window with a fixed `time.sleep(0.5)` in a forked child, which is thin on a slow
+runner. Recorded rather than fixed: it has not reproduced.

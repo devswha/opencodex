@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyNativeVisibility, augmentRoutedModelsWithMetadata, augmentRoutedModelsWithRegistryOpenAiApiRows, buildCatalogEntries, buildComboCatalogOmission, catalogModelSlug, clampCatalogModelsToCodexSupport, clampEntryToCodexSupportedEfforts, clampedDefaultEffort, CODEX_ACCOUNT_BOUND_CATALOG_KIND, CODEX_NATIVE_ALIAS_CATALOG_KIND, comboCatalogOmissionReason, deriveComboCatalogModel, exactComboCatalogSlugs, filterCatalogVisibleModels, filterSupportedNativeSlugs, gatherRoutedModels as gatherRoutedModelsDirect, isDatedVariantId, isMediaGenerationModelId, loadBundledCodexCatalog, materializeBundledCodexCatalog, mergeCatalogEntriesForSync, NATIVE_DAYBREAK_BLUE_MODEL, NATIVE_OPENAI_MODELS, nativeDefaultReasoningEffort, nativeInputModalities, nativeOpenAiCapabilitySourceSlug, nativeOpenAiContextWindow, nativeReasoningEfforts, normalizeRoutedCatalogEntry, resetCatalogRuntimeStateForTests, resetOpenAiApiCatalogWarningStateForTests, resolveComboCatalogMember, shouldExposeRoutedModel, upstreamNativeEntry } from "../src/codex/catalog";
-import { applyProviderConfigHints } from "../src/codex/catalog/provider-fetch";
+import { applyProviderConfigHints, mergeConfiguredModelsIntoLiveCatalog } from "../src/codex/catalog/provider-fetch";
 import {
   CODEX_CUSTOM_MODEL_CATALOG_KIND,
   CODEX_PROVIDER_MODEL_CATALOG_KIND,
@@ -1061,7 +1061,9 @@ describe("combo catalog capability intersection", () => {
           liveModels: false,
           models: ["m2"],
           modelContextWindows: { m2: 128_000 },
-          modelInputModalities: { m2: ["text"] },
+          // No declaration: text-only by catalog default, NOT sidecar-covered. A declared
+          // text-only member would widen to image (isModelTextOnly parity) and the pair
+          // would no longer be disjoint.
         },
       },
       combos: {
@@ -1202,7 +1204,9 @@ describe("combo catalog capability intersection", () => {
       contextWindow: 128_000,
       contextCapped: false,
       maxInputTokens: 100_000,
-      inputModalities: ["text"],
+      // The text-only modelInputModalities declaration is sidecar-covered at runtime
+      // (isModelTextOnly), so the combo advertises image input like its member does.
+      inputModalities: ["text", "image"],
       reasoningEfforts: ["high"],
     });
     expect(rows.find(row => row.provider === "combo" && row.id === "nova-sol"))
@@ -1515,7 +1519,7 @@ describe("combo catalog capability intersection", () => {
           liveModels: false,
           models: ["m1"],
           modelContextWindows: { m1: 128_000 },
-          // Disjoint modalities with b → empty intersection (incompatible_modalities).
+          // Image-only member. An image-only declaration is not sidecar-covered.
           modelInputModalities: { m1: ["image"] },
         },
         b: {
@@ -1524,7 +1528,10 @@ describe("combo catalog capability intersection", () => {
           liveModels: false,
           models: ["m2"],
           modelContextWindows: { m2: 128_000 },
-          modelInputModalities: { m2: ["audio"] },
+          // No modality declaration: the member is text-only by catalog default and the
+          // sidecar does not cover it, so text and image stay genuinely disjoint
+          // (incompatible_modalities). A DECLARED text-only member would be widened to
+          // image (isModelTextOnly parity) and no longer be disjoint.
         },
       },
       combos: {
@@ -3651,12 +3658,109 @@ describe("Codex catalog routed normalization", () => {
     }
   });
 
-  test("isDatedVariantId matches only <alias>-YYYYMMDD", () => {
+  test("isDatedVariantId matches only <alias>-<date>", () => {
     expect(isDatedVariantId("claude-haiku-4-5-20251001", "claude-haiku-4-5")).toBe(true);
     expect(isDatedVariantId("claude-haiku-4-5-2025", "claude-haiku-4-5")).toBe(false);
     expect(isDatedVariantId("claude-haiku-4-5-latest", "claude-haiku-4-5")).toBe(false);
     expect(isDatedVariantId("claude-haiku-4-5", "claude-haiku-4-5")).toBe(false);
     expect(isDatedVariantId("claude-haiku-4-5-20251001", "claude-haiku-4")).toBe(false);
+  });
+
+  // Real ids from a multi-provider install. A `\d{8}`-only rule matched none of them, so
+  // every one of these aliases dropped out of the authoritative live catalog (#3024).
+  test.each([
+    ["YYYYMMDD", "claude-haiku-4-5-20251001", "claude-haiku-4-5"],
+    ["YYYYMMDD leap day", "acme-model-20240229", "acme-model"],
+    ["YYMMDD", "solar-pro4-260806", "solar-pro4"],
+    ["YYMMDD", "syn-pro-251021", "syn-pro"],
+    ["YYMMDD leap day", "acme-model-240229", "acme-model"],
+    ["MMDD", "deepseek/deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro"],
+    ["MMDD", "moonshotai/kimi-k2-0905", "moonshotai/kimi-k2"],
+    ["MMDD", "openai/gpt-3.5-turbo-0613", "openai/gpt-3.5-turbo"],
+    ["MMDD leap day", "acme-model-0229", "acme-model"],
+    ["YYMM", "mistralai/mistral-large-2407", "mistralai/mistral-large"],
+    ["YYMM", "qwen/qwen3-235b-a22b-2507", "qwen/qwen3-235b-a22b"],
+  ])("folds a %s dated variant: %s", (_format, liveId, configuredId) => {
+    expect(isDatedVariantId(liveId, configuredId)).toBe(true);
+  });
+
+  test.each([
+    ["a version number", "mistralai/mistral-medium-3-5", "mistralai/mistral-medium-3"],
+    ["a context size", "openai/gpt-3.5-turbo-16k", "openai/gpt-3.5-turbo"],
+    ["a variant name", "qwen/qwen3-coder-30b-a3b-instruct", "qwen/qwen3-coder"],
+    ["a batch lane of a dated id", "deepseek/deepseek-v4-pro-0813:batch", "deepseek/deepseek-v4-pro"],
+    ["a bare year", "acme-model-2025", "acme-model"],
+    ["an impossible YYMM", "acme-model-1301", "acme-model"],
+    ["a non-leap YYYYMMDD", "acme-model-20250229", "acme-model"],
+    ["a non-leap YYMMDD", "acme-model-250229", "acme-model"],
+    ["an impossible YYYYMMDD month-end", "acme-model-20240431", "acme-model"],
+    ["an impossible YYMMDD month-end", "acme-model-240431", "acme-model"],
+    ["an impossible MMDD month-end", "acme-model-0431", "acme-model"],
+    // Hyphenated ISO is ambiguous against ordinary name segments; out of scope for now.
+    ["a hyphenated ISO date", "openai/gpt-4o-2024-08-06", "openai/gpt-4o"],
+    ["a hyphenated MM-DD", "google/gemini-2.5-pro-preview-05-06", "google/gemini-2.5-pro-preview"],
+  ])("does not fold %s: %s", (_label, liveId, configuredId) => {
+    expect(isDatedVariantId(liveId, configuredId)).toBe(false);
+  });
+
+  test.each(["2048", "4096", "8192"])("a %s context suffix is not a date", suffix => {
+    expect(isDatedVariantId(`acme-model-${suffix}`, "acme-model")).toBe(false);
+  });
+
+  // Known, accepted cost of allowing MMDD: October 24th is a real date, so a `-1024`
+  // context suffix is indistinguishable from one. No month/day tightening can exclude it.
+  test("a -1024 suffix reads as MMDD and is accepted", () => {
+    expect(isDatedVariantId("acme-model-1024", "acme-model")).toBe(true);
+  });
+
+  // The fold stays one-directional: a configured id the provider no longer lists must not
+  // be retained on the strength of a format match alone (#1690 is the explicit opt-in for
+  // that). `deepseek-v4-pro-0813` configured against a live `deepseek-v4-pro` stays dropped.
+  test("does not fold configured=dated against live=base", () => {
+    expect(isDatedVariantId("deepseek-v4-pro", "deepseek-v4-pro-0813")).toBe(false);
+  });
+
+  // The predicate test above is necessary and not sufficient: it passes on any
+  // implementation, including one whose MERGE LOOP calls the predicate a second time with
+  // the arguments swapped. These three drive `mergeConfiguredModelsIntoLiveCatalog` itself,
+  // so they fail if the loop ever becomes bidirectional. Carried from #3041, where the
+  // reverse fold was proposed and then withdrawn — the guard outlives the proposal.
+  test("the merge loop does not infer a configured dated id from a live base id", () => {
+    const { models, droppedConfiguredIds } = mergeConfiguredModelsIntoLiveCatalog({
+      name: "deepseek",
+      provider: {},
+      models: [{ id: "deepseek-v4-pro" } as never],
+      configured: [{ id: "deepseek-v4-pro-0813" } as never],
+    });
+    expect(droppedConfiguredIds).toEqual(["deepseek-v4-pro-0813"]);
+    expect(models.map(m => m.id)).not.toContain("deepseek-v4-pro-0813");
+  });
+
+  test("the merge loop folds a live MMDD dated row onto its configured base", () => {
+    const { models, droppedConfiguredIds } = mergeConfiguredModelsIntoLiveCatalog({
+      name: "deepseek",
+      provider: {},
+      models: [{ id: "deepseek-v4-pro-0813" } as never],
+      configured: [{ id: "deepseek-v4-pro" } as never],
+    });
+    expect(droppedConfiguredIds).toEqual([]);
+    expect(models.map(m => m.id)).toContain("deepseek-v4-pro");
+  });
+
+  // Retention of a dated id is a decision someone made, not an inference from a name.
+  // Note what this set actually is: production fills `retainConfiguredModelIds` from combo
+  // targets, not from `providers.*.models`, so this pins the combo-target path (OCX-111).
+  // The operator-facing opt-in is #1690's `retainModels`, which does not exist yet.
+  test("a dated id named in retainConfiguredModelIds survives the drop", () => {
+    const { models, droppedConfiguredIds } = mergeConfiguredModelsIntoLiveCatalog({
+      name: "deepseek",
+      provider: {},
+      models: [{ id: "deepseek-v4-pro" } as never],
+      configured: [{ id: "deepseek-v4-pro-0813" } as never],
+      retainConfiguredModelIds: new Set(["deepseek-v4-pro-0813"]),
+    });
+    expect(droppedConfiguredIds).toEqual([]);
+    expect(models.map(m => m.id)).toContain("deepseek-v4-pro-0813");
   });
 
   test("disabled providers are excluded from routed model gathering", async () => {
@@ -5335,7 +5439,9 @@ describe("Codex catalog routed normalization", () => {
     expect(models.find(m => m.id === "wide-model")).toMatchObject({
       contextWindow: 100_000,
       maxInputTokens: 100_000,
-      inputModalities: ["text"],
+      // Declared text-only modalities are sidecar-covered at runtime (isModelTextOnly),
+      // so the catalog advertises image on top of the configured base.
+      inputModalities: ["text", "image"],
     });
     expect(models.find(m => m.id === "small-model")?.contextWindow).toBe(64_000);
   });

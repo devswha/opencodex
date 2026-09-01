@@ -1,0 +1,4 @@
+{
+  "perCard": "[{\"card\":\"openaiOpenAI native3/7\",\"capOn\":\"true\",\"hasSelect\":true,\"selectDisabled\":false},{\"card\":\"anthropic3/11 visible\",\"capOn\":\"false\",\"hasSelect\":true,\"selectDisabled\":true},{\"card\":\"cursor4/38 visible1 ne\",\"capOn\":\"false\",\"hasSelect\":true,\"selectDisabled\":true},{\"card\":\"google-antigravity2/6 \",\"capOn\":\"false\",\"hasSelect\":true,\"selectDisabled\":true},{\"card\":\"opencode-free1/8 visib\",\"capOn\":\"false\",\"hasSelect\":true,\"selectDisabled\":true},{\"card\":\"woongDiscovery failed0\",\"capOn\":\"false\",\"hasSelect\":true,\"selectDisabled\":true},{\"card\":\"xai1/8 visible1 new, o\",\"capOn\":\"false\",\"hasSelect\":true,\"selectDisabled\":true}]",
+  "clusterTabStops": "[\"Default window / cap\",\"Default 1.05M\",\"Custom windows\"]"
+}

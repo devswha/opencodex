@@ -2998,6 +2998,22 @@ export function stopWindows(): void {
     if (isWindowsSchedulerEndBenign(error)) return;
   }
 }
+
+/**
+ * `stopWindows` for callers that need to know whether it worked.
+ *
+ * The void form swallows a non-benign `/end` failure, which is right for best-effort
+ * teardown and wrong for deciding whether an update may replace files: a scheduler that
+ * refused to stop can respawn the proxy on top of a half-written install (#3008).
+ */
+export function stopWindowsChecked(): boolean {
+  try {
+    schtasks(["/end", "/tn", TASK]);
+    return true;
+  } catch (error) {
+    return isWindowsSchedulerEndBenign(error);
+  }
+}
 function statusWindows(): string { try { return schtasks(["/query", "/tn", TASK]); } catch { return ""; } }
 function statusWindowsXml(): string { try { return schtasks(["/query", "/tn", TASK, "/xml"]); } catch { return ""; } }
 
@@ -3604,36 +3620,129 @@ export async function installFreshWindowsSchedulerSafely(
   }
 }
 
+// `stopServiceIfInstalled` (boolean) is deliberately gone. It collapsed "not installed",
+// "refused to stop" and "state could not be read" into the same `false`, and every caller
+// that trusted it eventually read a live manager as absence — the route, then uninstall
+// (#3008). Callers take `stopServiceIfInstalledDetailed` and handle the outcomes.
 /**
- * If a service is installed, stop it so the process manager doesn't respawn after `ocx stop`.
- * Returns true if a service was found and stopped.
+ * Would stopping the installed manager leave something that can respawn the proxy?
+ *
+ * Answered WITHOUT stopping anything, because a caller that must refuse the stop has to
+ * refuse before it acts: `POST /api/stop` briefly ended the Task Scheduler task and then
+ * returned 409, which left the proxy running with its manager stopped — worse than either
+ * outcome it was choosing between.
+ *
+ * Task Scheduler only. `schtasks /end` ends the task instance while the `cmd :loop`
+ * wrapper survives and respawns its child (#764); launchd, systemd and WinSW are down when
+ * they report stopped.
  */
-export function stopServiceIfInstalled(): boolean {
+export function installedServiceRespawnRisk(
+  probe: () => WindowsSchedulerTaskProbe = probeWindowsSchedulerTask,
+  platform: NodeJS.Platform = process.platform,
+): "none" | "respawnable" | "unknown" {
+  // launchd, systemd and WinSW are down when they report stopped; only the Task Scheduler
+  // wrapper survives its task ending (#764).
+  if (platform !== "win32") return "none";
+  try {
+    // `probeWindowsSchedulerTask` returns "unknown" as an ordinary value when its queries
+    // fail — it does not throw — so testing for "present" let an unanswerable probe
+    // through, and the route then killed scheduler wrappers before refusing.
+    //
+    // "unknown" is kept SEPARATE from "respawnable" because the remedies differ. Telling
+    // an operator whose schtasks query is broken to run `ocx stop` is circular: that
+    // command maps the same unknown to a stop failure, so it cannot finish either.
+    const status = probe().status;
+    if (status === "absent") return "none";
+    return status === "present" ? "respawnable" : "unknown";
+  } catch {
+    // A probe that cannot answer is not evidence of absence either.
+    return "unknown";
+  }
+}
+
+/**
+ * Outcome of stopping an installed process manager.
+ *
+ * `stopServiceIfInstalled` collapses "no service was installed" and "a service was
+ * installed and would not stop" into the same `false`, which is fine for a caller that
+ * only wants to log. It is not fine for one deciding whether an update may replace package
+ * files: a manager that refused to stop can respawn the proxy on top of a half-written
+ * install (#3008).
+ */
+/**
+ * `stopped-respawnable` is Task Scheduler specifically: `schtasks /end` ends the task
+ * instance while the `cmd :loop` wrapper survives and respawns its child seconds later
+ * (#764). Only that backend needs the restart-window wait — launchd, systemd and WinSW
+ * are down when they report stopped, and making them pay a seven-second poll would be a
+ * regression in every ordinary `ocx stop`.
+ */
+/**
+ * `state-unknown` is kept apart from `failed` because the remedies differ. A manager that
+ * refused to stop is a stop failure the operator can retry; a scheduler whose state cannot
+ * be READ is a broken query, and telling that operator "the manager did not stop" sends
+ * them looking for the wrong thing (#3008).
+ */
+export type ServiceStopOutcome = "absent" | "stopped" | "stopped-respawnable" | "failed" | "state-unknown";
+
+/**
+ * Collapse the Windows backend observations into one outcome.
+ *
+ * Extracted so the precedence is testable by calling it. The rule that matters: a readable
+ * failure outranks an unreadable state, and an unreadable state outranks success — a
+ * scheduler we cannot see may still respawn the proxy.
+ */
+export function classifyWindowsServiceStop(o: {
+  stopped: boolean;
+  failed: boolean;
+  schedulerStopped: boolean;
+  stateUnknown: boolean;
+}): ServiceStopOutcome {
+  if (o.failed) return "failed";
+  if (o.stateUnknown) return "state-unknown";
+  if (o.stopped) return o.schedulerStopped ? "stopped-respawnable" : "stopped";
+  return "absent";
+}
+
+export function stopServiceIfInstalledDetailed(): ServiceStopOutcome {
   assertServiceEnvironmentMatchesInstall();
   if (process.platform === "darwin") {
     if (existsSync(plistPath())) {
-      try { stopLaunchd(); return true; } catch { return false; }
+      try { stopLaunchd(); return "stopped"; } catch { return "failed"; }
     }
   } else if (process.platform === "win32") {
     // Query BOTH backends regardless of state: a failed switch or stale state can leave
     // two managers installed, and either one would respawn the proxy after `ocx stop`.
     let stopped = false;
-    try {
-      const q = schtasks(["/query", "/tn", TASK]);
-      if (q.includes(TASK)) { stopWindows(); stopped = true; }
-    } catch { /* task not found */ }
+    let failed = false;
+    let schedulerStopped = false;
+    let stateUnknown = false;
+    // `probeWindowsSchedulerTask` is tri-state on purpose: a query that THROWS is not the
+    // same as a task that is absent, and treating it as absent lets a live scheduler
+    // survive a "successful" stop.
+    const probe = probeWindowsSchedulerTask();
+    if (probe.status === "present") {
+      if (stopWindowsChecked()) { stopped = true; schedulerStopped = true; }
+      else failed = true;
+    } else if (probe.status === "unknown") {
+      // Not "failed": nothing refused to stop. The query itself could not answer, which is
+      // a different problem with a different fix.
+      stateUnknown = true;
+    }
     if (statusWinswRaw() !== "nonexistent") {
-      try { stopWinswService(); stopped = true; } catch { /* best-effort */ }
+      try { stopWinswService(); stopped = true; } catch { failed = true; }
     }
     // `schtasks /end` ends the task instance but the cmd `:loop` wrapper survives and
     // respawns its child seconds later (issue #764), resurrecting the proxy during a
     // stop or a tray restart. Kill the launcher/wrapper processes outright.
     killWindowsServiceWrapperProcesses();
-    if (stopped) return true;
+    // A failure on either backend wins: the other one stopping does not make the live one
+    // safe to update over.
+    const outcome = classifyWindowsServiceStop({ stopped, failed, schedulerStopped, stateUnknown });
+    if (outcome !== "absent") return outcome;
   } else if (process.platform === "linux" && isSystemd() && existsSync(unitPath())) {
-    try { stopSystemd(); return true; } catch { return false; }
+    try { stopSystemd(); return "stopped"; } catch { return "failed"; }
   }
-  return false;
+  return "absent";
 }
 
 /** Delete install-state files; stale state would make `ocx update` "reinstall" a service that no longer exists. */
@@ -3666,13 +3775,22 @@ export function setUninstallServiceHooksForTests(hooks: UninstallServiceHooksFor
  * service or scheduler task that cannot be removed throws so the caller cannot erase state and
  * report success.
  */
-export function uninstallServiceIfInstalled(): boolean {
+/**
+ * Outcome of removing an installed manager.
+ *
+ * `false` used to mean both "nothing was installed" and "removal failed" on darwin and
+ * linux, so a failed removal was reported as absence and authorized the shared teardown
+ * while the service assets were still there (#3008).
+ */
+export type ServiceUninstallOutcome = "absent" | "removed" | "failed";
+
+export function uninstallServiceDetailed(): ServiceUninstallOutcome {
   const hooks = uninstallServiceHooksForTests;
   (hooks?.assertEnvironment ?? assertServiceEnvironmentMatchesInstall)();
   const platform = hooks?.platform ?? process.platform;
   if (platform === "darwin") {
     if (existsSync(plistPath())) {
-      try { uninstallLaunchd(); removeServiceInstallState(); return true; } catch { return false; }
+      try { uninstallLaunchd(); removeServiceInstallState(); return "removed"; } catch { return "failed"; }
     }
   } else if (platform === "win32") {
     let removed = false;
@@ -3688,13 +3806,20 @@ export function uninstallServiceIfInstalled(): boolean {
       (hooks?.uninstallNative ?? uninstallWinswService)();
       removed = true;
     }
-    if (removed) { (hooks?.removeInstallState ?? removeServiceInstallState)(); return true; }
+    if (removed) { (hooks?.removeInstallState ?? removeServiceInstallState)(); return "removed"; }
   } else if (platform === "linux" && existsSync(unitPath())) {
-    try { uninstallSystemd(); removeServiceInstallState(); return true; } catch {
-      try { unlinkSync(unitPath()); removeServiceInstallState(); return true; } catch { return false; }
+    try { uninstallSystemd(); removeServiceInstallState(); return "removed"; } catch {
+      try { unlinkSync(unitPath()); removeServiceInstallState(); return "removed"; } catch { return "failed"; }
     }
   }
-  return false;
+  return "absent";
+}
+
+/** Boolean form for callers that only distinguish "something was removed". */
+export function uninstallServiceIfInstalled(): boolean {
+  const outcome = uninstallServiceDetailed();
+  if (outcome === "failed") throw new Error("the installed service could not be removed");
+  return outcome === "removed";
 }
 
 /** True if a background service (launchd/systemd/Task Scheduler) is installed. */
@@ -4204,11 +4329,17 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
         const restore = await restoreNativeCodexAsync();
         if (restore.success) console.log("✅ service stopped + native Codex restored.");
         else console.error(`⚠️ service stopped, but native Codex restore FAILED: ${restore.message}\nRun \`ocx restore\` (or check $CODEX_HOME/config.toml) before using native Codex.`);
+        if (!restore.success) process.exitCode = 1;
         // The Grok fence is the other managed config this command owns. Leaving it behind
         // pointed grok at a dead endpoint while native Codex was already restored.
         const grok = stripGrokConfig();
         if (grok.changed) console.log(`↩️  ${grok.message}`);
-        else if (!grok.ok) console.error(`⚠️  ${grok.message}`);
+        else if (!grok.ok) {
+          // A failed strip leaves Grok aimed at a proxy this command just stopped. Exiting
+          // 0 tells a script the teardown finished when half of it did not.
+          console.error(`⚠️  ${grok.message}`);
+          process.exitCode = 1;
+        }
       }
       break;
     }
@@ -4242,10 +4373,14 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
         const restore = await restoreNativeCodexAsync();
         if (!restore.success) {
           console.error(`⚠️ native Codex restore FAILED: ${restore.message}\nRun \`ocx restore\` before using native Codex.`);
+          process.exitCode = 1;
         }
         const grok = stripGrokConfig();
         if (grok.changed) console.log(`↩️  ${grok.message}`);
-        else if (!grok.ok) console.error(`⚠️  ${grok.message}`);
+        else if (!grok.ok) {
+          console.error(`⚠️  ${grok.message}`);
+          process.exitCode = 1;
+        }
       }
       removeServiceInstallState();
       try { if (existsSync(serviceApiTokenFilePath())) unlinkSync(serviceApiTokenFilePath()); } catch { /* best-effort */ }

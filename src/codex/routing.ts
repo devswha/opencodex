@@ -17,7 +17,7 @@ import {
   seedPoolRotationAccount,
   selectPriorityTier,
 } from "./pool-rotation";
-import { CODEX_UNKNOWN_USAGE_SCORE, getAccountQuota } from "./quota";
+import { CODEX_EXHAUSTED_USAGE_PERCENT, CODEX_UNKNOWN_USAGE_SCORE, getAccountQuota } from "./quota";
 import { isThirtyDayOnlyCodexPlan } from "./plan";
 import {
   MAIN_CODEX_ACCOUNT_ID,
@@ -364,7 +364,8 @@ export function computeCodexUsageScore(quota: {
   weeklyPercent?: number;
   monthlyPercent?: number;
   shortPercent?: number;
-} | null, plan?: unknown): number {
+  shortResetAt?: number;
+} | null, plan?: unknown, now: number = Date.now()): number {
   if (!quota) return CODEX_UNKNOWN_USAGE_SCORE;
   const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
   const longWindows = isThirtyDayOnlyCodexPlan(plan)
@@ -376,9 +377,48 @@ export function computeCodexUsageScore(quota: {
   // account whose weekly/monthly usage is entirely unverified look like the emptiest in the
   // pool, so `pickLowestUsageAmong` would send every request to it. Unknown has to stay
   // unknown until a governing window is actually observed.
-  if (knownLong.length === 0) return CODEX_UNKNOWN_USAGE_SCORE;
+  //
+  // A FULL burst window is the exception (#3029). It is not an optimistic guess about an
+  // unobserved window — it is a direct observation that the account cannot serve a request
+  // right now, whatever its monthly position turns out to be. Unknown-means-selectable is
+  // correct for uncertainty and wrong for a measured refusal: the account stays selected,
+  // `applyQuotaAutoSwitch` never fires, and the pool wedges on an exhausted credential.
+  if (knownLong.length === 0) {
+    return isTerminalShortWindow(quota, now) ? CODEX_EXHAUSTED_USAGE_PERCENT : CODEX_UNKNOWN_USAGE_SCORE;
+  }
   const values = finite(quota.shortPercent) ? [...knownLong, quota.shortPercent] : knownLong;
   return Math.max(...values);
+}
+
+/**
+ * A short-only reading that proves the account is blocked NOW.
+ *
+ * Freshness is not optional. `getAccountQuota` performs no expiry check, partial updates
+ * carry the old short tuple forward, and disk hydration accepts a persisted reading for
+ * hours — so scoring 100 from `shortPercent` alone would keep excluding an account whose
+ * five-hour window has since reset. That is #3029 pointed the other way: the issue is that
+ * an exhausted account stays selected, and "a recovered account stays excluded" trades one
+ * unusable pool for another.
+ *
+ * A reading with no `shortResetAt` cannot be aged, so it stays unknown. The conservative
+ * direction here is the one that keeps an account selectable: a wrongly-selected account
+ * fails one request, while a wrongly-excluded one is invisible until someone reads the pool
+ * by hand.
+ */
+function isTerminalShortWindow(
+  quota: { shortPercent?: number; shortResetAt?: number },
+  now: number,
+): boolean {
+  if (typeof quota.shortPercent !== "number" || !Number.isFinite(quota.shortPercent)) return false;
+  if (quota.shortPercent < CODEX_EXHAUSTED_USAGE_PERCENT) return false;
+  const resetAt = quota.shortResetAt;
+  if (typeof resetAt !== "number" || !Number.isFinite(resetAt) || resetAt <= 0) return false;
+  // Both units reach storage: `normalizeResetAt` does not scale, and the GUI disambiguates
+  // by magnitude at read time. A comparison written against one assumption is off by 1000x
+  // against the other, and in the seconds-read-as-milliseconds direction every terminal
+  // reading looks like it reset in 1970 — a fix that passes its own test and does nothing.
+  const resetAtMs = resetAt < 10_000_000_000 ? resetAt * 1000 : resetAt;
+  return resetAtMs > now;
 }
 
 export function classifyCodexUpstreamOutcome(
@@ -1131,7 +1171,7 @@ function getEligiblePoolAccounts(
   return selectPriorityTier(
     ids,
     codexAccountPriorityLookup(config),
-    id => hasCodexQuotaHeadroom(config, id, selectionOptions),
+    id => hasCodexQuotaHeadroom(config, id, selectionOptions, now),
     pinnedCodexAccountId(config),
   );
 }
@@ -1163,12 +1203,14 @@ function hasCodexQuotaHeadroom(
   config: OcxConfig,
   accountId: string,
   selectionOptions?: CodexAccountUsabilityOptions,
+  now: number = Date.now(),
 ): boolean {
   const threshold = config.autoSwitchThreshold ?? 80;
   if (threshold <= 0) return true;
   const usage = computeCodexUsageScore(
     getAccountQuota(accountId),
     getPoolAccountPlanForSelection(config, accountId, selectionOptions),
+    now,
   );
   if (isUnknownUsage(usage)) return true;
   return usage < threshold;
@@ -1188,7 +1230,7 @@ function pickFillFirstCodexAccount(
   if (eligible.length === 0) return null;
 
   const active = getEffectiveActiveCodexAccountId(config);
-  if (active && eligible.includes(active) && hasCodexQuotaHeadroom(config, active, selectionOptions)) {
+  if (active && eligible.includes(active) && hasCodexQuotaHeadroom(config, active, selectionOptions, now)) {
     return active;
   }
 
@@ -1200,7 +1242,7 @@ function pickNextFillFirstCodexAccount(
   config: OcxConfig,
   afterId: string | null,
   eligible: readonly string[] = listEligibleCodexAccountIds(config, Date.now()),
-  _now = Date.now(),
+  now = Date.now(),
   selectionOptions?: CodexAccountUsabilityOptions,
 ): string | null {
   if (eligible.length === 0) return null;
@@ -1208,7 +1250,7 @@ function pickNextFillFirstCodexAccount(
   if (!afterId) {
     // Prefer an under-threshold account when starting with no active cursor.
     for (const id of ordered) {
-      if (hasCodexQuotaHeadroom(config, id, selectionOptions)) return id;
+      if (hasCodexQuotaHeadroom(config, id, selectionOptions, now)) return id;
     }
     return ordered[0] ?? null;
   }
@@ -1223,7 +1265,7 @@ function pickNextFillFirstCodexAccount(
   const startIdx = stableAll.indexOf(afterId);
   if (startIdx < 0) {
     for (const id of ordered) {
-      if (hasCodexQuotaHeadroom(config, id, selectionOptions)) return id;
+      if (hasCodexQuotaHeadroom(config, id, selectionOptions, now)) return id;
     }
     return ordered[0] ?? null;
   }
@@ -1234,7 +1276,7 @@ function pickNextFillFirstCodexAccount(
     const candidate = stableAll[(startIdx + step) % stableAll.length]!;
     if (!eligible.includes(candidate)) continue;
     if (!fallback) fallback = candidate;
-    if (hasCodexQuotaHeadroom(config, candidate, selectionOptions)) return candidate;
+    if (hasCodexQuotaHeadroom(config, candidate, selectionOptions, now)) return candidate;
   }
   return fallback ?? ordered[0] ?? null;
 }
@@ -1356,6 +1398,7 @@ function pickLowerUsageAccount(
     const usage = computeCodexUsageScore(
       getAccountQuota(id),
       getPoolAccountPlanForSelection(config, id, selectionOptions),
+      now,
     );
     if (usage < bestUsage) {
       best = id;
@@ -1370,6 +1413,7 @@ function pickLowestUsageAmong(
   config: OcxConfig,
   ids: readonly string[],
   selectionOptions?: CodexAccountUsabilityOptions,
+  now: number = Date.now(),
 ): string | null {
   let best: string | null = null;
   let bestUsage = Number.POSITIVE_INFINITY;
@@ -1377,6 +1421,7 @@ function pickLowestUsageAmong(
     const usage = computeCodexUsageScore(
       getAccountQuota(id),
       getPoolAccountPlanForSelection(config, id, selectionOptions),
+      now,
     );
     if (usage < bestUsage) {
       best = id;
@@ -1397,6 +1442,7 @@ export function pickLowestUsageCodexAccount(
     config,
     getEligiblePoolAccounts(config, excludeId, now, quotaScope, selectionOptions),
     selectionOptions,
+    now,
   );
 }
 
@@ -1540,7 +1586,7 @@ function pickPriorityPreemption(
   if (
     pinned !== undefined
     && eligible.includes(pinned)
-    && hasCodexQuotaHeadroom(config, pinned, selectionOptions)
+    && hasCodexQuotaHeadroom(config, pinned, selectionOptions, now)
   ) return null;
   const priorityOf = codexAccountPriorityLookup(config);
   if (priorityOf(eligible[0]!) <= priorityOf(active)) return null;
@@ -1548,8 +1594,9 @@ function pickPriorityPreemption(
   // picking one would hand the request straight back to a drained account.
   return pickLowestUsageAmong(
     config,
-    eligible.filter(id => hasCodexQuotaHeadroom(config, id, selectionOptions)),
+    eligible.filter(id => hasCodexQuotaHeadroom(config, id, selectionOptions, now)),
     selectionOptions,
+    now,
   );
 }
 
@@ -1566,6 +1613,7 @@ function releaseDrainedCodexAccountPin(
     CodexAccountUsabilityOptions,
     "nativeMainSelectionOnly" | "isMainAccountTokenLive"
   >,
+  now: number = Date.now(),
 ): void {
   const pinned = pinnedCodexAccountId(config);
   if (pinned === undefined) return;
@@ -1580,7 +1628,7 @@ function releaseDrainedCodexAccountPin(
   // is readable. Cached reauth and configured pause state were handled above.
   if (pinned === MAIN_CODEX_ACCOUNT_ID && selectionOptions?.nativeMainSelectionOnly === true) return;
   const drained = !isCodexAccountUsable(config, pinned, selectionOptions)
-    || !hasCodexQuotaHeadroom(config, pinned, selectionOptions);
+    || !hasCodexQuotaHeadroom(config, pinned, selectionOptions, now);
   if (!drained) return;
   clearCodexAccountPin(config);
   saveConfigPreservingClaudeCode(config);
@@ -1600,6 +1648,7 @@ function applyQuotaAutoSwitch(
   const activeUsage = computeCodexUsageScore(
     quota,
     getPoolAccountPlanForSelection(config, active, selectionOptions),
+    now,
   );
   // Unknown usage is not evidence that a user's explicit selection crossed the
   // threshold. Wait for quota priming instead of rotating among guesses.
@@ -1633,7 +1682,7 @@ function isHealthySharedCodexSelection(
   selectionOptions: CodexAccountUsabilityOptions | undefined,
 ): boolean {
   return isCodexAccountSelectable(config, accountId, now, quotaScope, selectionOptions)
-    && hasCodexQuotaHeadroom(config, accountId, selectionOptions)
+    && hasCodexQuotaHeadroom(config, accountId, selectionOptions, now)
     && !shouldFailover(config, accountId, now);
 }
 
@@ -1720,6 +1769,7 @@ function previewReusableAffinityAccount(
       const usage = computeCodexUsageScore(
         getAccountQuota(entry.accountId),
         getPoolAccountPlanForSelection(config, entry.accountId, selectionOptions),
+      now,
       );
       if (!isUnknownUsage(usage) && usage >= threshold) {
         const best = pickLowerUsageAccount(
@@ -1755,6 +1805,7 @@ function reevaluateAffinityQuota(
     ? computeCodexUsageScore(
         getAccountQuota(entry.accountId),
         getPoolAccountPlanForSelection(config, entry.accountId, selectionOptions),
+      now,
       )
     : 0;
   const overThreshold = threshold > 0 && !isUnknownUsage(usage) && usage >= threshold;
@@ -1848,6 +1899,7 @@ export function previewCodexAccountForRequest(
     const usage = computeCodexUsageScore(
       getAccountQuota(active),
       getPoolAccountPlanForSelection(config, active, selectionOptions),
+      now,
     );
     if (!isUnknownUsage(usage) && usage >= threshold) {
       active = pickLowerUsageAccount(config, active, usage, now, quotaScope, selectionOptions);
@@ -1887,7 +1939,7 @@ export function resolveCodexAccountForThreadDetailed(
   // revive after quota resets. Independent model scopes must never persist a
   // change to shared routing state.
   if (!isIndependentCodexQuotaScope(quotaScope)) {
-    releaseDrainedCodexAccountPin(config, sharedStateSelectionOptions(selectionOptions));
+    releaseDrainedCodexAccountPin(config, sharedStateSelectionOptions(selectionOptions), now);
   }
   const sharedActiveBeforeSelection = getEffectiveActiveCodexAccountId(config);
   const preserveSharedSelectionForModelDetour = modelScopedSelection && (
@@ -1945,7 +1997,7 @@ export function resolveCodexAccountForThreadDetailed(
       && isCodexAccountSelectable(config, entry.accountId, now, quotaScope, selectionOptions);
     const failoverReady = shouldFailover(config, entry.accountId, now);
     const healthyForSharedAffinity = selectableForSharedState
-      && hasCodexQuotaHeadroom(config, entry.accountId, sharedSelectionOptions)
+      && hasCodexQuotaHeadroom(config, entry.accountId, sharedSelectionOptions, now)
       && !failoverReady;
     if (
       selectableForRequest
@@ -2041,7 +2093,7 @@ export function resolveCodexAccountForThreadDetailed(
     sharedSelectionOptions,
   );
   const activeHealthyForSharedSelection = activeSelectableForSharedState
-    && hasCodexQuotaHeadroom(config, active, sharedSelectionOptions)
+    && hasCodexQuotaHeadroom(config, active, sharedSelectionOptions, now)
     && !shouldFailover(config, active, now);
   if (!isCodexAccountSelectable(config, active, now, quotaScope, selectionOptions)) {
     const fallback = pickLowestUsageCodexAccount(config, active, now, quotaScope, selectionOptions);

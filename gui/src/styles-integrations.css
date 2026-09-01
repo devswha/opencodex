@@ -47,6 +47,56 @@
 
 .integration-client-head { display: flex; align-items: center; gap: 10px; }
 .integration-client-head h3 { margin: 0; }
+
+/* One brand mark, four surfaces. Sized from a custom property so the same three
+   rules serve the 14px tab strip, the 20px overview card and the 24px client
+   page header without a variant class per size. */
+.client-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: var(--client-mark-size, 20px);
+  height: var(--client-mark-size, 20px);
+}
+
+.client-mark--img img {
+  width: 100%;
+  height: 100%;
+  border-radius: 2px;
+}
+
+/* A single-ink mark is painted with the surrounding text color instead of its
+   own, so it follows the theme. Without this a white-on-transparent logo is
+   invisible in light mode and a near-black one invisible in dark -- which is
+   not hypothetical, it shipped that way for prime, opencode and kimi. */
+.client-mark--mask {
+  background: var(--text);
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+}
+
+/* Placeholder for a client whose vendor publishes no usable asset. Honest about
+   being one: muted, and the slot a real mark drops into later. */
+.client-mark--monogram {
+  font-size: var(--text-label);
+  font-weight: var(--weight-semibold);
+  color: var(--muted);
+  line-height: 1;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+}
+
+/* The card head is space-between, so without this the badge would land between
+   the mark and the title. The title takes the free space instead. */
+.integration-card-head h4 { flex: 1 1 auto; min-width: 0; }
+
+.page-tab > .client-mark { margin-right: 6px; vertical-align: -2px; }
 .integration-client-head .switch { margin-left: auto; }
 
 /* A config path is the thing a user copies when a refusal tells them to

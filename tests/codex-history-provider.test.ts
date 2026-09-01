@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { classifyRecoverableHistoryError, countPendingOpencodexHistory, historyBackupPathFor, isRecoverableHistoryError, migrateHistoryToOpenai, restoreLegacyOpenaiHistory, setAfterNoopPendingCountForTests, setAfterStrictHistoryRolloutAppendForTests, setBeforeHistoryApplyTransactionForTests, setBeforeHistoryBackupConsumeForTests, setBeforeStrictHistoryRolloutAppendForTests, setHistoryDbBusyTimeoutForTests, snapshotCodexHistoryNoop, syncCodexHistoryProvider, withHistoryRetry } from "../src/codex/history-provider";
+import { classifyRecoverableHistoryError, countPendingOpencodexHistory, historyBackupPathFor, isRecoverableHistoryError, migrateHistoryToOpenai, restoreLegacyOpenaiHistory, restoredUserEventFor, setAfterNoopPendingCountForTests, setAfterStrictHistoryRolloutAppendForTests, setBeforeHistoryApplyTransactionForTests, setBeforeHistoryBackupConsumeForTests, setBeforeStrictHistoryRolloutAppendForTests, setHistoryDbBusyTimeoutForTests, snapshotCodexHistoryNoop, syncCodexHistoryProvider, withHistoryRetry } from "../src/codex/history-provider";
 import { INVALID_HISTORY_BACKUP_FIXTURES, validHistoryBackupFixture } from "./helpers/codex-history-manifest-fixtures";
 
 // Windows CI: a transient file lock can consume the full production 5s busy timeout, tripping
@@ -136,6 +136,261 @@ describe("Codex history provider sync", () => {
     expect(existsSync(fixture.backupPath)).toBe(false);
   });
 
+  test("a surviving manifest is re-snapshotted by the next routing attempt (#3026)", () => {
+    // A manifest that outlives its restore is the real hazard: its recorded snapshot
+    // describes the PREVIOUS attempt. Carrying it into a new route makes the new routed row
+    // match the expected post-image, and restore then erases activity that arrived in
+    // between. Forcing the consume to fail is what actually reaches that path - an ordinary
+    // restore deletes the manifest and the reopen code never runs.
+    const fixture = makeFixture();
+    const db = new Database(fixture.dbPath);
+    db.run("UPDATE threads SET first_user_message = NULL, has_user_event = 0 WHERE id = 'thread-1'");
+    db.close();
+
+    expect(syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath))
+      .toEqual({ rows: 1, files: 1 });
+
+    setBeforeHistoryBackupConsumeForTests(() => {
+      throw new Error("manifest consume interrupted");
+    });
+    try {
+      // Reported rather than thrown: the restore itself succeeded, only the consume failed.
+      expect(syncCodexHistoryProvider("openai", fixture.dbPath, fixture.backupPath))
+        .toMatchObject({ failed: true });
+    } finally {
+      setBeforeHistoryBackupConsumeForTests(undefined);
+    }
+    expect(existsSync(fixture.backupPath)).toBe(true);
+    // The restore landed and only finalization failed, so the surviving manifest records
+    // that its relabel is undone - the proof a later attempt needs to refresh its baseline.
+    expect(JSON.parse(readFileSync(fixture.backupPath, "utf8")).entries["thread-1"].relabel).toBe("none");
+
+    // The user types while the manifest is still on disk, then a second route runs.
+    const active = new Database(fixture.dbPath);
+    active.run("UPDATE threads SET first_user_message = 'hello', has_user_event = 1 WHERE id = 'thread-1'");
+    active.close();
+    syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath);
+
+    const after = JSON.parse(readFileSync(fixture.backupPath, "utf8")) as {
+      version: number;
+      entries: Record<string, { relabel?: string; hadFirstUserMessage?: boolean }>;
+    };
+    expect(after.version).toBe(2);
+    // Re-snapshotted for THIS attempt: the message is non-empty now, so the expected
+    // post-image is a 1 that OpenCodex itself wrote.
+    expect(after.entries["thread-1"]?.hadFirstUserMessage).toBe(true);
+
+    // And the user's activity survives the restore rather than being read as OpenCodex's.
+    syncCodexHistoryProvider("openai", fixture.dbPath, fixture.backupPath);
+    const restored = new Database(fixture.dbPath, { readonly: true });
+    expect(restored.query("SELECT model_provider, has_user_event FROM threads WHERE id = 'thread-1'").get())
+      .toEqual({ model_provider: "openai", has_user_event: 1 });
+    restored.close();
+  });
+
+  test("refuses to reroute when the surviving manifest cannot prove its relabel was undone", () => {
+    // If the "none" proof could not be written - a read-only directory during the rewrite,
+    // say - the entry still reads "committed" while the row has drifted. Keeping the
+    // recorded baseline would erase the user's event; refreshing it would preserve one
+    // OpenCodex authored. Undecidable, so refuse rather than pick.
+    //
+    // Undecidable requires that the previous route COULD have written the differing event:
+    // it sets 1 only when the message was non-empty at its own snapshot. So this fixture
+    // keeps the message, unlike the expected-0 case where an observed 1 is provably the
+    // user's.
+    const fixture = makeFixture();
+
+    expect(syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath))
+      .toEqual({ rows: 1, files: 1 });
+
+    // Restore lands, finalization fails, and the proof write fails too: hand-write the
+    // manifest back to "committed" to model that outcome exactly.
+    setBeforeHistoryBackupConsumeForTests(() => { throw new Error("manifest consume interrupted"); });
+    try {
+      expect(syncCodexHistoryProvider("openai", fixture.dbPath, fixture.backupPath))
+        .toMatchObject({ failed: true });
+    } finally {
+      setBeforeHistoryBackupConsumeForTests(undefined);
+    }
+    const stranded = JSON.parse(readFileSync(fixture.backupPath, "utf8")) as {
+      entries: Record<string, { relabel?: string }>;
+    };
+    stranded.entries["thread-1"]!.relabel = "committed";
+    writeFileSync(fixture.backupPath, JSON.stringify(stranded));
+
+    // The user types, then a reroute is attempted against the unproven manifest.
+    const active = new Database(fixture.dbPath);
+    active.run("UPDATE threads SET first_user_message = 'hello', has_user_event = 1 WHERE id = 'thread-1'");
+    active.close();
+
+    // Reported as an integrity refusal with nothing applied, which is how this layer
+    // surfaces a state it will not guess at.
+    expect(syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath))
+      .toMatchObject({ rows: 0, files: 0, failed: true, failureReason: "integrity" });
+    // Nothing was rewritten: the row and its manifest are exactly as they were.
+    const untouched = new Database(fixture.dbPath, { readonly: true });
+    expect(untouched.query("SELECT model_provider, has_user_event FROM threads WHERE id = 'thread-1'").get())
+      .toEqual({ model_provider: "openai", has_user_event: 1 });
+    untouched.close();
+  });
+
+  test("restores an event OpenCodex authored even after legacy recovery returns the tuple", () => {
+    // The history the audit rounds kept circling: route writes opencodex/vscode/1, legacy
+    // recovery pulls it back to openai/vscode/1, and the row now wears its ORIGINAL tuple
+    // carrying an event OpenCodex wrote. The classifier has to read the committed marker
+    // plus the route's expected event rather than the tuple, or restore keeps a 1 the user
+    // never generated. A pure classifier input cannot express this - it needs the real
+    // route and the real recovery.
+    const fixture = makeFixture({ includeLegacy: true });
+
+    // The fixture's rollout omits `source`, which makes restore refuse during rollout
+    // preflight before the classifier is ever consulted - a test that passes on that
+    // refusal would stay green with a broken classifier. Write the matching source so the
+    // real path runs.
+    appendFileSync(fixture.rollout, JSON.stringify({
+      type: "session_meta",
+      payload: { id: "thread-1", model_provider: "openai", source: "vscode" },
+    }) + "\n");
+
+    expect(syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath))
+      .toEqual({ rows: 1, files: 1 });
+    const routed = new Database(fixture.dbPath, { readonly: true });
+    expect(routed.query("SELECT model_provider, has_user_event FROM threads WHERE id = 'thread-1'").get())
+      .toEqual({ model_provider: "opencodex", has_user_event: 1 });
+    routed.close();
+
+    // Legacy recovery returns provider to openai and leaves the event flag at 1.
+    restoreLegacyOpenaiHistory(fixture.dbPath);
+    const recovered = new Database(fixture.dbPath, { readonly: true });
+    expect(recovered.query("SELECT model_provider, has_user_event FROM threads WHERE id = 'thread-1'").get())
+      .toEqual({ model_provider: "openai", has_user_event: 1 });
+    recovered.close();
+
+    // Restore must put the event back to the recorded original: the route expected a 1, so
+    // that 1 is OpenCodex's, not the user's.
+    const result = syncCodexHistoryProvider("openai", fixture.dbPath, fixture.backupPath);
+    const restored = new Database(fixture.dbPath, { readonly: true });
+    const row = restored.query<{ model_provider: string; source: string; has_user_event: number }, []>(
+      "SELECT model_provider, source, has_user_event FROM threads WHERE id = 'thread-1'",
+    ).get()!;
+    restored.close();
+
+    // The classifier reads the committed marker plus the route's expected event rather than
+    // the tuple, so the 1 is returned to 0 and the manifest is consumed.
+    // `files: 0` because the appended metadata already names openai/vscode; the database
+    // row is what this history put wrong.
+    expect(result).toEqual({ rows: 1, files: 0 });
+    expect(row).toEqual({ model_provider: "openai", source: "vscode", has_user_event: 0 });
+    expect(existsSync(fixture.backupPath)).toBe(false);
+  });
+
+  describe("restore classifier state matrix", () => {
+    // has_user_event has two writers, so the verdict is decided by which tuple the row
+    // wears plus the entry's recorded provenance. This table is the whole contract; the
+    // end-to-end tests above prove two of its rows against real databases.
+    const entry = (over: Partial<Parameters<typeof restoredUserEventFor>[1]> = {}) => ({
+      id: "t", rolloutPath: "/tmp/r.jsonl",
+      modelProvider: "openai", source: "vscode", hasUserEvent: 0 as 0 | 1,
+      ...over,
+    });
+    const row = (provider: string, source: string, event: 0 | 1, message: string | null = "hi") => ({
+      id: "t", rollout_path: "/tmp/r.jsonl",
+      model_provider: provider, source, has_user_event: event, first_user_message: message,
+    });
+
+    const cases: Array<[string, ReturnType<typeof row>, ReturnType<typeof entry>, 0 | 1 | null]> = [
+      // A - exactly the recorded original.
+      ["A: untouched original restores its own value", row("openai", "vscode", 0), entry(), 0],
+      // B - the expected post-image; OpenCodex wrote it, so the manifest is authoritative.
+      ["B: routed post-image restores the recorded 0", row("opencodex", "vscode", 1), entry({ hadFirstUserMessage: true }), 0],
+      ["B: routed post-image of a null-message row", row("opencodex", "vscode", 0, null), entry({ hadFirstUserMessage: false }), 0],
+      ["B: exec legacy bridge is still recognized", row("openai", "cli", 1), entry({ modelProvider: "opencodex", source: "exec", hasUserEvent: 1 }), 1],
+      // C - original tuple with 0 to 1 drift, decided by provenance.
+      ["C: relabel none is user activity", row("openai", "vscode", 1), entry({ relabel: "none", hadFirstUserMessage: false }), 1],
+      ["C: committed whose route expected 1 is OpenCodex's own", row("openai", "vscode", 1), entry({ relabel: "committed", hadFirstUserMessage: true }), 0],
+      ["C: committed whose route expected 0 cannot be OpenCodex's", row("openai", "vscode", 1), entry({ relabel: "committed", hadFirstUserMessage: false }), 1],
+      ["C: pending with an expected-0 route is decidable", row("openai", "vscode", 1), entry({ relabel: "pending", hadFirstUserMessage: false }), 1],
+      ["C: pending with an expected-1 route is undecidable", row("openai", "vscode", 1), entry({ relabel: "pending", hadFirstUserMessage: true }), null],
+      ["C: legacy entry with drift refuses, as dev does", row("openai", "vscode", 1), entry({ hadFirstUserMessage: true }), null],
+      // Reverse drift is foreign under every provenance: nothing in this system clears the
+      // flag, so a baseline that moved down is a decision this manifest does not own.
+      ["reverse drift refuses even with a none marker", row("openai", "vscode", 0), entry({ hasUserEvent: 1, relabel: "none" }), null],
+      ["C: exec-origin cannot be reached by legacy return", row("opencodex", "exec", 1), entry({ modelProvider: "opencodex", source: "exec", relabel: "pending", hadFirstUserMessage: true }), 1],
+      // D - routed tuple with drift; no provenance needed.
+      ["D: drift on the routed tuple is the user's", row("opencodex", "vscode", 1), entry({ relabel: "pending", hadFirstUserMessage: false }), 1],
+      // An exec-origin row at opencodex/cli/1 is B, not D: routeExec always writes 1, so
+      // that IS the expected post-image and the recorded value is authoritative.
+      ["B: exec-origin post-image is opencodex/cli/1", row("opencodex", "cli", 1), entry({ modelProvider: "opencodex", source: "exec", hadFirstUserMessage: false }), 0],
+      // Neither shape - a foreign decision this manifest does not own.
+      ["reverse drift never restores", row("openai", "vscode", 0), entry({ hasUserEvent: 1, relabel: "committed" }), null],
+      ["a different provider is foreign", row("anthropic", "vscode", 0), entry(), null],
+      ["a different source is foreign", row("openai", "cli", 0), entry(), null],
+    ];
+
+    for (const [name, observed, recorded, expected] of cases) {
+      test(name, () => {
+        expect(restoredUserEventFor(observed, recorded)).toBe(expected);
+      });
+    }
+  });
+
+  test("preserves a first user message that arrived after routing (#3026)", () => {
+    // Routing derives the post-image has_user_event from the message AT SNAPSHOT TIME. A
+    // restore that recomputes it from the message as it is NOW reads the user's first
+    // message as OpenCodex's own write and erases the activity.
+    const fixture = makeFixture();
+    const db = new Database(fixture.dbPath);
+    db.run("UPDATE threads SET first_user_message = NULL, has_user_event = 0 WHERE id = 'thread-1'");
+    db.close();
+
+    expect(syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath))
+      .toEqual({ rows: 1, files: 1 });
+
+    // The user types for the first time while the row is routed.
+    const active = new Database(fixture.dbPath);
+    active.run("UPDATE threads SET first_user_message = 'hello', has_user_event = 1 WHERE id = 'thread-1'");
+    active.close();
+
+    expect(syncCodexHistoryProvider("openai", fixture.dbPath, fixture.backupPath))
+      .toEqual({ rows: 1, files: 1 });
+    const restored = new Database(fixture.dbPath, { readonly: true });
+    // Provenance restored, activity kept: OpenCodex owns provider and source, the user owns
+    // this flag, and the routing write for this entry produced a 0.
+    expect(restored.query("SELECT model_provider, source, has_user_event FROM threads WHERE id = 'thread-1'").get())
+      .toEqual({ model_provider: "openai", source: "vscode", has_user_event: 1 });
+    restored.close();
+    expect(existsSync(fixture.backupPath)).toBe(false);
+  });
+
+  test("restores a legacy manifest that predates the snapshot fields", () => {
+    // Every manifest already on disk lacks hadFirstUserMessage and relabel. Refusing them
+    // would brick exactly the population this fix exists to repair, so an entry without the
+    // fields must restore on the pre-existing behaviour.
+    const fixture = makeFixture();
+    expect(syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath))
+      .toEqual({ rows: 1, files: 1 });
+
+    // Rewrite the manifest in the v1 shape, dropping both new fields.
+    const manifest = JSON.parse(readFileSync(fixture.backupPath, "utf8")) as {
+      version: number;
+      entries: Record<string, Record<string, unknown>>;
+    };
+    manifest.version = 1;
+    for (const entry of Object.values(manifest.entries)) {
+      delete entry.hadFirstUserMessage;
+      delete entry.relabel;
+    }
+    writeFileSync(fixture.backupPath, JSON.stringify(manifest));
+
+    expect(syncCodexHistoryProvider("openai", fixture.dbPath, fixture.backupPath))
+      .toEqual({ rows: 1, files: 1 });
+    const restored = new Database(fixture.dbPath, { readonly: true });
+    expect(restored.query("SELECT model_provider, source, has_user_event FROM threads WHERE id = 'thread-1'").get())
+      .toEqual({ model_provider: "openai", source: "vscode", has_user_event: 0 });
+    restored.close();
+    expect(existsSync(fixture.backupPath)).toBe(false);
+  });
+
   test("does not route a new database row that was not captured in the manifest snapshot", () => {
     const fixture = makeFixture();
     const lateRollout = join(fixture.rollout, "..", "late-rollout.jsonl");
@@ -189,21 +444,27 @@ describe("Codex history provider sync", () => {
     expect(JSON.parse(before.split("\n")[0])).toEqual(JSON.parse(after.split("\n")[0]));
   });
 
-  test("does not append when the latest session_meta belongs to a different thread id", () => {
+  test("appends this thread's own session_meta when the latest one belongs to a different thread id", () => {
     const { dbPath, backupPath, rollout } = makeFixture();
     // Simulate a forked rollout whose trailing session_meta embeds a *different* thread's id.
-    appendFileSync(rollout, JSON.stringify({
+    const foreignLine = JSON.stringify({
       type: "session_meta",
       timestamp: "2026-01-02T00:00:00.000Z",
       payload: { id: "some-other-forked-thread", model_provider: "openai", cwd: "/tmp" },
-    }) + "\n");
+    });
+    appendFileSync(rollout, foreignLine + "\n");
     const before = readFileSync(rollout, "utf8");
 
     const result = syncCodexHistoryProvider("opencodex", dbPath, backupPath);
 
-    // DB row still flips, but the rollout is left untouched (no misleading append for a foreign id).
-    expect(result.files).toBe(0);
-    expect(readFileSync(rollout, "utf8")).toBe(before);
+    // The append describes THIS thread — never a clone of the foreign record, which the app
+    // would discard. Routing the row without the file left the pair unrestorable (#3026).
+    expect(result.files).toBe(1);
+    const after = readFileSync(rollout, "utf8");
+    expect(after.startsWith(before)).toBe(true);
+    expect(latestSessionMetaPayload(rollout)).toMatchObject({ id: "thread-1", model_provider: "opencodex" });
+    // The foreign thread's record is still there, exactly once, exactly as written.
+    expect(after.split("\n").filter(Boolean).filter(line => line === foreignLine)).toHaveLength(1);
     const db = new Database(dbPath);
     expect(db.query("SELECT model_provider FROM threads WHERE id = 'thread-1'").get()).toEqual({ model_provider: "opencodex" });
     db.close();
@@ -630,6 +891,69 @@ describe("Codex history provider sync", () => {
     expect(latestSessionMetaPayload(fixture.rollout).model_provider).toBe("custom");
   });
 
+  test("consumes the manifest when a foreign-id session_meta lands after restore readback", () => {
+    const fixture = makeFixture();
+    syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath);
+    // The same last-moment race as the same-id case above, except the arriving record belongs
+    // to another thread. The app discards it, so it is not a newer decision to protect.
+    setBeforeHistoryBackupConsumeForTests(() => {
+      appendFileSync(fixture.rollout, JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-03-04T00:00:00.000Z",
+        payload: { id: "parent-thread", model_provider: "custom", source: "exec" },
+      }) + "\n");
+    });
+
+    expect(syncCodexHistoryProvider("openai", fixture.dbPath, fixture.backupPath))
+      .toEqual({ rows: 1, files: 1 });
+    expect(existsSync(fixture.backupPath)).toBe(false);
+  });
+
+  test("restores a forked rollout that trails its parent thread's session_meta", () => {
+    const fixture = makeFixture();
+    expect(syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath))
+      .toEqual({ rows: 1, files: 1 });
+
+    // A forked/branched session appends the SOURCE thread's session_meta after its own.
+    // codex-rs `apply_session_meta_from_item` ignores a record whose payload id is not the
+    // canonical thread id, so this line is ordinary rollout content, not an integrity fault.
+    appendFileSync(fixture.rollout, JSON.stringify({
+      type: "session_meta",
+      timestamp: "2026-03-03T00:00:00.000Z",
+      payload: { id: "parent-thread", model_provider: "openai", source: "cli" },
+    }) + "\n");
+
+    expect(syncCodexHistoryProvider("openai", fixture.dbPath, fixture.backupPath))
+      .toEqual({ rows: 1, files: 1 });
+    const db = new Database(fixture.dbPath, { readonly: true });
+    expect(db.query("SELECT model_provider, source FROM threads WHERE id = 'thread-1'").get())
+      .toEqual({ model_provider: "openai", source: "vscode" });
+    db.close();
+    expect(latestSessionMetaPayload(fixture.rollout)).toMatchObject({
+      id: "thread-1",
+      model_provider: "openai",
+      source: "vscode",
+    });
+    expect(existsSync(fixture.backupPath)).toBe(false);
+  });
+
+  test("leaves a foreign trailing session_meta untouched while restoring its own", () => {
+    const fixture = makeFixture();
+    syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath);
+    const parentLine = JSON.stringify({
+      type: "session_meta",
+      timestamp: "2026-03-03T00:00:00.000Z",
+      payload: { id: "parent-thread", model_provider: "opencodex", source: "exec" },
+    });
+    appendFileSync(fixture.rollout, parentLine + "\n");
+
+    expect(syncCodexHistoryProvider("openai", fixture.dbPath, fixture.backupPath))
+      .toEqual({ rows: 1, files: 1 });
+    // The parent's record still says what it said: restore repairs this thread only.
+    const lines = readFileSync(fixture.rollout, "utf8").split("\n").filter(Boolean);
+    expect(lines.filter(line => line === parentLine)).toHaveLength(1);
+  });
+
   test("reports applied permission progress when manifest finalization is denied", () => {
     const fixture = makeFixture();
     syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath);
@@ -1031,7 +1355,15 @@ describe("Design B migration helpers", () => {
 
     // Work cannot converge without its bound database; the manifest remains retry evidence.
     const result = migrateHistoryToOpenai(missingDb, backupPath);
-    expect(result).toEqual({ rows: 0, files: 0, failed: true, failureReason: "integrity" });
+    expect(result).toEqual({
+      rows: 0,
+      files: 0,
+      failed: true,
+      failureReason: "integrity",
+      // The specific condition travels with the result: an operator can tell a missing
+      // database from a manifest that needs manual resolution.
+      integrityCode: "history_state_database_missing",
+    });
     expect(existsSync(backupPath)).toBe(true);
   });
 

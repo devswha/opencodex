@@ -1,0 +1,11 @@
+{
+  "rest": "0.75",
+  "hover": "1",
+  "afterUnhover": "0.75",
+  "focusWithinSibling": "1",
+  "afterBlur": "0.75",
+  "touchNoHover": "0.75",
+  "reducedMotionTransition": "0s | opacity 0.75",
+  "stillFocusable": true,
+  "name": "공급자 별칭 편집"
+}

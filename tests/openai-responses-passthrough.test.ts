@@ -122,6 +122,80 @@ test("noncanonical pool-required providers use only their configured static cred
   expect(request.headers.session_id).toBeUndefined();
 });
 
+test("noncanonical Responses destinations strip Codex-private item metadata", () => {
+  const rawBody = {
+    model: "openai/gpt-5.6-sol",
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "ping" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+      },
+      {
+        type: "function_call",
+        name: "lookup",
+        arguments: "{}",
+        call_id: "call-1",
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+      },
+    ],
+  };
+
+  for (const configuredProvider of [
+    {
+      adapter: "openai-responses",
+      baseUrl: "https://gateway.example/v1",
+      authMode: "key" as const,
+      apiKey: "test-key",
+    },
+    {
+      adapter: "openai-responses",
+      baseUrl: "https://gateway.example/v1",
+      authMode: "forward" as const,
+    },
+  ]) {
+    const request = createResponsesPassthroughAdapter(configuredProvider).buildRequest({
+      modelId: rawBody.model,
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: rawBody,
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body) as { input: Record<string, unknown>[] };
+
+    expect(body.input.every(item => !("internal_chat_message_metadata_passthrough" in item)))
+      .toBe(true);
+  }
+
+  expect(rawBody.input.every(item => "internal_chat_message_metadata_passthrough" in item))
+    .toBe(true);
+});
+
+test("canonical ChatGPT forward preserves Codex-private item metadata", () => {
+  const request = createResponsesPassthroughAdapter(provider).buildRequest({
+    modelId: "gpt-5.6-sol",
+    context: { messages: [] },
+    stream: true,
+    options: {},
+    _rawBody: {
+      model: "gpt-5.6-sol",
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "ping" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+      }],
+    },
+  }, { headers: new Headers({ authorization: "Bearer token" }) });
+  const body = JSON.parse(request.body) as {
+    input: { internal_chat_message_metadata_passthrough?: unknown }[];
+  };
+
+  expect(body.input[0].internal_chat_message_metadata_passthrough)
+    .toEqual({ turn_id: "turn-1" });
+});
+
 test("passthrough serialized-body observation releases after the request settles", () => {
   const budget = createTranslatorBudget();
   const request = createResponsesPassthroughAdapter(provider).buildRequest({
@@ -1295,11 +1369,11 @@ describe("OpenAI Responses passthrough sanitization", () => {
     expect(input[0]).not.toHaveProperty("id");
   });
 
-  test("backfills queries on a replayed single-query web_search_call (#930)", () => {
+  test("backfills web_search_call actions in either missing direction (#930, #3071)", () => {
     // The bridge fix only helps items created after it. A conversation that already
-    // recorded {type:"search", query:"..."} replays that stored item every turn, and
-    // DeepSeek's parser rejects the whole request over it — so upgrading alone would
-    // leave those threads permanently broken.
+    // recorded a legacy web_search_call replays that stored item every turn. DeepSeek's
+    // parser rejects an action without `queries` (#930) and Console Go rejects one
+    // without `query` (#3071) — so upgrading alone would leave those threads broken.
     const adapter = createResponsesPassthroughAdapter(provider);
     const request = adapter.buildRequest({
       modelId: "provider-model",
@@ -1319,11 +1393,64 @@ describe("OpenAI Responses passthrough sanitization", () => {
 
     // Repaired: singular query gains the array the strict parser requires.
     expect(input[0].action).toEqual({ type: "search", query: "legacy", queries: ["legacy"] });
-    // Untouched: a batch already satisfies the parser, and adding `query` would collapse
-    // the native plural rendering.
-    expect(input[1].action).toEqual({ type: "search", queries: ["a", "b"] });
+    // Repaired: multi-query batch gains the singular `query` Console Go requires.
+    expect(input[1].action).toEqual({ type: "search", query: "a", queries: ["a", "b"] });
     // Untouched: not a search action.
     expect(input[2].action).toEqual({ type: "open_page", url: "https://example.test" });
+  });
+
+  test("does not forge a singular query from a malformed or empty queries array (#3071)", () => {
+    // Input items use a loose schema, so a stored `queries` need not be an array of
+    // strings. Copying a non-string first member would satisfy the presence check and
+    // still fail the Console Go validator this repair exists to satisfy — a repair that
+    // reports success and produces an invalid shape is worse than no repair.
+    const adapter = createResponsesPassthroughAdapter(provider);
+    const request = adapter.buildRequest({
+      modelId: "provider-model",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "provider-model",
+        input: [
+          { type: "web_search_call", id: "ws_num", status: "completed", action: { type: "search", queries: [42] } },
+          { type: "web_search_call", id: "ws_obj", status: "completed", action: { type: "search", queries: [{ q: "x" }] } },
+          { type: "web_search_call", id: "ws_empty", status: "completed", action: { type: "search", queries: [] } },
+        ],
+      },
+    }, meta);
+    const input = (JSON.parse(request.body) as { input: Array<{ action: Record<string, unknown> }> }).input;
+
+    // Left alone: a non-string first member is not a query.
+    expect(input[0].action).toEqual({ type: "search", queries: [42] });
+    expect(input[1].action).toEqual({ type: "search", queries: [{ q: "x" }] });
+    // Canonicalized: an empty array satisfies neither validator, so it becomes the same
+    // empty-search shape the bridge emits rather than being passed through.
+    expect(input[2].action).toEqual({ type: "search", query: "", queries: [""] });
+  });
+
+  test("repairs a partly-malformed or already-queried empty action (#3071)", () => {
+    const adapter = createResponsesPassthroughAdapter(provider);
+    const request = adapter.buildRequest({
+      modelId: "provider-model",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "provider-model",
+        input: [
+          { type: "web_search_call", id: "ws_mixed", status: "completed", action: { type: "search", queries: ["a", 42] } },
+          { type: "web_search_call", id: "ws_qempty", status: "completed", action: { type: "search", query: "legacy", queries: [] } },
+        ],
+      },
+    }, meta);
+    const input = (JSON.parse(request.body) as { input: Array<{ action: Record<string, unknown> }> }).input;
+
+    // Left alone: deriving `query: "a"` would satisfy Console Go and leave DeepSeek to
+    // reject the same replay over the non-string second member.
+    expect(input[0].action).toEqual({ type: "search", queries: ["a", 42] });
+    // Canonicalized without discarding the query the item already carried.
+    expect(input[1].action).toEqual({ type: "search", query: "legacy", queries: ["legacy"] });
   });
 
   test("strips invalid type-specific ids from serialized input items", () => {
