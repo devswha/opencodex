@@ -256,10 +256,46 @@ export async function handleManagementAPI(
   if (routed) return routed;
 
   if (url.pathname === "/api/stop" && req.method === "POST") {
-    const { restoreNativeCodexAsync } = await import("../codex/inject");
-    const { stopServiceIfInstalled, isServiceOwnershipError } = await import("../service");
+    const { installedServiceRespawnRisk, stopServiceIfInstalledDetailed, isServiceOwnershipError } = await import("../service");
+    // `ocx stop` performs its own shared teardown AFTER verifying the scheduler did not
+    // respawn the proxy (#3008). Without this the child restores native Codex and strips
+    // the Grok fence here, so a survivor found moments later has already had the shared
+    // config pulled out from under it — and the parent's `ownershipBlocked` guard can
+    // only prevent a second, redundant teardown. A direct caller sends nothing and keeps
+    // the self-contained behaviour.
+    //
+    // The query flag alone is not enough to hand over the obligation: any authenticated
+    // caller could set it and simply exit, leaving client config pointed at a proxy that
+    // no longer exists. Honour the deferral only when the caller left a pending-teardown
+    // receipt on disk, which a later stop/update can find and finish.
+    // Decide BEFORE touching the manager. Stopping the Task Scheduler task and then
+    // refusing left the proxy running with its manager stopped — worse than either
+    // outcome. This process cannot verify its own post-exit respawn window; only the
+    // receipt-backed parent `ocx stop` can, which is what the deferral exists for.
+    const { deferralMatchesReceipt } = await import("../config/pending-teardown");
+    const { deferralHonored, performStopTeardown } = await import("./stop-teardown");
+    const holdsReceipt = deferralHonored(url, deferralMatchesReceipt);
+    const respawnRisk = holdsReceipt ? "none" : installedServiceRespawnRisk();
+    if (respawnRisk === "respawnable") {
+      return jsonResponse({
+        success: false,
+        code: "respawnable_service",
+        message: "This proxy is managed by a Task Scheduler wrapper that can respawn it, so the stop must be run by `ocx stop`, which verifies the respawn window. Nothing was changed.",
+      }, 409, req, config);
+    }
+    if (respawnRisk === "unknown") {
+      // Do NOT send them to `ocx stop`: it maps the same unanswerable probe to a stop
+      // failure, so that advice would be a loop. The scheduler query itself is what needs
+      // fixing (#3008).
+      return jsonResponse({
+        success: false,
+        code: "service_state_unknown",
+        message: "The Windows Task Scheduler state could not be read, so this proxy cannot tell whether a wrapper would respawn it. Nothing was changed. Run `ocx service status` to see the query error, repair Task Scheduler access, then retry.",
+      }, 409, req, config);
+    }
+    let serviceStop: import("../service").ServiceStopOutcome;
     try {
-      stopServiceIfInstalled();
+      serviceStop = stopServiceIfInstalledDetailed();
     } catch (err) {
       if (isServiceOwnershipError(err)) {
         // The installed service belongs to another CODEX_HOME/OPENCODEX_HOME: it would respawn
@@ -269,12 +305,30 @@ export async function handleManagementAPI(
       }
       throw err;
     }
-    const restore = await restoreNativeCodexAsync();
+    // The boolean helper collapses "failed" into the same false as "no service installed",
+    // so this route used to tear down shared config and exit while a manager that refused
+    // to stop was still there to respawn the proxy (#3008).
+    if (serviceStop === "failed") {
+      return jsonResponse({
+        success: false,
+        message: "The installed service manager did not stop; it may respawn the proxy. Shared client config was left alone. Run `ocx stop` from the home that owns the service.",
+      }, 409, req, config);
+    }
+    if (serviceStop === "state-unknown") {
+      // Same case, same remedy as the pre-check: the query is what needs fixing.
+      return jsonResponse({
+        success: false,
+        code: "service_state_unknown",
+        message: "The Windows Task Scheduler state could not be read, so this proxy cannot tell whether a wrapper would respawn it. Shared client config was left alone. Run `ocx service status` to see the query error, repair Task Scheduler access, then retry.",
+      }, 409, req, config);
+    }
+    // The pre-check above already refused the respawnable case without a receipt, so
+    // reaching here with one means the parent owns the verification.
     // Both managed configs come down together on an explicit teardown. The daemon's own
     // syncCleanup skips this when OCX_SERVICE is set (so a crash/respawn keeps the fence),
-    // which is exactly why an intentional stop has to do it here.
-    const { stripGrokConfig } = await import("../grok/inject");
-    const grok = stripGrokConfig();
+    // which is exactly why an intentional stop has to do it here — unless the caller is
+    // `ocx stop`, which does it itself once the proxy is proven down.
+    const teardown = await performStopTeardown(url, { ownsReceipt: deferralMatchesReceipt });
     setTimeout(async () => {
       let shutdownSucceeded = false;
       try {
@@ -282,12 +336,12 @@ export async function handleManagementAPI(
       } catch {
         console.warn("[opencodex] shutdown drain failed");
       }
-      process.exit(shutdownSucceeded ? 0 : 1);
+      // A drained proxy whose shared teardown failed did not finish the job. Exiting 0
+      // told a supervisor the stop was clean while native Codex or the Grok fence was
+      // still pointed at this process (#3008).
+      process.exit(shutdownSucceeded && teardown.success ? 0 : 1);
     }, 200);
-    const grokNote = grok.ok ? "" : ` Grok config cleanup failed: ${grok.message}`;
-    return jsonResponse(restore.success
-      ? { success: true, message: `Proxy stopping, native Codex restored.${grokNote}` }
-      : { success: false, message: `Proxy stopping, but native Codex restore failed: ${restore.message}. Run \`ocx restore\`.${grokNote}` });
+    return jsonResponse(teardown);
   }
 
   if (url.pathname.startsWith("/api/native-main-profiles")) {

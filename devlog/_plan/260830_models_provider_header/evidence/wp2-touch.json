@@ -1,0 +1,8 @@
+{
+  "rest_pointerAway": "0.75",
+  "touch_matchMedia": true,
+  "touch_pointerCoarse": true,
+  "touch_opacity": "1",
+  "back_to_rest": "0.75",
+  "reducedMotion": "0s / opacity 0.75"
+}

@@ -1,10 +1,34 @@
 import type { KiroOAuthMetadata, OAuthController, OAuthCredentials } from "./types";
 import { parseCallbackInput } from "./callback-server";
 import type { OcxConfig, OcxProviderConfig, RefreshPolicy } from "../types";
-import { loadConfig, resolveEnvValue, saveConfig } from "../config";
+import { ConfigMutationLockError, loadConfig, resolveEnvValue, saveConfig } from "../config";
 import { maskEmail } from "../lib/privacy";
 import { KiroTokenRefreshError, environmentKiroRoutingMetadata, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
-import { getAccountCredential, getAccountCredentialWithStatus, getAccountSet, removeAccount, saveAccountCredential, saveCredential, setActiveAccount, getCredential, credentialGeneration, createOAuthRefreshIntentLock, mergeAccountCredential, markAccountNeedsReauthIfGeneration, readOAuthRefreshIntent, writeOAuthRefreshIntent, markOAuthRefreshIntentStaleOwner, clearOAuthRefreshIntent, normalizeAuthStoreBuffer, OAuthMutationBusyError } from "./store";
+import {
+  OAuthMutationBusyError,
+  OAuthRefreshIntentIOError,
+  clearOAuthRefreshIntent,
+  clearOAuthRefreshIntentIfMatch,
+  createOAuthRefreshIntentLock,
+  credentialGeneration,
+  getAccountCredential,
+  getAccountCredentialWithStatus,
+  getAccountSet,
+  getCredential,
+  markAccountNeedsReauthIfGeneration,
+  markOAuthRefreshIntentCleanupPending,
+  markOAuthRefreshIntentStaleOwner,
+  mergeAccountCredential,
+  normalizeAuthStoreBuffer,
+  readOAuthRefreshIntent,
+  removeAccount,
+  saveAccountCredential,
+  saveCredential,
+  setActiveAccount,
+  writeOAuthRefreshIntent,
+  type OAuthRefreshIntent,
+  type OAuthRefreshIntentCleanupPending,
+} from "./store";
 import { loginXai, refreshXaiToken, XAI_LOCAL_CLI_DETACH_WARNING, XaiTokenRequestError } from "./xai";
 import { ANTHROPIC_OAUTH_BETA, AnthropicTokenError, loginAnthropic, refreshAnthropicToken } from "./anthropic";
 import { loginKimi, refreshKimiToken } from "./kimi";
@@ -559,8 +583,151 @@ function terminal(error:unknown):boolean{
   // Local durable-write/read/cleanup failures are operational, not credential
   // death: the provider credential was never rejected or consumed. Never mark
   // the account needsReauth for broken local persistence infrastructure.
-  if (error instanceof RefreshIntentIOError) return false;
+  if (error instanceof RefreshIntentIOError || error instanceof OAuthRefreshIntentIOError) return false;
   return isTerminalRefreshError(error);
+}
+
+/**
+ * True when the token endpoint definitively answered and rejected the request.
+ *
+ * The Anthropic adapter attaches an HTTP status only to an explicit non-success response,
+ * which is the retryable rejection this PR handles. Everything else (timeout, dropped
+ * connection, a body that could not be read or parsed, or a local persistence fault) leaves
+ * the outcome unknown: the server may already have rotated the token, and a blind replay
+ * could trip refresh-token-reuse revocation. Those cases must keep the refresh intent.
+ *
+ * Deliberately narrower than `terminal()`, which asks whether the CREDENTIAL is dead.
+ * This asks the different question of whether the ATTEMPT is known to have failed.
+ */
+function definitivelyAnswered(error: unknown): boolean {
+  if (error instanceof AnthropicTokenError) return error.httpStatus !== undefined;
+  return false;
+}
+
+/**
+ * Intent cleanup is secondary to the refresh outcome it protects.
+ *
+ * Once a credential is already durable, cleanup remains secondary and best-effort. A known
+ * failed attempt takes the stricter path below: its retry-safe marker must become durable before
+ * the original provider error can be returned.
+ */
+function clearAnthropicRefreshIntentBestEffort(
+  provider: string,
+  accountId: string,
+  expected: OAuthRefreshIntent,
+): boolean {
+  try {
+    return expected.attemptId
+      ? clearOAuthRefreshIntentIfMatch(provider, accountId, expected)
+      : clearOAuthRefreshIntent(provider, accountId, expected.generation);
+  } catch {
+    console.warn(
+      "[opencodex] Anthropic refresh intent cleanup failed; preserving the durable replay guard.",
+    );
+    return false;
+  }
+}
+
+const ANTHROPIC_INTENT_MARK_RETRY_DELAYS_MS = [10, 25, 50] as const;
+
+function isConfigMutationLockContention(error: unknown): boolean {
+  if (!(error instanceof ConfigMutationLockError)) return false;
+  const cause = error.cause;
+  const code = cause && typeof cause === "object" && "code" in cause
+    ? String((cause as { code?: unknown }).code)
+    : "";
+  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED";
+}
+
+async function clearAnthropicRefreshIntentForKnownFailure(
+  provider: string,
+  accountId: string,
+  expected: OAuthRefreshIntent,
+  cleanupPending: OAuthRefreshIntentCleanupPending,
+  refreshError: unknown,
+): Promise<boolean> {
+  let marked: OAuthRefreshIntent | undefined;
+  for (let attempt = 0; attempt <= ANTHROPIC_INTENT_MARK_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      marked = markOAuthRefreshIntentCleanupPending(
+        provider,
+        accountId,
+        expected,
+        cleanupPending,
+      );
+      break;
+    } catch (cause) {
+      const retryDelay = ANTHROPIC_INTENT_MARK_RETRY_DELAYS_MS[attempt];
+      if (!isConfigMutationLockContention(cause) || retryDelay === undefined) {
+        throw new OAuthRefreshIntentIOError(
+          "mark-cleanup-pending",
+          cause,
+          refreshError,
+        );
+      }
+      // The provider has definitively answered, so caller cancellation no longer changes the
+      // settlement obligation. Yield briefly while retaining the per-account refresh lock, then
+      // rerun the existing compare-and-swap marker against current disk state.
+      await Bun.sleep(retryDelay);
+    }
+  }
+  if (!marked) {
+    throw new OAuthRefreshIntentIOError(
+      "mark-cleanup-pending",
+      new Error("Anthropic refresh intent changed before safe cleanup"),
+      refreshError,
+    );
+  }
+
+  let cleared: boolean;
+  try {
+    cleared = clearOAuthRefreshIntentIfMatch(provider, accountId, marked);
+  } catch {
+    console.warn(
+      "[opencodex] Anthropic refresh intent cleanup failed; retry-safe cleanup remains pending.",
+    );
+    return false;
+  }
+  if (!cleared) {
+    throw new OAuthRefreshIntentIOError(
+      "clear-cleanup-pending",
+      new Error("Anthropic refresh intent changed during safe cleanup"),
+      refreshError,
+    );
+  }
+  return true;
+}
+
+function resumeAnthropicRefreshIntentCleanup(
+  provider: string,
+  accountId: string,
+  pendingIntent: OAuthRefreshIntent,
+): void {
+  let cleared: boolean;
+  try {
+    cleared = clearOAuthRefreshIntentIfMatch(provider, accountId, pendingIntent);
+  } catch (cause) {
+    throw new OAuthRefreshIntentIOError(
+      "resume-cleanup",
+      cause,
+    );
+  }
+  if (!cleared) {
+    throw new OAuthRefreshIntentIOError(
+      "resume-cleanup",
+      new Error("Pending Anthropic refresh intent changed before cleanup"),
+    );
+  }
+}
+
+function clearObservedAnthropicRefreshIntent(
+  provider: string,
+  accountId: string,
+  pendingIntent: OAuthRefreshIntent,
+): boolean {
+  return pendingIntent.attemptId
+    ? clearOAuthRefreshIntentIfMatch(provider, accountId, pendingIntent)
+    : clearOAuthRefreshIntent(provider, accountId, pendingIntent.generation);
 }
 function authoritative(stored:OAuthCredentials,active:boolean,now:()=>number):OAuthCredentials{if(stored.source!=="local-cli")return stored;const disk=detectGrokCliToken();if(!disk)return stored;const allowed=isSameGrokIdentity(stored,disk)||(active&&!hasComparableGrokIdentity(stored,disk));return allowed&&shouldAdoptGrokGeneration(stored,disk,now(),REFRESH_SKEW_MS)?disk:stored;}
 function merged(fresh: OAuthCredentials, previous: OAuthCredentials): OAuthCredentials {
@@ -647,12 +814,18 @@ export async function refreshAnthropicAccountWithLock(
         afterPrePersistRead: deps.afterPrePersistRead,
       });
       if (outcome.superseded) {
-        if (pendingIntent) clearOAuthRefreshIntent(provider, accountId, pendingIntent.generation);
+        // The disk credential is already durable here, so cleanup is secondary: an unlink
+        // failure must not mask a committed credential by throwing over the return below.
+        if (pendingIntent) clearAnthropicRefreshIntentBestEffort(provider, accountId, pendingIntent);
         if (outcome.stored.expires > now() + REFRESH_SKEW_MS) return outcome.stored.access;
         throw new OAuthLoginRequiredError(provider);
       }
-      if (pendingIntent) clearOAuthRefreshIntent(provider, accountId, pendingIntent.generation);
+      if (pendingIntent) clearAnthropicRefreshIntentBestEffort(provider, accountId, pendingIntent);
       return disk.access;
+    }
+    if (pendingIntent?.cleanupPending && pendingIntent.generation === generation) {
+      resumeAnthropicRefreshIntentCleanup(provider, accountId, pendingIntent);
+      pendingIntent = undefined;
     }
     if (!pendingIntent?.uncertain && pendingIntent?.generation === generation) {
       if (pendingIntent.staleOwner) throw new OAuthTokenRefreshStaleError();
@@ -661,7 +834,9 @@ export async function refreshAnthropicAccountWithLock(
           markOAuthRefreshIntentStaleOwner(provider, accountId, generation, deps.replacedStaleFlight.flightId);
           throw new OAuthTokenRefreshStaleError();
         }
-        clearOAuthRefreshIntent(provider, accountId, generation);
+        if (!clearObservedAnthropicRefreshIntent(provider, accountId, pendingIntent)) {
+          throw new OAuthTokenRefreshStaleError();
+        }
         pendingIntent = undefined;
       }
     }
@@ -669,7 +844,9 @@ export async function refreshAnthropicAccountWithLock(
       await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration);
       throw new OAuthLoginRequiredError(provider);
     }
-    if (pendingIntent) clearOAuthRefreshIntent(provider, accountId, pendingIntent.generation);
+    if (pendingIntent && !clearObservedAnthropicRefreshIntent(provider, accountId, pendingIntent)) {
+      throw new OAuthTokenRefreshStaleError();
+    }
     if (account?.needsReauth) {
       throw new OAuthLoginRequiredError(provider);
     }
@@ -677,9 +854,15 @@ export async function refreshAnthropicAccountWithLock(
       return stored.access;
     }
 
+    let refreshMayHaveReachedProvider = false;
+    let attemptIntent: OAuthRefreshIntent | undefined;
     try {
-      writeOAuthRefreshIntent(provider, accountId, generation, now(), deps.flight?.flightId);
+      attemptIntent = writeOAuthRefreshIntent(provider, accountId, generation, now(), deps.flight?.flightId);
       if (deps.signal?.aborted) throw deps.signal.reason;
+      // From this point on, even a synchronous client error is conservatively post-dispatch:
+      // the provider may have received and rotated the refresh token before the caller learned
+      // the outcome.
+      refreshMayHaveReachedProvider = true;
       if (deps.flight) deps.flight.dispatched = true;
       const fresh = merged(await def.refresh(stored.refresh, deps.signal), stored);
       const outcome = await mergeAccountCredential(provider, accountId, fresh, {
@@ -687,17 +870,41 @@ export async function refreshAnthropicAccountWithLock(
         afterPrePersistRead: deps.afterPrePersistRead,
       });
       if (outcome.superseded) {
-        clearOAuthRefreshIntent(provider, accountId, generation);
+        if (attemptIntent) clearAnthropicRefreshIntentBestEffort(provider, accountId, attemptIntent);
         if (outcome.stored.expires > now() + REFRESH_SKEW_MS) return outcome.stored.access;
         throw new OAuthLoginRequiredError(provider);
       }
-      clearOAuthRefreshIntent(provider, accountId, generation);
+      // The rotated credential is durable now. A cleanup failure must not turn that committed
+      // success into a refresh failure; the old-generation intent remains a conservative guard.
+      if (attemptIntent) clearAnthropicRefreshIntentBestEffort(provider, accountId, attemptIntent);
       return fresh.access;
     } catch (error) {
-      if (error instanceof OAuthMutationBusyError) throw error;
-      if (!terminal(error)) throw error;
+      if (error instanceof OAuthMutationBusyError || error instanceof OAuthTokenRefreshStaleError) throw error;
+      if (!terminal(error)) {
+        // A non-terminal failure tells the caller to retry, but the intent outlived it, so
+        // the next attempt hit the pending-intent branch above and raised
+        // OAuthLoginRequiredError. One 503 locked the account out of refresh until manual
+        // re-auth even after upstream recovered.
+        //
+        // Only clear the intent when the server DEFINITIVELY answered and rejected the
+        // request. The adapter attaches an HTTP status only to that explicit non-success
+        // response. A timeout, a dropped connection, or an unreadable/unparseable body
+        // carries no status: the server may already have
+        // rotated the token, and replaying it could trip refresh-token-reuse revocation.
+        // Those outcomes keep the intent so the guard still refuses a blind replay.
+        if ((!refreshMayHaveReachedProvider || definitivelyAnswered(error)) && attemptIntent) {
+          await clearAnthropicRefreshIntentForKnownFailure(
+            provider,
+            accountId,
+            attemptIntent,
+            refreshMayHaveReachedProvider ? "definitive-rejection" : "pre-dispatch",
+            error,
+          );
+        }
+        throw error;
+      }
       await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration);
-      clearOAuthRefreshIntent(provider, accountId, generation);
+      if (attemptIntent) clearAnthropicRefreshIntentBestEffort(provider, accountId, attemptIntent);
       throw new OAuthLoginRequiredError(provider);
     }
   } finally {

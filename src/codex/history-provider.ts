@@ -227,6 +227,11 @@ function integrityFailureResult(error: CodexHistoryIntegrityError): CodexHistory
     files: error.progress.files,
     failed: true,
     failureReason: "integrity",
+    // The specific code, so an operator sees WHICH integrity condition stopped the
+    // transition rather than a generic "run doctor". `history_apply_ambiguous_reroute` in
+    // particular needs manual resolution: the manifest is intact and the safe move is to
+    // inspect it, not to retry.
+    integrityCode: error.message,
   };
 }
 
@@ -239,6 +244,15 @@ export interface CodexHistorySyncResult {
   failed?: true;
   /** Why the retry budget was exhausted when `failed` is set. */
   failureReason?: CodexHistoryFailureReason;
+  /**
+   * The specific integrity condition, when `failureReason` is `"integrity"`.
+   *
+   * `failureReason` alone tells an operator only that something was inconsistent, which
+   * reads as "retry or run doctor". Some of these are not retryable —
+   * `history_apply_ambiguous_reroute` means two histories produced the same row and the
+   * manifest needs a human — so the code travels with the result.
+   */
+  integrityCode?: string;
 }
 
 interface ThreadRow {
@@ -361,7 +375,10 @@ function readBackupStrict(path: string, stateDbPath: string): StrictBackupRead {
     return {
       kind: "known",
       present: false,
-      manifest: { version: 1, stateDbPath, entries: {} },
+      // New manifests carry the snapshot and relabel fields, so they are v2. v1 stays
+      // readable: an entry written before those fields existed falls back to the
+      // current-row reading, which is the behaviour it was written under.
+      manifest: { version: 2, stateDbPath, entries: {} },
       fingerprint: "absent",
     };
   }
@@ -462,14 +479,80 @@ function writeBackup(path: string, manifest: CodexHistoryBackupManifest, stateDb
   atomicWriteFile(path, JSON.stringify({ ...manifest, stateDbPath: manifest.stateDbPath ?? stateDbPath }, null, 2) + "\n");
 }
 
-function rememberOriginal(manifest: CodexHistoryBackupManifest, row: ThreadRow): void {
-  if (manifest.entries[row.id]) return;
+function rememberOriginal(manifest: CodexHistoryBackupManifest, row: ApplyRowSnapshot): void {
+  const existing = manifest.entries[row.id];
+  if (existing) {
+    // A surviving entry means a previous route/restore cycle did not consume its manifest.
+    // Its `relabel` describes THAT attempt, and this one has not written yet, so a stale
+    // `committed` would let a later restore treat the marker as proof that OpenCodex
+    // authored an event flag the user had since set.
+    //
+    // The provenance tuple stays — it is the ORIGINAL, and a routed row must never
+    // overwrite it. But `hadFirstUserMessage` is not provenance: it describes the input to
+    // one routing write, and this attempt has its own. Leaving the previous attempt's value
+    // makes the new routed row match the expected post-image and erases activity that
+    // arrived in between. Re-record it, and promote the manifest so the field is covered by
+    // the schema that declares it.
+    const previousRelabel = existing.relabel;
+    const previousHadFirstUserMessage = existing.hadFirstUserMessage;
+    existing.relabel = "pending";
+    existing.hadFirstUserMessage = hasFirstUserMessage(row.first_user_message);
+    // `hasUserEvent` is the value restore returns to, and the previous attempt's can be two
+    // events stale — a restore that already landed, plus whatever the user did afterwards.
+    // Refreshing it needs proof that the previous relabel was UNDONE, because the original
+    // tuple alone is not proof: route-then-legacy-recovery lands on that same tuple, so
+    // refreshing there would adopt OpenCodex's own write as the user's baseline.
+    //
+    const atOriginalTuple = row.model_provider === existing.modelProvider
+      && row.source === existing.source;
+    const observedEvent: 0 | 1 = Number(row.has_user_event) === 1 ? 1 : 0;
+    if (observedEvent !== existing.hasUserEvent) {
+      // The row's event disagrees with the recorded baseline. Whether that is decidable is
+      // a function of DIRECTION and ORIGIN, not of one flag:
+      //
+      // - `1 -> 0` is always foreign. Nothing in this system clears the flag: routing only
+      //   ever sets it, the user only ever sets it, and legacy recovery sets it to 1. A
+      //   baseline that moved down is a decision this manifest does not own.
+      // - `0 -> 1` on an exec-origin entry is the user's. `routeExec` moves `source` to
+      //   `cli` and legacy recovery does not move it back, so an exec-origin row wearing
+      //   its original tuple was never routed away and back.
+      // - `0 -> 1` with `relabel: "none"` is the user's: a restore landed and undid the
+      //   previous relabel, so the observed row is the honest pre-route state.
+      // - `0 -> 1` where the previous route would have written 0 is the user's, because
+      //   OpenCodex could not have authored a 1 it never writes.
+      // - `0 -> 1` where the previous route WOULD have written 1, or where a legacy entry
+      //   records nothing about it, is undecidable: routing-never-landed-plus-activity and
+      //   routing-landed-then-legacy-recovery produce the same row. Refuse rather than pick.
+      const reverseDrift = observedEvent === 0;
+      const execOrigin = existing.modelProvider !== "openai";
+      const priorRouteWroteZero = previousHadFirstUserMessage === false;
+      const decidable = !reverseDrift
+        && atOriginalTuple
+        && (execOrigin || previousRelabel === "none" || priorRouteWroteZero);
+      if (!decidable) {
+        throw new CodexHistoryIntegrityError("history_apply_ambiguous_reroute");
+      }
+      existing.hasUserEvent = observedEvent;
+    }
+    manifest.version = 2;
+    return;
+  }
+  manifest.version = 2;
   manifest.entries[row.id] = {
     id: row.id,
     rolloutPath: row.rollout_path,
     modelProvider: row.model_provider,
     source: row.source,
     hasUserEvent: Number(row.has_user_event) === 1 ? 1 : 0,
+    // Emptiness only, never the text: the manifest is a file on disk and the message is
+    // user content. Routing derives the post-image event flag from the message as it was
+    // HERE, so a restore that re-reads the current message would mistake later user
+    // activity for OpenCodex's own write.
+    hadFirstUserMessage: hasFirstUserMessage(row.first_user_message),
+    // The routing write has not happened yet. Resolved to "committed" after it lands, or
+    // left pending if the process dies between the two - in which case the observed row
+    // is what decides.
+    relabel: "pending",
   };
 }
 
@@ -486,7 +569,13 @@ function rowMatchesRestoreTuple(
 
 function rowMatchesExpectedPostImage(row: RestoreRowSnapshot, entry: CodexHistoryBackupEntry): boolean {
   if (entry.modelProvider === "openai") {
-    const postHasUserEvent = hasFirstUserMessage(row.first_user_message) ? 1 : entry.hasUserEvent;
+    // Routing derived this from the message AT SNAPSHOT TIME (`routeOpenai`), so read the
+    // recorded flag when the manifest has one. Recomputing from the row's CURRENT message
+    // mistakes a first message the user sent after routing for OpenCodex's own write, and
+    // restore then erases it. Manifests written before the flag existed fall back to the
+    // current reading, which is exactly the behaviour this replaces and no worse.
+    const hadMessage = entry.hadFirstUserMessage ?? hasFirstUserMessage(row.first_user_message);
+    const postHasUserEvent = hadMessage ? 1 : entry.hasUserEvent;
     return rowMatchesRestoreTuple(row, "opencodex", entry.source, postHasUserEvent);
   }
   return hasFirstUserMessage(row.first_user_message)
@@ -497,6 +586,60 @@ function rowMatchesExpectedPostImage(row: RestoreRowSnapshot, entry: CodexHistor
       // can use its preserved first-line padding to recover exact provenance.
       || rowMatchesRestoreTuple(row, "openai", "cli", 1)
   );
+}
+
+/**
+ * What `has_user_event` should read after restore, or `null` when the row is not one this
+ * manifest owns.
+ *
+ * The field has two writers, so a final state cannot establish authorship on its own. Four
+ * shapes cover every row reachable in practice, and the tuple the row wears says which:
+ *
+ * - **A** exactly the recorded original: untouched, or already restored.
+ * - **B** the expected post-image: OpenCodex wrote it, so the recorded value is authoritative.
+ * - **C** the original tuple with the flag moved 0 to 1: either Codex-side user activity, or
+ *   OpenCodex routing that legacy recovery has since pulled back to the original provider.
+ * - **D** the post-image tuple with the flag moved 0 to 1: a routed row the user then touched.
+ *   No provenance needed - a row wearing the routed tuple was written by OpenCodex, so drift
+ *   on top of it can only be what followed.
+ *
+ * Only C is ambiguous, and only when the route's own expected event was 1: then "routing
+ * never landed and the user typed" and "routing landed and legacy recovery pulled it back"
+ * produce an identical row, and nothing durable separates them. That one cell refuses. A
+ * guess there either erases real activity or fabricates it.
+ */
+export function restoredUserEventFor(row: RestoreRowSnapshot, entry: CodexHistoryBackupEntry): 0 | 1 | null {
+  if (rowMatchesRestoreTuple(row, entry.modelProvider, entry.source, entry.hasUserEvent)) {
+    return entry.hasUserEvent;                                   // A
+  }
+  if (rowMatchesExpectedPostImage(row, entry)) return entry.hasUserEvent;  // B
+
+  const drifted = Number(row.has_user_event) === 1 && entry.hasUserEvent === 0;
+  if (!drifted) return null;
+
+  const routeExpectedEvent = entry.hadFirstUserMessage ?? hasFirstUserMessage(row.first_user_message) ? 1 : 0;
+
+  // D: wearing the routed tuple, so the 1 arrived after OpenCodex wrote the row. The tuple
+  // is the one routing actually produces — `routeOpenai` keeps the source, `routeExec`
+  // moves exec to cli — so D and C cannot both match rather than merely being ordered.
+  const routedSource = entry.modelProvider === "openai" ? entry.source : "cli";
+  if (rowMatchesRestoreTuple(row, "opencodex", routedSource, 1)) return 1;
+
+  // C: wearing the original tuple.
+  if (rowMatchesRestoreTuple(row, entry.modelProvider, entry.source, 1)) {
+    // An exec-origin entry cannot reach here by legacy recovery: routeExec moves source to
+    // cli and recovery does not move it back, so the original tuple is unreachable that way.
+    if (entry.modelProvider !== "openai") return 1;
+    if (entry.relabel === "none") return 1;
+    if (entry.relabel === "committed") {
+      // OpenCodex authored the 1 only if its own routing write would have produced one.
+      return routeExpectedEvent === 1 ? 0 : 1;
+    }
+    if (entry.relabel === undefined) return null;  // legacy manifest: the pre-existing refusal
+    // pending: two histories reach this exact row and nothing durable tells them apart.
+    return routeExpectedEvent === 1 ? null : 1;
+  }
+  return null;
 }
 
 interface RestoreRolloutSnapshot {
@@ -549,7 +692,7 @@ function snapshotRolloutForRestore(entry: CodexHistoryBackupEntry): RestoreRollo
   if (identityBefore === null) {
     throw new CodexHistoryIntegrityError("history_backup_rollout_unrestorable");
   }
-  const latest = readLatestSessionMeta(entry.rolloutPath);
+  const latest = readLatestSessionMetaForId(entry.rolloutPath, entry.id);
   if (!latest
     || (!rolloutMatchesRestoreTuple(latest, entry, entry.modelProvider, entry.source)
       && !rolloutMatchesExpectedPostImage(latest, entry))) {
@@ -608,8 +751,7 @@ function preflightRestoreRows(
     if (!row || typeof row.rollout_path !== "string" || !sameCodexHistoryPath(row.rollout_path, entry.rolloutPath)) {
       throw new CodexHistoryIntegrityError("history_backup_target_mismatch");
     }
-    if (!rowMatchesRestoreTuple(row, entry.modelProvider, entry.source, entry.hasUserEvent)
-      && !rowMatchesExpectedPostImage(row, entry)) {
+    if (restoredUserEventFor(row, entry) === null) {
       throw new CodexHistoryIntegrityError("history_backup_postimage_mismatch");
     }
     snapshots.set(entry.id, row);
@@ -625,10 +767,11 @@ function assertRestoreReadback(
     const row = getCurrent(entry.id);
     if (!row
       || !sameCodexHistoryPath(row.rollout_path, entry.rolloutPath)
-      || !rowMatchesRestoreTuple(row, entry.modelProvider, entry.source, entry.hasUserEvent)) {
+      || !rowMatchesRestoreTuple(row, entry.modelProvider, entry.source, Number(row.has_user_event) === 1 ? 1 : 0)
+      || restoredUserEventFor(row, entry) === null) {
       throw new CodexHistoryIntegrityError("history_backup_database_readback_mismatch");
     }
-    const latest = readLatestSessionMeta(entry.rolloutPath);
+    const latest = readLatestSessionMetaForId(entry.rolloutPath, entry.id);
     if (inspectFirstLineProvider(entry.rolloutPath, entry.id, entry.modelProvider) !== "current"
       || !latest
       || !rolloutMatchesRestoreTuple(latest, entry, entry.modelProvider, entry.source)) {
@@ -663,6 +806,19 @@ function parseSessionMetaLine(line: string): ParsedSessionMeta | null {
 export function readLatestSessionMeta(path: string): ParsedSessionMeta | null {
   const raw = readFileSync(path, "utf8");
   return readLatestSessionMetaFromText(raw);
+}
+
+/**
+ * Same fold as {@link readLatestSessionMeta}, restricted to this thread's own metadata.
+ *
+ * A forked/branched rollout appends the SOURCE thread's `session_meta` after its own, and the
+ * app discards any record whose payload id is not the canonical thread id (codex-rs
+ * `apply_session_meta_from_item`). Reading the last line regardless of id therefore answers
+ * with a foreign thread's provider, which is neither what the app honors nor what we may patch.
+ */
+function readLatestSessionMetaForId(path: string, expectedId: string): ParsedSessionMeta | null {
+  const raw = readFileSync(path, "utf8");
+  return readLatestSessionMetaForIdFromText(raw, expectedId);
 }
 
 function readLatestSessionMetaFromText(raw: string): ParsedSessionMeta | null {
@@ -875,18 +1031,15 @@ function updateSessionMeta(
     return { changed: false, durableProvider: false, conflict: true };
   }
 
-  const latest = readLatestSessionMeta(path);
+  // Resolve by id. The app ignores `session_meta` lines whose payload id != the canonical
+  // thread id (codex-rs `apply_session_meta_from_item`), and a forked rollout trails the source
+  // session's metadata, so the last line is not necessarily this thread's. Patching that record
+  // would clone the wrong thread's meta into a line the app discards; skipping the file entirely
+  // left forked threads unroutable and, once routed, unrestorable.
+  const latest = readLatestSessionMetaForId(path, expectedId);
   if (!latest) return { changed: false, durableProvider: false };
   const record = latest.record;
 
-  // The app ignores `session_meta` lines whose payload id != the canonical thread id
-  // (codex-rs `apply_session_meta_from_item`). Forked rollouts can embed a source session's
-  // metadata, so an id-mismatched latest line means we'd be cloning the wrong thread's meta and
-  // appending a line the app would discard. Skip rather than write a no-op/misleading line.
-  const payloadId = record.payload.id;
-  if (typeof payloadId !== "string" || payloadId !== expectedId) {
-    return { changed: false, durableProvider: false };
-  }
   const latestProvider = typeof record.payload.model_provider === "string" && record.payload.model_provider
     ? record.payload.model_provider
     : "openai";
@@ -1236,6 +1389,15 @@ function syncCodexHistoryProviderUnsafe(provider: CodexHistoryProvider, stateDbP
       throw error;
     }
 
+    // The routing writes landed. Resolve every pending marker and rewrite the manifest, so a
+    // later restore knows the relabel is OpenCodex's rather than having to infer it. A crash
+    // before this point leaves `pending`, which the observed row resolves at restore time.
+    for (const row of [...openaiRows, ...execRows]) {
+      const entry = manifest.entries[row.id];
+      if (entry?.relabel === "pending") entry.relabel = "committed";
+    }
+    writeBackup(backupPath, manifest, stateDbPath);
+
     return { rows: openaiRows.length + execRows.length, files };
   } finally {
     db.close();
@@ -1277,10 +1439,13 @@ function restoreCodexHistoryProvider(stateDbPath: string, backupPath: string): C
       for (const entry of entries) {
         const before = snapshots.get(entry.id);
         if (!before) throw new CodexHistoryIntegrityError("history_backup_snapshot_missing");
+        // Codex-side activity that arrived after OpenCodex wrote the row is the user's, and
+        // restoring the manifest's snapshot over it would erase it.
+        const restoredEvent = restoredUserEventFor(before, entry) ?? entry.hasUserEvent;
         const result = update.run(
           entry.modelProvider,
           entry.source,
-          entry.hasUserEvent,
+          restoredEvent,
           entry.id,
           before.rollout_path,
           before.model_provider,
@@ -1345,6 +1510,18 @@ function restoreCodexHistoryProvider(stateDbPath: string, backupPath: string): C
       if (error instanceof CodexHistoryIntegrityError) {
         throw new CodexHistoryIntegrityError(error.message, { rows: entries.length, files });
       }
+      // The restore landed and its readback passed; only finalization failed, so the
+      // manifest survives on disk. Record that its relabel is undone, or a later routing
+      // attempt cannot tell this entry from one still mid-route and has to keep a baseline
+      // that is now stale. Best-effort: a failure here leaves exactly the prior state.
+      try {
+        for (const entry of entries) {
+          const stored = manifest.entries[entry.id];
+          if (stored) stored.relabel = "none";
+        }
+        manifest.version = 2;
+        writeBackup(backupPath, manifest, stateDbPath);
+      } catch { /* the surviving manifest keeps its previous marker */ }
       const failureReason = classifyRecoverableHistoryError(error);
       if (failureReason) {
         return {

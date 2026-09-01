@@ -1,0 +1,521 @@
+[
+  {
+    "width": 780,
+    "inner": 780,
+    "scrollW": 780,
+    "clientW": 780,
+    "hOverflow": false,
+    "cards": [
+      {
+        "name": "openai",
+        "n": 8,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch on",
+          "custom-select"
+        ],
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "anthropic",
+        "n": 8,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "segmented models-segme",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "cursor",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "google-antigravity",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "kiro",
+        "n": 8,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch on",
+          "custom-select"
+        ],
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "opencode-free",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "opencode-go",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "openrouter",
+        "n": 8,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "segmented models-segme",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "woong",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "xai",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      }
+    ]
+  },
+  {
+    "width": 1280,
+    "inner": 1280,
+    "scrollW": 1280,
+    "clientW": 1280,
+    "hOverflow": false,
+    "cards": [
+      {
+        "name": "openai",
+        "n": 8,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch on",
+          "custom-select"
+        ],
+        "actsLeft": 710.2,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "anthropic",
+        "n": 8,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "segmented models-segme",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 684.1,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "cursor",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 798.9,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "google-antigravity",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 798.9,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "kiro",
+        "n": 8,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch on",
+          "custom-select"
+        ],
+        "actsLeft": 714.6,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "opencode-free",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 798.9,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "opencode-go",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 798.9,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "openrouter",
+        "n": 8,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "segmented models-segme",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 684.1,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "woong",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 798.9,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "xai",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 798.9,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      }
+    ]
+  },
+  {
+    "width": 1440,
+    "inner": 1440,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "hOverflow": false,
+    "cards": [
+      {
+        "name": "openai",
+        "n": 8,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch on",
+          "custom-select"
+        ],
+        "actsLeft": 870.2,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "anthropic",
+        "n": 8,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "segmented models-segme",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 844.1,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "cursor",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 958.9,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "google-antigravity",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 958.9,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "kiro",
+        "n": 8,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch on",
+          "custom-select"
+        ],
+        "actsLeft": 874.6,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "opencode-free",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 958.9,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "opencode-go",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 958.9,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "openrouter",
+        "n": 8,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "segmented models-segme",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 844.1,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "woong",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 958.9,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      },
+      {
+        "name": "xai",
+        "n": 7,
+        "kinds": [
+          "btn",
+          "switch",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "btn text-caption",
+          "switch"
+        ],
+        "actsLeft": 958.9,
+        "overflowRight": -13,
+        "zeroWidth": 0
+      }
+    ]
+  }
+]

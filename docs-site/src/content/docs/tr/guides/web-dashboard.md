@@ -58,7 +58,7 @@ kararıdır.
 | **Günlükler** | Belirteçler, talep edilen çaba ve (varsa) etkili giden çaba, çözümlenen model, sağlayıcı, durum, istek kimliği, süre ve hata ayrıntılarıyla son istekleri otomatik yenileyin. Ayrıntı görünümü, adaptör bir tane yaydığında tam akıl yürütme hat alanını içerir. Yüklenen Günlükler halkası için toplam belirteçleri ve tahmini liste fiyatı maliyetini görmek üzere donuk görüşme/oturum kimliğine göre (istemci bir tane gönderdiğinde) filtreleyin. |
 | **Kullanım / Hata Ayıklama** | Belirteç kullanımı kapsamını ve eğilimlerini inceleyin veya isteğe bağlı sağlayıcı aktarımı ve kullanım çıkarma tanılamalarını etkinleştirin. |
 | **Depolama** | Salt okunur CODEX_HOME disk dökümü (oturumlar, arşivler, DB'ler, ekler). İsteğe bağlı arşivlenmiş temizleme: en eski %N'yi önizleyin, ardından `CODEX_HOME/.trash` konumuna karantinaya alın (varsayılan) veya açık bir onay kutusu arkasında kalıcı olarak silin. **Otomatik temizleme politikası** isteğe bağlıdır ve **varsayılan olarak KAPALIDIR** (`storageCleanupPolicy.enabled`); Depolama sayfasında eşik/hedef/zamanlama/mod yapılandırın veya **Şimdi çalıştır (Run now)**'ı tetikleyin. Karantinaya alınan girdiler Depolama sayfasından geri yüklenebilir (JSONL + iş parçacıkları). Aktif oturumlar salt okunur kalır. Codex en yeni/aktif `state_*.sqlite` dosyasını kilitli tuttuğu sürece temizleme ve geri yükleme reddedilir. |
-| **Durdur** | Proxy'yi ve kurulu arka plan servisini zarif bir şekilde durdurun, yerel Codex'i geri yükleyin ve çıkın (`POST /api/stop`). |
+| **Durdur** | Proxy'yi ve kurulu arka plan servisini zarif bir şekilde durdurun, yerel Codex'i geri yükleyin ve çıkın (`POST /api/stop`). Windows'ta Görev Zamanlayıcı arka ucunda panel reddeder ve `ocx stop` çalıştırmanızı ister: görev bittikten sonra sarmalayıcı proxy'yi yeniden başlatabilir ve bu yeniden başlatma penceresini istemci yapılandırmanız geri yüklenmeden önce yalnızca proxy dışında çalışan bir stop doğrulayabilir. Reddedildiğinde hiçbir şey değiştirilmez. |
 
 ### Bir bölüme bağlantı verme
 
@@ -245,7 +245,7 @@ noktalar şunları içerir:
 | `POST /api/codex-auth/login` · `GET /api/codex-auth/login-status` | Tarayıcı girişi aracılığıyla bir havuz hesabı ekleyin. |
 | `GET /api/logs?tail=50&limit=20&offset=0&provider=...&status=5xx` | İsteğe bağlı kuyruk, sağlayıcı ve tam/sınıf durum filtreleriyle son istek meta verilerini okuyun. `limit`/`offset` ile sayfalama en yeni satırdan geriye doğru ilerler (`offset=0` en son sayfayı döndürür). Yanıt şekli: `{ timeZone, total, logs }` burada `total`, sayfalamadan önceki filtrelenmiş satır sayısıdır. |
 | `GET` / `PUT /api/subagent-models` | Öne çıkan beş `spawn_agent` geçersiz kılma modelini okuyun veya ayarlayın. |
-| `POST /api/stop` | Proxy'yi/servisi durdurun, yerel Codex'i geri yükleyin ve çıkın. |
+| `POST /api/stop` | Proxy'yi/servisi durdurun, yerel Codex'i geri yükleyin ve çıkın. Windows Görev Zamanlayıcı arka ucunda `respawnable_service`, bu durum okunamadığında `service_state_unknown` ile reddedilir; her iki durumda da hiçbir şey değiştirilmez. |
 
 :::tip
 Kontrol panelinden **Ollama Cloud** veya başka bir katalog sağlayıcısı eklemek,

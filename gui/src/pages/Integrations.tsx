@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { navigateHash, normalizeHashPath } from "../hash-routing";
 import { useT } from "../i18n/shared";
+import ClientMark from "../components/ClientMark";
+import { INTEGRATION_MARKS } from "../components/integration-marks";
 import ApiKeys from "./ApiKeys";
 import Claude from "./Claude";
 import Grok from "./Grok";
@@ -23,6 +25,18 @@ function tabDomId(tab: IntegrationTab): string {
 
 function panelDomId(tab: IntegrationTab): string {
   return `integrations-panel-${tab}`;
+}
+
+/*
+ * The strip carries 17 tabs on one row, which is precisely where a mark earns
+ * its place: the eye finds a logo faster than it reads the tenth label. Two
+ * tabs have no client behind them -- `overview` is the page itself and `keys`
+ * is a credential surface, not an integration -- so they stay text-only rather
+ * than borrowing a mark that would imply a client.
+ */
+function tabMark(tab: IntegrationTab): string | null {
+  if (tab === "overview" || tab === "keys") return null;
+  return INTEGRATION_MARKS[tab] ?? null;
 }
 
 export default function Integrations({ apiBase }: { apiBase: string }) {
@@ -109,6 +123,9 @@ export default function Integrations({ apiBase }: { apiBase: string }) {
             onClick={() => selectTab(definition.id, true)}
             onKeyDown={handleTabKeyDown}
           >
+            {tabMark(definition.id) && (
+              <ClientMark src={tabMark(definition.id)} label={t(definition.labelKey)} size={14} />
+            )}
             {t(definition.labelKey)}
           </button>
         ))}

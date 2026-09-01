@@ -93,6 +93,17 @@ async function mount(
   });
 }
 
+/** Re-render the same tree with a new journal, the way a refresh does. */
+async function rerender(journal: IntegrationJournalRow[]) {
+  await act(async () => {
+    root!.render(
+      <LanguageProvider>
+        <RollbackHistory rows={journal} onRestore={() => {}} />
+      </LanguageProvider>,
+    );
+  });
+}
+
 function visibleRows(): HTMLElement[] {
   return Array.from(container.querySelectorAll(".integration-history-row")) as unknown as HTMLElement[];
 }
@@ -175,6 +186,31 @@ test("an expired snapshot offers no control anywhere in the list", async () => {
   expect(expired!.querySelector("button")).toBeNull();
 });
 
+test("restoring from inside the fold passes that row, not the newest one", async () => {
+  /*
+   * The newest row's Undo was covered; a folded row's control was not, and the
+   * two are wired separately -- the fold maps over a sliced copy. Passing the
+   * wrong row here is the most destructive defect this component could have: the
+   * user asks to roll back to a specific point in their history and silently
+   * gets a different one, with a confirmation dialog that names the operation
+   * they chose. Nothing downstream can catch it, because the request is
+   * well-formed and the server has no way to know it was not what was meant.
+   */
+  let restored: IntegrationJournalRow | null = null;
+  const journal = rows(12);
+  await mount(journal, { onRestore: value => { restored = value; } });
+  await act(async () => { disclosure()!.open = true; });
+
+  const folded = visibleRows().filter(node => node.closest(".integration-history-older"));
+  const third = folded[2]!;
+  await act(async () => { third.querySelector("button")!.click(); });
+
+  // Row 0 is outside the fold, so the third folded row is journal[3].
+  expect(restored).not.toBeNull();
+  expect(restored!.opId).toBe(journal[3]!.opId);
+  expect(restored!.opId).not.toBe(journal[0]!.opId);
+});
+
 test("the overview names the client on every row; a client tab does not", async () => {
   /*
    * The overview is the only surface showing one chronology across clients, so
@@ -225,4 +261,36 @@ test("the disclosure is keyboard-operable and its summary is the only added tab 
   const extraStops = Array.from(region.querySelectorAll("[tabindex]"))
     .filter(node => node.getAttribute("tabindex") !== "-1");
   expect(extraStops).toHaveLength(0);
+});
+
+test("a refresh that prepends an entry does not re-collapse what was expanded", async () => {
+  /*
+   * Every restore refreshes the journal, and the refresh prepends the operation
+   * the user just performed. If the reveal count reset on that re-render, a user
+   * paging back through history would be thrown to the top by their own undo --
+   * the one moment they are certainly reading older rows. The count lives in
+   * component state and the component is not remounted, so it survives; this
+   * pins that, because moving the state up or keying the element on the newest
+   * row would silently break it.
+   */
+  await mount(rows(20));
+  const details = disclosure()!;
+  await act(async () => { details.open = true; });
+  await act(async () => { buttonByText("Show 6 more")!.click(); });
+  const revealed = visibleRows().length;
+  expect(revealed).toBeGreaterThan(7);
+
+  // The restore lands and the journal comes back one row longer.
+  const refreshed = [row({ opId: "op-new", at: new Date(Date.UTC(2026, 7, 31, 11, 0, 0)).toISOString() }), ...rows(20)];
+  await rerender(refreshed);
+
+  expect(disclosure()!.open).toBe(true);
+  // Same count, not a reset to one visible row plus a fresh page. The reveal
+  // budget applies to the older list, so prepending shifts what fills it rather
+  // than adding to it -- what matters is that the budget itself survived.
+  expect(visibleRows().length).toBe(revealed);
+  // And the row the user just created is the one now sitting outside the fold.
+  const outside = Array.from(container.querySelectorAll(".integration-history-row"))
+    .filter(node => !(node as unknown as HTMLElement).closest(".integration-history-older"));
+  expect(outside).toHaveLength(1);
 });

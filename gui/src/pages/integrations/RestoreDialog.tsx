@@ -32,6 +32,8 @@ export default function RestoreDialog({
   const t = useT();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const restoreFallbackRef = useRef<HTMLElement | null>(null);
+  const restoredRef = useRef(false);
   const [drift, setDrift] = useState(false);
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -43,12 +45,40 @@ export default function RestoreDialog({
     // focus-restore uses the same tagName check.
     const active = document.activeElement;
     restoreFocusRef.current = active?.tagName === "BUTTON" ? active as HTMLElement : null;
+    // The trigger may not survive the asynchronous history refresh. A row whose
+    // snapshot is consumed re-renders as an `expired` badge with no button
+    // (RollbackHistory.tsx:44-46), so remember the enclosing region too: it
+    // remains a focus target after the trigger disappears (#3059).
+    restoreFallbackRef.current =
+      (active?.closest?.("section, [role='region'], main") as HTMLElement | null) ?? null;
     if (dialog && !dialog.open) dialog.showModal();
     return () => {
       if (dialog?.open) dialog.close();
-      // The row's button is gone from the DOM in the collapsed case, so this is
-      // a best effort: focus returns only if the trigger survived the close.
-      restoreFocusRef.current?.focus?.();
+      const fallback = restoreFallbackRef.current;
+      // A successful restore starts the history refresh before it closes the
+      // dialog. The trigger is therefore still connected during this cleanup,
+      // but can disappear when the asynchronous refresh consumes its snapshot.
+      // Put successful restores on the stable region now; cancellation keeps
+      // the usual trigger restoration below.
+      if (restoredRef.current && fallback?.isConnected) {
+        // A region is not focusable by default; -1 makes it programmatically
+        // focusable without adding it to the Tab order.
+        if (!fallback.hasAttribute("tabindex")) fallback.setAttribute("tabindex", "-1");
+        fallback.focus?.();
+        return;
+      }
+      // Prefer the trigger when the user cancelled; fall back to its region
+      // only if it was already removed. `isConnected` is the check that
+      // matters: a detached node accepts .focus() silently and focus stays on
+      // <body>, which is the reported symptom.
+      const trigger = restoreFocusRef.current;
+      if (trigger?.isConnected) {
+        trigger.focus?.();
+        return;
+      }
+      if (!fallback?.isConnected) return;
+      if (!fallback.hasAttribute("tabindex")) fallback.setAttribute("tabindex", "-1");
+      fallback.focus?.();
     };
   }, []);
 
@@ -63,6 +93,7 @@ export default function RestoreDialog({
     setFailure(null);
     try {
       await restoreIntegration(apiBase, row.opId, drift);
+      restoredRef.current = true;
       onRestored();
       onClose();
     } catch (error) {

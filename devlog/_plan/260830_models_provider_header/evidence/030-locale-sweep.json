@@ -1,0 +1,182 @@
+[
+  {
+    "loc": "ko",
+    "width": 780,
+    "scrollW": 780,
+    "clientW": 780,
+    "hOverflow": false,
+    "spread": 0,
+    "worstOvf": -13,
+    "zeroW": 0,
+    "maxHeadH": 117.8,
+    "labelText": [
+      "기본 별칭 사용",
+      "기본 창 / 상한"
+    ]
+  },
+  {
+    "loc": "ko",
+    "width": 1024,
+    "scrollW": 1024,
+    "clientW": 1024,
+    "hOverflow": false,
+    "spread": 0,
+    "worstOvf": -13,
+    "zeroW": 0,
+    "maxHeadH": 117.4,
+    "labelText": [
+      "기본 별칭 사용",
+      "기본 창 / 상한"
+    ]
+  },
+  {
+    "loc": "ko",
+    "width": 1280,
+    "scrollW": 1280,
+    "clientW": 1280,
+    "hOverflow": false,
+    "spread": 0,
+    "worstOvf": -13,
+    "zeroW": 0,
+    "maxHeadH": 117.8,
+    "labelText": [
+      "기본 별칭 사용",
+      "기본 창 / 상한"
+    ]
+  },
+  {
+    "loc": "ko",
+    "width": 1440,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "hOverflow": false,
+    "spread": 117.9,
+    "worstOvf": -13,
+    "zeroW": 0,
+    "maxHeadH": 83,
+    "labelText": [
+      "기본 별칭 사용",
+      "기본 창 / 상한"
+    ]
+  },
+  {
+    "loc": "de",
+    "width": 780,
+    "scrollW": 780,
+    "clientW": 780,
+    "hOverflow": false,
+    "spread": 0,
+    "worstOvf": -13,
+    "zeroW": 0,
+    "maxHeadH": 152.7,
+    "labelText": [
+      "Standard-Aliase verwenden",
+      "Standardfenster / Limit"
+    ]
+  },
+  {
+    "loc": "de",
+    "width": 1024,
+    "scrollW": 1024,
+    "clientW": 1024,
+    "hOverflow": false,
+    "spread": 0,
+    "worstOvf": -13,
+    "zeroW": 0,
+    "maxHeadH": 117.8,
+    "labelText": [
+      "Standard-Aliase verwenden",
+      "Standardfenster / Limit"
+    ]
+  },
+  {
+    "loc": "de",
+    "width": 1280,
+    "scrollW": 1280,
+    "clientW": 1280,
+    "hOverflow": false,
+    "spread": 0,
+    "worstOvf": -13,
+    "zeroW": 0,
+    "maxHeadH": 117.8,
+    "labelText": [
+      "Standard-Aliase verwenden",
+      "Standardfenster / Limit"
+    ]
+  },
+  {
+    "loc": "de",
+    "width": 1440,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "hOverflow": false,
+    "spread": 0,
+    "worstOvf": -13,
+    "zeroW": 0,
+    "maxHeadH": 117.8,
+    "labelText": [
+      "Standard-Aliase verwenden",
+      "Standardfenster / Limit"
+    ]
+  },
+  {
+    "loc": "en",
+    "width": 780,
+    "scrollW": 780,
+    "clientW": 780,
+    "hOverflow": false,
+    "spread": 0,
+    "worstOvf": -13,
+    "zeroW": 0,
+    "maxHeadH": 152.2,
+    "labelText": [
+      "Use default aliases",
+      "Default window / cap"
+    ]
+  },
+  {
+    "loc": "en",
+    "width": 1024,
+    "scrollW": 1024,
+    "clientW": 1024,
+    "hOverflow": false,
+    "spread": 0,
+    "worstOvf": -13,
+    "zeroW": 0,
+    "maxHeadH": 117.8,
+    "labelText": [
+      "Use default aliases",
+      "Default window / cap"
+    ]
+  },
+  {
+    "loc": "en",
+    "width": 1280,
+    "scrollW": 1280,
+    "clientW": 1280,
+    "hOverflow": false,
+    "spread": 0,
+    "worstOvf": -13,
+    "zeroW": 0,
+    "maxHeadH": 117.8,
+    "labelText": [
+      "Use default aliases",
+      "Default window / cap"
+    ]
+  },
+  {
+    "loc": "en",
+    "width": 1440,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "hOverflow": false,
+    "spread": 60.8,
+    "worstOvf": -13,
+    "zeroW": 0,
+    "maxHeadH": 117.4,
+    "labelText": [
+      "Use default aliases",
+      "Default window / cap"
+    ]
+  }
+]

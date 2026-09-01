@@ -49,7 +49,7 @@ GUI session 簽發到服務的頁面中，並在到期或代理重啟時靜默�
 | **Models** | 開關原生 GPT 與路由模型，設定 provider allowlist、上下文上限、v1/base/v2 以及 v2 thread 數量。 |
 | **Logs** | 自動重新整理近期請求，顯示 token、請求強度、實際模型、provider、狀態、request id、耗時和錯誤詳情。 |
 | **Usage / Debug** | 檢視 token usage 覆蓋率與趨勢，或啟用可選的 provider transport 和 usage 提取診斷。 |
-| **Stop** | 優雅地停止代理和已安裝的後臺服務，恢復原生 Codex 並退出（`POST /api/stop`）。 |
+| **Stop** | 優雅地停止代理和已安裝的後臺服務，恢復原生 Codex 並退出（`POST /api/stop`）。在使用工作排程器後端的 Windows 上，儀表板會拒絕並提示改用 `ocx stop`：工作結束後包裝程序仍可能重新啟動 Proxy，只有執行在 Proxy 之外的 stop 才能在還原用戶端設定前確認這個重啟視窗。被拒絕時不會做任何變更。 |
 
 ### 連結到某個部分
 
@@ -135,7 +135,7 @@ GUI 是代理 JSON 管理 API 之上的輕量用戶端。常用 endpoint 包括�
 | `POST /api/codex-auth/login` · `GET /api/codex-auth/login-status` | 透過瀏覽器登入新增池帳號。 |
 | `GET /api/logs?tail=50&provider=...&status=5xx` | 使用 tail、provider、精確狀態碼或狀態類別篩選近期請求後設資料。 |
 | `GET` / `PUT /api/subagent-models` | 讀取或設定五個置頂的 `spawn_agent` override 模型。 |
-| `POST /api/stop` | 停止代理/服務，恢復原生 Codex 並退出。 |
+| `POST /api/stop` | 停止代理/服務，恢復原生 Codex 並退出。在 Windows 工作排程器後端會以 `respawnable_service` 拒絕，無法讀取該狀態時以 `service_state_unknown` 拒絕；兩種情況都不會做任何變更。 |
 
 :::tip
 從儀表板新增 **Ollama Cloud** 或其他目錄型 provider 時，其文字/視覺模型分類會寫入儲存的

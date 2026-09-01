@@ -274,10 +274,12 @@ test("dialog closes on Escape and returns focus to its trigger", async () => {
 });
 
 test("each client row shows its own brand mark, never a borrowed one", async () => {
-  // Nine clients ship a real first-party asset; gajae and hermes have none that
-  // qualifies and fall back to a monogram tile. The rule this guards is that no
-  // client ever borrows another product's logo — not that every client has an
-  // asset. Uniqueness is the teeth: a borrowed logo would show up twice.
+  // Every client now ships a real first-party asset, two of them traced from the
+  // vendor's own raster. The rule this guards is that no client ever borrows
+  // another product's logo; uniqueness is the teeth, because a borrowed logo
+  // would show up twice. Completeness of the map is guarded separately in
+  // client-marks-assets.test.ts, and the monogram branch stays for the next
+  // client that arrives without an asset.
   //
   // A mark reaches the DOM one of two ways. A plated brand SVG is an <img>; a
   // single-ink silhouette is a masked span so the theme supplies its color. Both
@@ -287,7 +289,7 @@ test("each client row shows its own brand mark, never a borrowed one", async () 
   const { root, container } = await mountPanel();
 
   // OpenCode is monochrome, so its mark is masked rather than an <img>.
-  const opencodeMark = row(container, "OpenCode").querySelector<HTMLElement>(".awi-clientconfig-mark-mask");
+  const opencodeMark = row(container, "OpenCode").querySelector<HTMLElement>(".client-mark--mask");
   expect(opencodeMark).not.toBeNull();
   expect(opencodeMark!.style.maskImage || opencodeMark!.style.webkitMaskImage)
     .toContain("/provider-icons/opencode.svg");
@@ -297,7 +299,7 @@ test("each client row shows its own brand mark, never a borrowed one", async () 
   // rendering paths.
   const imgSources = [...container.querySelectorAll("img")]
     .map(img => img.getAttribute("src"));
-  const maskSources = [...container.querySelectorAll<HTMLElement>(".awi-clientconfig-mark-mask")]
+  const maskSources = [...container.querySelectorAll<HTMLElement>(".client-mark--mask")]
     .map(node => {
       const raw = node.style.maskImage || node.style.webkitMaskImage;
       return raw.replace(/^url\(["']?/, "").replace(/["']?\)$/, "");
@@ -312,7 +314,7 @@ test("each client row shows its own brand mark, never a borrowed one", async () 
   }
   // A masked mark is a bare span, so it must not announce itself either; the
   // slot around it already carries aria-hidden.
-  for (const node of container.querySelectorAll(".awi-clientconfig-mark-mask")) {
+  for (const node of container.querySelectorAll(".client-mark--mask")) {
     expect(node.textContent).toBe("");
   }
 

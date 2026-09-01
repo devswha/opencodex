@@ -12,7 +12,7 @@ import { CLI_COMMANDS } from "./registry";
 import { isValidProviderName } from "../config/provider-name";
 import type { CliHead } from "./root";
 import type { ReadyArgs } from "./ready";
-import type { LiveProxy } from "../server/proxy-liveness";
+import type { LivenessIo, LiveProxy } from "../server/proxy-liveness";
 import type { OcxConfig } from "../types";
 import { hasHelpFlag, printSubcommandUsage, printUsage } from "./help";
 import { setIntegrationEnabled, shouldSyncCodexOnStart } from "../codex/desired-state";
@@ -29,7 +29,7 @@ export interface CliDispatchDeps {
   command: string | undefined;
   head: CliHead;
   loadConfig: () => OcxConfig;
-  findLiveProxy: () => Promise<LiveProxy | null>;
+  findLiveProxy: (io?: LivenessIo) => Promise<LiveProxy | null>;
   probeHostname: (hostname: string | undefined) => string;
   waitForProxy: (timeoutMs?: number) => Promise<LiveProxy | null>;
   startArgv: (port?: number) => string[];
@@ -121,14 +121,31 @@ const commandRunners: Record<string, CommandRunner> = {
     if (desired.status === "unchanged") {
       const { classifyNativeRoutedResidue } = await import("../codex/native-residue");
       if (classifyNativeRoutedResidue().kind === "clean") {
-        const alreadyOff = "Codex integration is already OFF and native; no Codex files changed.";
+        // The Codex half being a no-op says nothing about the Grok half. Returning here
+        // without stripping the fence meant `ocx restore` could report success while Grok
+        // still pointed at a stopped proxy — and the deferred-teardown recovery path
+        // (#3008) tells operators to run exactly this command before deleting a receipt,
+        // so the incomplete teardown would be signed off and the obligation erased.
+        let grokNote = "";
+        let grokCode = 0;
+        try {
+          const g = stripGrokConfig();
+          if (g.changed) grokNote = ` ${g.message}`;
+          else if (!g.ok) { grokNote = ` Grok config cleanup failed: ${g.message}`; grokCode = 1; }
+        } catch (err) {
+          grokNote = ` Grok config cleanup failed: ${err instanceof Error ? err.message : String(err)}`;
+          grokCode = 1;
+        }
+        const alreadyOff = `Codex integration is already OFF and native; no Codex files changed.${grokNote}`;
         if (restoreJson) {
           const { skippedRestoreEnvelope } = await import("../codex/inject");
-          console.log(JSON.stringify(skippedRestoreEnvelope(true, alreadyOff)));
-        } else {
+          console.log(JSON.stringify(skippedRestoreEnvelope(grokCode === 0, alreadyOff)));
+        } else if (grokCode === 0) {
           console.log(alreadyOff);
+        } else {
+          console.error(alreadyOff);
         }
-        return 0;
+        return grokCode;
       }
     }
     let r: { success: boolean; message: string };
@@ -137,26 +154,40 @@ const commandRunners: Record<string, CommandRunner> = {
     } catch (err) {
       r = { success: false, message: err instanceof Error ? err.message : String(err) };
     }
+    // Grok BEFORE either output. The JSON path used to return here, so `ocx restore --json`
+    // (and `ocx eject --json`, the same runner) could report success while the fence still
+    // pointed at the stopped proxy — and the deferred-teardown recovery on this branch
+    // tells operators to run exactly this before deleting a receipt (#3008).
+    let grokFailure: string | null = null;
+    let grokChangedMessage: string | null = null;
+    try {
+      const g = stripGrokConfig();
+      if (g.changed) grokChangedMessage = g.message;
+      else if (!g.ok) grokFailure = g.message;
+    } catch (err) {
+      grokFailure = err instanceof Error ? err.message : String(err);
+    }
     if (restoreJson) {
       // Spawned callers need the artifact-level result to distinguish a busy
       // history worker from a successful native restore. Keep stdout machine
-      // readable; human framing remains the default command contract.
-      console.log(JSON.stringify(r));
-      return r.success ? 0 : 1;
+      // readable — the Codex artifact schema is unchanged; the Grok outcome is
+      // folded into success/message so a caller cannot read a half teardown as done.
+      const message = grokFailure
+        ? `${r.message} Grok config cleanup failed: ${grokFailure}`
+        : grokChangedMessage ? `${r.message} ${grokChangedMessage}` : r.message;
+      console.log(JSON.stringify({ ...r, success: r.success && !grokFailure, message }));
+      return r.success && !grokFailure ? 0 : 1;
     }
     if (r.success) console.log(`✅ ${r.message}`);
     else {
       console.error(`⚠️  ${r.message}`);
     }
     let code = r.success ? 0 : 1;
-    try {
-      const g = stripGrokConfig();
-      if (g.changed) console.log(`✅ ${g.message}`);
-      else if (!g.ok) {
-        console.error(`⚠️  ${g.message}`);
-        code = 1;
-      }
-    } catch { /* best-effort */ }
+    if (grokChangedMessage) console.log(`✅ ${grokChangedMessage}`);
+    if (grokFailure) {
+      console.error(`⚠️  ${grokFailure}`);
+      code = 1;
+    }
     if (r.success) {
       console.log("Codex integration is OFF and plain `codex` now runs natively. Switch back with: ocx restore back");
     } else {
@@ -542,7 +573,12 @@ const commandRunners: Record<string, CommandRunner> = {
   health: async deps => {
     const healthArgs = deps.args.slice(1);
     const wantsHealthJson = healthArgs.includes("--json");
-    const live = await deps.findLiveProxy();
+    // A proxy that has only just bound can miss a single probe while its event loop
+    // is still settling startup work — the same just-started race the stop paths
+    // already retry for (#764, SERVICE_STOP_LIVENESS). Without this, `ocx health`
+    // run seconds after a service restart reports a false negative on a proxy that
+    // is in fact serving.
+    const live = await deps.findLiveProxy({ attempts: 3 });
     if (wantsHealthJson) {
       console.log(JSON.stringify({ ok: !!live, pid: live?.pid ?? null, port: live?.port ?? null }));
     } else {

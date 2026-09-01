@@ -5,11 +5,37 @@ import { IconCheck, IconAlert } from "./icons";
 import { IconChevron } from "./icons";
 import { computeSelectMenuStyle } from "./select-position";
 
-export function Switch({ on, mixed = false, onClick, disabled, label }: { on: boolean; mixed?: boolean; onClick: () => void; disabled?: boolean; label?: string }) {
+/**
+ * `label` is the accessible name. It is NOT rendered by default, which is correct
+ * for a switch inside an already-labeled row and was also a defect: the two
+ * provider-header switches passed a label and rendered a bare knob, so a sighted
+ * user could not tell what they toggled (devlog/_plan/260830_models_provider_header/
+ * 020_control_affordances.md).
+ *
+ * `showLabel` renders the label as visible text INSIDE the button, so the words
+ * both name the control and toggle it. An earlier revision put that text in an
+ * `aria-hidden` sibling span; the audit caught that clicking the visible label did
+ * nothing, because the hit target stayed the 34x20 knob. Text inside the button is
+ * the element's own content, so it supplies the accessible name on its own and
+ * `aria-label` must be dropped — otherwise `aria-label` would override the visible
+ * words and break Label-in-Name.
+ *
+ * `title` stays strictly opt-in. Defaulting it to `label` was rejected for the same
+ * reason: HTML-AAM maps `title` to the accessible description when
+ * `aria-describedby` is absent, so every untouched bare `Switch` would have been
+ * announced twice with a description that repeats its own name.
+ */
+export function Switch({ on, mixed = false, onClick, disabled, label, showLabel = false, title }: { on: boolean; mixed?: boolean; onClick: () => void; disabled?: boolean; label?: string; showLabel?: boolean; title?: string }) {
+  const labeled = showLabel && !!label;
   return (
-    <button type="button" className={`switch${on ? " on" : ""}${mixed ? " mixed" : ""}`} onClick={onClick} disabled={disabled}
-      aria-pressed={mixed ? "mixed" : on} aria-label={label ?? (on ? "enabled" : "disabled")}>
+    <button type="button"
+      className={`switch${on ? " on" : ""}${mixed ? " mixed" : ""}${labeled ? " switch-labeled" : ""}`}
+      onClick={onClick} disabled={disabled}
+      aria-pressed={mixed ? "mixed" : on}
+      aria-label={labeled ? undefined : (label ?? (on ? "enabled" : "disabled"))}
+      title={title}>
       <span className="knob" />
+      {labeled ? <span className="switch-labeled-text text-label muted">{label}</span> : null}
     </button>
   );
 }

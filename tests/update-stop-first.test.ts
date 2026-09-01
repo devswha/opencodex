@@ -94,7 +94,7 @@ describe("update stops the running proxy before replacing files", () => {
     expect(stopAt).toBeGreaterThan(-1);
     expect(updateAt).toBeGreaterThan(-1);
     expect(stopAt).toBeLessThan(updateAt);
-    expect(updateSource).toContain("if (serviceWasInstalled || readPid() || readRuntimePort())");
+    expect(updateSource).toContain("if (serviceWasInstalled || readPid() || readRuntimePort() || pendingTeardownOutstanding())");
   });
 
   test("integrity pre-flight runs BEFORE the stop so anomalous metadata never unloads the proxy", () => {
@@ -306,10 +306,12 @@ esac
     // may claim a DB lock or that every routed thread is hidden.
     expect(updateSource).toContain("export function historyRestoreIncomplete(");
     expect(updateSource).toContain('name.startsWith("codex-history-backup-") && name.endsWith(".json")');
-    expect(updateSource).toContain("if (historyRestoreIncomplete())");
+    // The warning now also fires on the dedicated stop code, so the manifest check is one
+    // of two triggers rather than the whole condition (#3008).
+    expect(updateSource).toContain("if (historyOnlyStop || historyRestoreIncomplete())");
     expect(launcherSource).toContain("function historyRestoreIncomplete()");
     expect(launcherSource).toContain('name.startsWith("codex-history-backup-") && name.endsWith(".json")');
-    expect(launcherSource).toContain("if (historyRestoreIncomplete())");
+    expect(launcherSource).toContain("if (historyOnlyStop || historyRestoreIncomplete())");
     const warnAt = launcherSource.indexOf("Codex resume-history metadata restore is incomplete");
     const installAt = launcherSource.indexOf("transactionalNpmUpdate({");
     expect(warnAt).toBeGreaterThan(-1);
@@ -320,9 +322,16 @@ esac
   });
 
   test("the stop gate covers service-managed and orphaned proxies whose pid file is stale/missing", () => {
-    expect(updateSource).toContain("if (serviceWasInstalled || readPid() || readRuntimePort())");
-    expect(launcherSource).toContain("if (serviceWasInstalled || hasRuntimeState)");
-    expect(launcherSource).toContain("stopRes.status !== 0 || stillHasRuntimeState");
+    // A pending-teardown receipt is a fourth reason to stop: after a parent crashed
+    // mid-deferral the service, pid and runtime records can all be absent while shared
+    // client config still points at a proxy that is gone (#3008).
+    expect(updateSource).toContain("if (serviceWasInstalled || readPid() || readRuntimePort() || pendingTeardownOutstanding())");
+    expect(launcherSource).toContain("if (serviceWasInstalled || hasRuntimeState || hasPendingTeardown)");
+    // The rule now lives in the shared post-stop decision both lanes import (#3008): a
+    // history-only stop proceeds, every other nonzero status and any surviving runtime
+    // state aborts. Pinned by tests/update-stop-classification.test.ts.
+    expect(launcherSource).toContain("decidePostStopUpdate({");
+    expect(launcherSource).toContain("hasRuntimeState: stillHasRuntimeState");
   });
 
   test("GUI worker update children use pipe stdio so background updates do not open consoles", () => {

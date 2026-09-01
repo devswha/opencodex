@@ -1,0 +1,317 @@
+[
+  {
+    "width": 780,
+    "inner": 780,
+    "scrollW": 780,
+    "clientW": 780,
+    "hOverflow": false,
+    "labeledSwitches": 20,
+    "visibleLabelText": [
+      "Use default aliases",
+      "Default window / cap",
+      "Use default aliases"
+    ],
+    "cards": [
+      {
+        "name": "openai",
+        "n": 8,
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": true,
+        "labeled": 2
+      },
+      {
+        "name": "anthropic",
+        "n": 8,
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "cursor",
+        "n": 7,
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "google-antigravity",
+        "n": 7,
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "kiro",
+        "n": 8,
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": true,
+        "labeled": 2
+      },
+      {
+        "name": "opencode-free",
+        "n": 7,
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "opencode-go",
+        "n": 7,
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "openrouter",
+        "n": 8,
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "woong",
+        "n": 7,
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "xai",
+        "n": 7,
+        "actsLeft": 281,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      }
+    ]
+  },
+  {
+    "width": 1280,
+    "inner": 1280,
+    "scrollW": 1280,
+    "clientW": 1280,
+    "hOverflow": false,
+    "labeledSwitches": 20,
+    "visibleLabelText": [
+      "Use default aliases",
+      "Default window / cap",
+      "Use default aliases"
+    ],
+    "cards": [
+      {
+        "name": "openai",
+        "n": 8,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": true,
+        "labeled": 2
+      },
+      {
+        "name": "anthropic",
+        "n": 8,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "cursor",
+        "n": 7,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "google-antigravity",
+        "n": 7,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "kiro",
+        "n": 8,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": true,
+        "labeled": 2
+      },
+      {
+        "name": "opencode-free",
+        "n": 7,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "opencode-go",
+        "n": 7,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "openrouter",
+        "n": 8,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "woong",
+        "n": 7,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "xai",
+        "n": 7,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      }
+    ]
+  },
+  {
+    "width": 1440,
+    "inner": 1440,
+    "scrollW": 1440,
+    "clientW": 1440,
+    "hOverflow": false,
+    "labeledSwitches": 20,
+    "visibleLabelText": [
+      "Use default aliases",
+      "Default window / cap",
+      "Use default aliases"
+    ],
+    "cards": [
+      {
+        "name": "openai",
+        "n": 8,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": true,
+        "labeled": 2
+      },
+      {
+        "name": "anthropic",
+        "n": 8,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "cursor",
+        "n": 7,
+        "actsLeft": 640.3,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "google-antigravity",
+        "n": 7,
+        "actsLeft": 640.3,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "kiro",
+        "n": 8,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": true,
+        "labeled": 2
+      },
+      {
+        "name": "opencode-free",
+        "n": 7,
+        "actsLeft": 640.3,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "opencode-go",
+        "n": 7,
+        "actsLeft": 640.3,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "openrouter",
+        "n": 8,
+        "actsLeft": 577,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "woong",
+        "n": 7,
+        "actsLeft": 640.3,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      },
+      {
+        "name": "xai",
+        "n": 7,
+        "actsLeft": 640.3,
+        "overflowRight": -13,
+        "zeroWidth": 0,
+        "capSlot": false,
+        "labeled": 2
+      }
+    ]
+  }
+]

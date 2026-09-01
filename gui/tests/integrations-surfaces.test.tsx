@@ -184,6 +184,24 @@ async function mountClient(
   await act(async () => { await new Promise<void>(resolve => testWindow.setTimeout(resolve, 30)); });
 }
 
+/**
+ * Mount again inside ONE test, against a fresh fixture.
+ *
+ * `useDataSurface` caches by `apiBase`, so a second mount on the same base
+ * replays the first response and the new `stateResponse` has no effect. Rotating
+ * the base is what makes a state sweep in a single test possible at all.
+ */
+async function remountClient(client: "hermes" | "dsh" = "hermes"): Promise<void> {
+  if (root) {
+    const current = root;
+    await act(async () => { current.unmount(); });
+    root = null;
+  }
+  mountCount += 1;
+  apiBase = `http://ocx-test-${mountCount}.invalid`;
+  await mountClient(true, client);
+}
+
 test("the DSH surface uses localized ownership semantics and its own API route", async () => {
   stateResponse = () => json(status({
     clientId: "dsh",
@@ -271,6 +289,102 @@ test("conflict locks the switch instead of guessing", async () => {
   stateResponse = () => json(status({ state: "conflict", reason: "foreign-edit" }));
   await mountClient();
   expect(toggleSwitch().disabled).toBe(true);
+});
+
+/*
+ * The overwrite escape hatch.
+ *
+ * Conflict was a dead end before it existed: the switch locks and the only way
+ * forward was hand-editing the file. These pin the two halves of the deal --
+ * the button appears for exactly one state, and it costs a confirmation.
+ */
+test("a conflict offers an overwrite, and no other state does", async () => {
+  for (const state of ["absent", "current", "stale", "unsafe"] as const) {
+    stateResponse = () => json(status({ state }));
+    await remountClient();
+    expect(buttonByText("Replace")).toBeUndefined();
+  }
+
+  stateResponse = () => json(status({ state: "conflict", reason: "unowned-key" }));
+  await remountClient();
+  expect(buttonByText("Replace")).toBeDefined();
+});
+
+test("a client with no config on disk is never offered an overwrite", async () => {
+  // installed:false means there is nothing to replace; the server refuses it as
+  // not_installed, so offering the button would only produce an error dialog.
+  stateResponse = () => json(status({ state: "conflict", reason: "unowned-key", installed: false }));
+  await mountClient();
+  expect(buttonByText("Replace")).toBeUndefined();
+});
+
+test("the overwrite button mutates nothing until the dialog is confirmed", async () => {
+  stateResponse = () => json(status({ state: "conflict", reason: "unowned-key" }));
+  await mountClient();
+
+  await act(async () => { buttonByText("Replace")!.click(); });
+  // Opening the dialog is not the operation.
+  expect(requests.some(request => request.method === "PUT")).toBe(false);
+
+  // The dialog names the file the user is about to lose a block from, and says
+  // the change is recoverable.
+  const dialog = container.querySelector(".integration-consequence-dialog")!;
+  expect(dialog.textContent).toContain("/tmp/home/.hermes/config.yaml");
+  expect(dialog.textContent).toContain("rollback list");
+
+  const confirm = Array.from(dialog.querySelectorAll("button")).find(
+    button => (button.textContent ?? "").trim() === "Replace",
+  ) as HTMLButtonElement;
+  await act(async () => { confirm.click(); });
+
+  const put = requests.find(request => request.method === "PUT");
+  expect(put?.body).toEqual({ enabled: true, overwriteConflict: true });
+});
+
+test("a foreign edit and an unowned block get different dialog copy", async () => {
+  stateResponse = () => json(status({ state: "conflict", reason: "foreign-edit" }));
+  await remountClient();
+  await act(async () => { buttonByText("Replace")!.click(); });
+  // The user's own edit is what is discarded, and the copy has to say so.
+  expect(container.querySelector(".integration-consequence-dialog")!.textContent)
+    .toContain("Your edit inside the opencodex block");
+
+  stateResponse = () => json(status({ state: "conflict", reason: "unowned-key" }));
+  await remountClient();
+  await act(async () => { buttonByText("Replace")!.click(); });
+  expect(container.querySelector(".integration-consequence-dialog")!.textContent)
+    .toContain("A block we did not write");
+});
+
+test("the dialog's config path can break mid-string, so it cannot overflow a phone", async () => {
+  /*
+   * The dialog is 370px wide at a 390px viewport and the path it names is a long
+   * unbroken token -- a real one is `~/.zcode/v2/config.json` and worse. Without a
+   * break opportunity inside the word that token overflows its own container,
+   * which is how the one piece of information the user needs (WHICH file) ends up
+   * off screen.
+   *
+   * happy-dom does no layout, so measured geometry is not available here; what is
+   * checkable is that the path renders inside an element the stylesheet allows to
+   * break. Rendered geometry was measured separately at 390px in both themes
+   * (dialog 370px wide at left:10, code element 212px, no overflow).
+   */
+  // A synthetic home, not a real one: privacy:scan rejects a committed /Users/<name>/.
+  const longPath = "/home/dev/Library/Application Support/SomeVendor/deeply/nested/config.json";
+  stateResponse = () => json(status({
+    state: "conflict",
+    reason: "unowned-key",
+    configPath: longPath,
+  }));
+  await remountClient();
+  await act(async () => { buttonByText("Replace")!.click(); });
+
+  const dialog = container.querySelector(".integration-consequence-dialog")!;
+  const code = dialog.querySelector("code");
+  // A <code> element, not bare text: `.integration-consequence-body code` is what
+  // carries `overflow-wrap: anywhere`.
+  expect(code).not.toBeNull();
+  expect(code!.textContent).toBe(longPath);
 });
 
 test("unsafe locks the switch instead of guessing", async () => {
@@ -559,6 +673,116 @@ test("a drifted restore asks a second time instead of failing", async () => {
   expect((posts[1] as { confirmDrift?: boolean }).confirmDrift).toBe(true);
 });
 
+/**
+ * #3059: a successful restore starts an asynchronous history refresh before closing
+ * the dialog. That means normal focus restoration first finds the trigger still in
+ * the tree, and only later does the refresh consume its snapshot and remove the
+ * trigger. The region must receive focus on the successful close, before that later
+ * removal can send focus to <body>.
+ */
+test("a successful restore keeps focus on the stable region after refresh removes its trigger", async () => {
+  const [{ createRoot }, { LanguageProvider }, { default: RestoreDialog }] = await Promise.all([
+    import("react-dom/client"),
+    import("../src/i18n/provider"),
+    import("../src/pages/integrations/RestoreDialog"),
+  ]);
+
+  // The shape RollbackHistory renders: a stable region holding the row trigger.
+  const region = testWindow.document.createElement("section");
+  const trigger = testWindow.document.createElement("button");
+  region.appendChild(trigger);
+  testWindow.document.body.appendChild(region);
+  trigger.focus();
+  expect(testWindow.document.activeElement).toBe(trigger);
+
+  const row = {
+    opId: "op-consumed",
+    clientId: "hermes" as const,
+    kind: "apply" as const,
+    at: "2026-08-02T09:00:00.000Z",
+    configPath: "/tmp/home/.hermes/config.yaml",
+    snapshot: "stored" as const,
+    undoable: false,
+  };
+  let resolveRestore: ((response: Response) => void) | undefined;
+  const restoreFetch = ((input: RequestInfo | URL) => {
+    if (String(input).includes("/restore")) {
+      return new Promise<Response>(resolve => { resolveRestore = resolve; });
+    }
+    return Promise.resolve(json({ operations: [] }));
+  }) as typeof fetch;
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: restoreFetch });
+  Object.defineProperty(testWindow, "fetch", { configurable: true, value: restoreFetch });
+
+  await act(async () => {
+    root = createRoot(container);
+    root.render(
+      <LanguageProvider>
+        <RestoreDialog
+          apiBase={apiBase}
+          row={row}
+          onRestored={() => {}}
+          onClose={() => {
+            root!.unmount();
+            root = null;
+          }}
+        />
+      </LanguageProvider>,
+    );
+  });
+
+  await act(async () => { buttonByText("Restore")!.click(); });
+  expect(resolveRestore).toBeDefined();
+
+  // Restore succeeds and closes while the trigger is still connected.
+  await act(async () => { resolveRestore!(json({ ok: true })); });
+  expect(trigger.isConnected).toBe(true);
+  expect(testWindow.document.activeElement).toBe(region);
+
+  // The asynchronous history refresh then consumes the snapshot and its trigger.
+  trigger.remove();
+  expect(testWindow.document.activeElement).toBe(region);
+  expect(testWindow.document.activeElement).not.toBe(testWindow.document.body);
+  region.remove();
+});
+
+test("focus returns to the trigger itself when it survived", async () => {
+  const [{ createRoot }, { LanguageProvider }, { default: RestoreDialog }] = await Promise.all([
+    import("react-dom/client"),
+    import("../src/i18n/provider"),
+    import("../src/pages/integrations/RestoreDialog"),
+  ]);
+
+  const region = testWindow.document.createElement("section");
+  const trigger = testWindow.document.createElement("button");
+  region.appendChild(trigger);
+  testWindow.document.body.appendChild(region);
+  trigger.focus();
+
+  const row = {
+    opId: "op-kept",
+    clientId: "hermes" as const,
+    kind: "apply" as const,
+    at: "2026-08-02T09:00:00.000Z",
+    configPath: "/tmp/home/.hermes/config.yaml",
+    snapshot: "stored" as const,
+    undoable: true,
+  };
+  await act(async () => {
+    root = createRoot(container);
+    root.render(
+      <LanguageProvider>
+        <RestoreDialog apiBase={apiBase} row={row} onClose={() => {}} onRestored={() => {}} />
+      </LanguageProvider>,
+    );
+  });
+  await act(async () => { root!.unmount(); root = null; });
+
+  // The fallback must not preempt a trigger that is still there.
+  expect(testWindow.document.activeElement).toBe(trigger);
+  region.remove();
+});
+
 test("a card toggles its own client without a trip to the sub-page", async () => {
   // Same rule as the client page: off means disable, for `stale` too.
   stateResponse = () => json({ clients: [status({ state: "stale" })] });
@@ -749,4 +973,109 @@ test("a populated overview journal collapses instead of flooding the page", asyn
   // The cross-client chronology is still THERE, just folded.
   await act(async () => { details.open = true; });
   expect(container.querySelectorAll(".integration-history-older .integration-history-row").length).toBeGreaterThan(1);
+});
+
+/*
+ * Adding a file client means editing three hand-maintained lists that no type
+ * relates to each other: CLIENTS in client-config-clients.ts, INTEGRATION_TABS,
+ * and FILE_CLIENTS. Miss one and the client half-ships -- it exports from the
+ * API tab but has no Integrations tab to toggle from, or it owns a tab that
+ * renders a page for a client the file surface does not recognize. Both compile,
+ * and both look complete from whichever half you happen to open.
+ *
+ * Aside is the reason this exists: it needed all three, and nothing would have
+ * failed if it had landed in two.
+ */
+test("every export client has both an Integrations tab and a file-surface entry", async () => {
+  const { CLIENTS } = await import("../src/components/apikeys-workspace/client-config-clients");
+  const { TABS, FILE_CLIENTS } = await import("../src/pages/integrations/integration-tabs");
+
+  const tabIds = new Set(TABS.map(tab => tab.id as string));
+  const missing = CLIENTS.filter(id => !tabIds.has(id) || !FILE_CLIENTS.has(id as never));
+  expect(missing).toEqual([]);
+
+  // And no tab claims a client that does not exist, which would render a page
+  // for an id the config surface cannot answer for.
+  const clientIds = new Set<string>(CLIENTS);
+  const orphaned = [...FILE_CLIENTS].filter(id => !clientIds.has(id));
+  expect(orphaned).toEqual([]);
+});
+
+/*
+ * The mark has to reach every surface, not just the API tab it started on. Three
+ * of them are checked here; the fourth is client-config-panel.test.tsx.
+ *
+ * These assert on the rendered DOM rather than on the map, because the map being
+ * right and the component never being called is exactly the failure a map-only
+ * test cannot see -- and it is the failure that would ship, since the marks were
+ * correct in data long before any surface drew them.
+ */
+test("a client page header draws its client's mark", async () => {
+  stateResponse = () => json(status({
+    clientId: "dsh",
+    configPath: "/tmp/home/.dsh/settings.yaml",
+  }));
+  await mountClient(true, "dsh");
+
+  const head = container.querySelector(".integration-client-head")!;
+  const mark = head.querySelector<HTMLElement>(".client-mark");
+  expect(mark, "the client page header should carry a mark").not.toBeNull();
+  // dsh is single-ink but its ink is DeepSeek blue, so it renders as an image.
+  expect(mark!.querySelector("img")?.getAttribute("src")).toBe("/provider-icons/deepseek-harness.svg");
+  // Decoration beside a heading that already names the client.
+  expect(mark!.getAttribute("aria-hidden")).toBe("true");
+});
+
+test("every overview card draws a mark, and none of them names itself", async () => {
+  await mountOverview();
+
+  const cards = [...container.querySelectorAll(".integration-card")];
+  expect(cards.length).toBeGreaterThan(4);
+  const bare = cards
+    .filter(card => card.querySelector(".client-mark") === null)
+    .map(card => card.getAttribute("data-client"));
+  expect(bare).toEqual([]);
+
+  // A mark next to a visible label must not join the accessible name, or a
+  // screen reader says the client twice.
+  for (const mark of container.querySelectorAll(".client-mark")) {
+    expect(mark.getAttribute("aria-hidden")).toBe("true");
+  }
+  for (const img of container.querySelectorAll(".client-mark img")) {
+    expect(img.getAttribute("alt")).toBe("");
+  }
+
+  // The card head is space-between; the mark must sit with the title rather than
+  // after the badge, so it is the first child.
+  const head = cards[0]!.querySelector(".integration-card-head")!;
+  expect(head.firstElementChild?.classList.contains("client-mark")).toBe(true);
+});
+
+test("the tab strip marks every client tab and leaves the two non-client tabs bare", async () => {
+  const [{ createRoot }, { LanguageProvider }, { default: Integrations }] = await Promise.all([
+    import("react-dom/client"),
+    import("../src/i18n/provider"),
+    import("../src/pages/Integrations"),
+  ]);
+  await act(async () => {
+    root = createRoot(container);
+    root.render(
+      <LanguageProvider>
+        <Integrations apiBase={apiBase} />
+      </LanguageProvider>,
+    );
+  });
+  await act(async () => { await new Promise<void>(resolve => testWindow.setTimeout(resolve, 30)); });
+
+  const tabs = [...container.querySelectorAll<HTMLElement>(".page-tab")];
+  expect(tabs.length).toBeGreaterThan(10);
+  const marked = tabs.filter(tab => tab.querySelector(".client-mark") !== null);
+  // overview and keys carry no client, so they carry no mark.
+  expect(tabs.length - marked.length).toBe(2);
+
+  const codexTab = tabs.find(tab => tab.id === "integrations-tab-codex")!;
+  expect(codexTab.querySelector(".client-mark img")?.getAttribute("src")).toBe("/provider-icons/openai.svg");
+  // The label lost its "CLI": the mark carries that identity now, and the row
+  // covers the app and SDK too.
+  expect(codexTab.textContent).toBe("Codex");
 });

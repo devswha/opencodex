@@ -1,9 +1,14 @@
 import { spawn, spawnSync } from "node:child_process";
+import { STOP_HISTORY_INCOMPLETE_EXIT_CODE } from "./stop-contract.mjs";
+import { proxyIdentityAt } from "../server/proxy-liveness";
+import { probeProxyLiveness } from "./proxy-liveness-probe.mjs";
+import { decidePostStopUpdate } from "./stop-decision.mjs";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { getConfigDir, loadConfig } from "../config";
 import { readPid, readRuntimePort } from "../config/process-state";
+import { pendingTeardownOutstanding } from "../config/pending-teardown";
 import { npmInvocation } from "./npm-invocation.mjs";
 import {
   npmCachePreflightFailureMessage,
@@ -246,8 +251,13 @@ export async function runUpdate(): Promise<void> {
   // modules after startup, so an in-place update leaves it executing mixed old/new code.
   // Gate on the service and the runtime-port record too, not just the pid file — a
   // service-managed or orphaned proxy can be live while ocx.pid is stale/missing.
+  //
+  // An outstanding pending-teardown receipt is a fourth reason to run the stop. After a
+  // parent crashed mid-deferral all three of the other signals can be absent while the
+  // shared client config still points at a proxy that is gone; installing over that
+  // silently skips the recovery the receipt was written to trigger (#3008).
   // Full `ocx stop` semantics (drain, service stop, restore).
-  if (serviceWasInstalled || readPid() || readRuntimePort()) {
+  if (serviceWasInstalled || readPid() || readRuntimePort() || pendingTeardownOutstanding()) {
     console.log("⏹  Stopping the running proxy before updating...");
     const stopStdio = updateChildStdio();
     const stop = spawnSync(process.execPath, selfLaunchArgv(["stop"]), {
@@ -256,17 +266,39 @@ export async function runUpdate(): Promise<void> {
       windowsHide: true,
     });
     if (stopStdio === "pipe") logSpawnOutput("", stop);
-    if (stop.status !== 0 || readPid() || readRuntimePort()) {
+    // One decision, shared with the npm launcher (#3008). The two lanes disagreeing about
+    // the same situation is how this shipped fixed on one side only. Absent PID and runtime
+    // files are weak evidence - a crashed-but-listening proxy leaves none - so the captured
+    // endpoint is asked, and `null` from proxyIdentityAt covers refusal AND timeout alike.
+    const identity = await proxyIdentityAt(capturedListen.port, { hostname: capturedListen.hostname });
+    const decision = decidePostStopUpdate({
+      status: stop.status,
+      hasRuntimeState: !!(readPid() || readRuntimePort()),
+      // Re-checked AFTER the stop: a quarantined receipt lets the stop itself succeed
+      // (there is nothing left to stop), so a pre-stop check alone let the retry install
+      // over a teardown that never ran.
+      teardownOutstanding: pendingTeardownOutstanding(),
+      liveness: identity ? "live" : probeProxyLiveness(capturedListen.port, capturedListen.hostname),
+    });
+    const historyOnlyStop = decision.reason === "history-only";
+    if (!decision.proceed) {
       if (trayWasRunning) {
         try {
           const { startWindowsTray } = await import("../tray/windows");
           startWindowsTray();
         } catch { /* preserve the proxy stop failure */ }
       }
-      console.error("⚠️  Could not stop the running proxy; aborting the update. Run 'ocx stop' and retry.");
+      if (decision.reason === "teardown-outstanding") {
+        console.error("⚠️  A shared teardown from an earlier stop is still outstanding and needs manual review; aborting the update.");
+        console.error("    Confirm no proxy is running, run 'ocx restore', then remove the pending-teardown file in your opencodex home.");
+      } else {
+        console.error(decision.reason === "proxy-unknown"
+          ? `⚠️  Could not confirm the proxy on ${capturedListen.hostname}:${capturedListen.port} is stopped; aborting the update. Run 'ocx stop' and retry.`
+          : "⚠️  Could not stop the running proxy; aborting the update. Run 'ocx stop' and retry.");
+      }
       process.exit(1);
     }
-    if (historyRestoreIncomplete()) {
+    if (historyOnlyStop || historyRestoreIncomplete()) {
       console.warn(
         "⚠️  Codex resume-history metadata restore is incomplete (a backup manifest remains).\n" +
         "    The DB may be busy or the manifest/target may need review; untracked routed history is intentionally unchanged.\n" +

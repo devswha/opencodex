@@ -75,6 +75,8 @@ export type HistoryWorkerResult =
       readonly reason: "busy" | "database" | "unsafe-path" | "desired_disabled" | "desired_enabled" }
   | { readonly type: "error"; readonly requestId: string; readonly jobId: string;
       readonly message: string; readonly reason?: CodexHistoryFailureReason;
+      /** Specific integrity condition, so a non-retryable one can be named as such. */
+      readonly integrityCode?: string;
       readonly rows?: number; readonly files?: number };
 
 const OPERATIONS: ReadonlySet<string> = new Set<CodexHistoryWorkerOperation>([
@@ -181,6 +183,7 @@ export function runHistoryUnitUnderLock(
       jobId,
       message: "history_transition_failed",
       ...(result.failureReason ? { reason: result.failureReason } : {}),
+      ...(result.integrityCode ? { integrityCode: result.integrityCode } : {}),
       ...(result.rows > 0 || result.files > 0 ? { rows: result.rows, files: result.files } : {}),
     };
   }
