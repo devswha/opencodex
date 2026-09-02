@@ -2314,11 +2314,16 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           },
         ],
         async () => {
-          await backgroundLifecycle.release();
-          await releaseNativeMainStartupLifecycle(server);
-          // icacls.exe from hardenConfigDir() holds the config dir open; a caller that removes
-          // the dir right after stop() resolves would hit EPERM/EBUSY on Windows otherwise.
-          await flushConfigDirHardening(startupConfigDir);
+          try {
+            await backgroundLifecycle.release();
+            await releaseNativeMainStartupLifecycle(server);
+          } finally {
+            // icacls.exe from hardenConfigDir() holds the config dir open; a caller that
+            // removes the dir right after stop() settles would hit EPERM/EBUSY on Windows
+            // otherwise. Runs even when an earlier release rejected — that rejection still
+            // propagates, but not before the child is drained.
+            await flushConfigDirHardening(startupConfigDir);
+          }
         },
       );
     },

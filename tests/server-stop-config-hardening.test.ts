@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { saveConfig } from "../src/config";
 import { flushConfigDirHardening, flushConfigDirHardeningForTests, hardenConfigDir } from "../src/config/paths";
 import * as windowsAcl from "../src/lib/windows-secret-acl";
+import * as nativeStartup from "../src/codex/native-profile-startup";
 import { startServer } from "../src/server";
 import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
@@ -86,6 +87,41 @@ test("server.stop(true) resolves promptly when no flight is in progress", async 
   const t0 = Date.now();
   await server.stop(true);
   expect(Date.now() - t0).toBeLessThan(2_000);
+});
+
+test("a rejected native-lifecycle release still drains the ACL flight before stop() settles", async () => {
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  let flightSettled = false;
+  const aclSpy = spyOn(windowsAcl, "hardenSecretDirAsync").mockImplementation(async () => {
+    await pending;
+    flightSettled = true;
+    return { ok: true };
+  });
+  const releaseSpy = spyOn(nativeStartup, "releaseNativeMainStartupLifecycle").mockImplementation(async () => {
+    throw new Error("native release exploded");
+  });
+  let server: ReturnType<typeof startServer> | null = null;
+  try {
+    server = startServer(0);
+    let settled: "pending" | "rejected" | "resolved" = "pending";
+    const stopping = server.stop(true).then(() => { settled = "resolved"; }, () => { settled = "rejected"; });
+    await new Promise(resolve => setTimeout(resolve, 60));
+    // The release already threw, but stop() must not settle until the flight is drained.
+    expect(settled).toBe("pending");
+    expect(flightSettled).toBe(false);
+    release();
+    await stopping;
+    expect(flightSettled).toBe(true);
+    expect(settled).toBe("rejected");
+    server = null;
+  } finally {
+    release();
+    releaseSpy.mockRestore();
+    aclSpy.mockRestore();
+    if (server) await server.stop(true).catch(() => undefined);
+  }
 });
 
 test("flushConfigDirHardening scopes to one directory and is a no-op for a stranger", async () => {
