@@ -17,7 +17,7 @@ Branch `codex/win-fsync-fixtures` on top of 010.
 - Dedicated Windows cases stay `"win32"` and `await flushPendingResponseSpillsForTests()` before
   settled-state assertions.
 - `tests/responses-state.test.ts:1277`: inject sync+async principal runners like
-  `tests/helpers/responses-state-never-settling-acl-child.ts:17`; move `release()` into a
+  `tests/helpers/responses-state-never-settling-acl-child.ts:44`; move `release()` into a
   `finally` that covers every await after gate creation (this is what wedged :1328 for 60 s).
 
 ## E — bump CLI (harness)

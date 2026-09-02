@@ -10,9 +10,12 @@ Branch `codex/win-acl-lifecycle` off origin/dev.
 - `src/server/index.ts` `startServer`: capture the effective config dir before `loadConfig()`;
   in the composite `server.stop` finalizer (~2312) await `flushConfigDirHardening(dir)` after the
   listeners close, before returning.
-- Test: `tests/server-stop-config-hardening.test.ts` — inject a never-settling async icacls runner
-  via `setAsyncIcaclsRunnerForTests` with a controllable promise, start a server, call
-  `stop(true)`, assert it stays pending until the runner settles, then resolves.
+- Test: `tests/server-stop-config-hardening.test.ts` — `setPlatformForTests("win32")` (otherwise
+  `windowsSecretAclApplies()` at `windows-secret-acl.ts:469` is false and no flight starts), inject
+  a controllable async icacls runner via `setAsyncIcaclsRunnerForTests` plus a principal resolver,
+  start a server, call `stop(true)`, assert it stays pending until the runner settles, then
+  resolves. Every seam restore and the gate release live in `finally` so an assertion failure
+  cannot wedge cleanup.
 
 ## tests (harness)
 
@@ -35,5 +38,5 @@ shutdown contract owns every spawned child; retry-on-EPERM only as a harness fal
 
 ## Checks
 
-    bun test tests/server-stop-config-hardening.test.ts tests/codex-account-store.test.ts tests/codex-auth-api.test.ts tests/remove-tree.test.ts
+    bun test tests/server-stop-config-hardening.test.ts tests/codex-account-store.test.ts tests/codex-auth-api.test.ts tests/remove-tree-helper.test.ts
     bun run typecheck
