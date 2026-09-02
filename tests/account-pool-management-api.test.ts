@@ -8,6 +8,7 @@ import { saveConfig } from "../src/config";
 import { startServer } from "../src/server";
 import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 function makeCodexConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
@@ -175,7 +176,7 @@ describe("Anthropic account pool strategy management API", () => {
     else process.env.OPENCODEX_HOME = previousHome;
     isolatedCodexHome?.restore();
     isolatedCodexHome = null;
-    if (testDir) rmSync(testDir, { recursive: true, force: true });
+    if (testDir) removeTreeWithRetry(testDir);
   });
 
   test("GET /api/oauth/accounts/pool surfaces strategy defaults", async () => {
@@ -496,4 +497,3 @@ describe("generic OAuth pool-settings contract (#695)", () => {
     }
   });
 });
-

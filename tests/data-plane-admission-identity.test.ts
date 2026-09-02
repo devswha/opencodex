@@ -8,13 +8,14 @@ import {
   resolveDataPlaneAdmissionSecret,
   resolveResponsesApiAuth,
 } from "../src/server/auth-cors";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
 import { startServer } from "../src/server";
 import { buildResponsesWsData } from "../src/server/ws-bridge";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 // The admission path already knew WHICH key matched and threw it away. These
 // tests pin two things at once: the id now survives, and no admission decision
@@ -229,7 +230,7 @@ describe("the Responses WebSocket handshake", () => {
       else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = previousAdminToken;
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 

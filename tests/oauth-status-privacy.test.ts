@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   clearLoginState,
@@ -20,26 +21,35 @@ import { handleManagementAPI } from "../src/server/management-api";
 import { handleResponses } from "../src/server/responses";
 import type { OcxConfig } from "../src/types";
 import { ManagementRequest } from "./helpers/management-auth";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, `.tmp-oauth-status-privacy-test-${process.pid}`);
+let TEST_DIR = "";
 const PUBLIC_OAUTH_ERROR = "OAuth authentication failed. Check the OpenCodex account status and retry.";
 const PUBLIC_ERROR_CANARY = "C:\\Users\\Alice\\.opencodex\\auth.json.ocx-tmp \\\\server\\share\\auth.json /home/alice/.opencodex/auth.json";
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 let previousOpencodexHome: string | undefined;
 
 describe("OAuth status privacy", () => {
   beforeEach(() => {
     clearLoginState("xai");
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-    mkdirSync(TEST_DIR, { recursive: true });
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-oauth-status-privacy-"));
     process.env.OPENCODEX_HOME = TEST_DIR;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clearLoginState("xai");
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    await flushConfigDirHardeningForTests();
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    if (TEST_DIR) removeTreeWithRetry(TEST_DIR);
+    TEST_DIR = "";
   });
 
   test("getLoginStatus returns a masked provider email", async () => {
