@@ -1,0 +1,109 @@
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { saveConfig } from "../src/config";
+import { flushConfigDirHardening, flushConfigDirHardeningForTests, hardenConfigDir } from "../src/config/paths";
+import * as windowsAcl from "../src/lib/windows-secret-acl";
+import { startServer } from "../src/server";
+import type { OcxConfig } from "../src/types";
+import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
+
+/**
+ * On Windows, `hardenConfigDir()` starts an `icacls.exe` child that holds the config directory
+ * open until it exits. `server.stop(true)` used to resolve without waiting for it, so a caller
+ * that removed the directory right after a "clean" shutdown got EPERM/EBUSY (mandatory file
+ * locking). Every Windows CI shard since e5d588669 failed on exactly that: the fixture teardown
+ * of the account-store, auth-api and every live-server suite. The contract now: stop() settles
+ * the flight the process itself started.
+ */
+
+let testDir = "";
+let previousHome: string | undefined;
+let isolatedCodexHome: IsolatedCodexHome | null = null;
+const originalPlatform = process.platform;
+
+function config(): OcxConfig {
+  return {
+    port: 0,
+    hostname: "127.0.0.1",
+    defaultProvider: "kimi",
+    providers: { kimi: { adapter: "openai-chat", baseUrl: "https://kimi.test/v1", liveModels: false, models: ["k3"] } },
+  };
+}
+
+beforeEach(() => {
+  previousHome = process.env.OPENCODEX_HOME;
+  isolatedCodexHome = installIsolatedCodexHome("ocx-stop-harden-codex-");
+  testDir = mkdtempSync(join(tmpdir(), "ocx-stop-harden-"));
+  process.env.OPENCODEX_HOME = testDir;
+  saveConfig(config());
+});
+
+afterEach(async () => {
+  Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+  await flushConfigDirHardeningForTests();
+  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previousHome;
+  isolatedCodexHome?.restore();
+  isolatedCodexHome = null;
+  if (testDir) removeTreeWithRetry(testDir);
+});
+
+test("server.stop(true) waits for the config-dir ACL flight the startup loadConfig started", async () => {
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  let started = 0;
+  const spy = spyOn(windowsAcl, "hardenSecretDirAsync").mockImplementation(async () => {
+    started += 1;
+    await pending;
+    return { ok: true };
+  });
+  let server: ReturnType<typeof startServer> | null = null;
+  try {
+    server = startServer(0);
+    expect(started).toBe(1);
+    let stopped = false;
+    const stopping = server.stop(true).then(() => { stopped = true; });
+    await new Promise(resolve => setTimeout(resolve, 60));
+    // Listeners are closed by now; the only thing keeping stop() open is the ACL child.
+    expect(stopped).toBe(false);
+    release();
+    await stopping;
+    expect(stopped).toBe(true);
+    server = null;
+  } finally {
+    release();
+    if (server) await server.stop(true);
+    spy.mockRestore();
+  }
+});
+
+test("server.stop(true) resolves promptly when no flight is in progress", async () => {
+  const server = startServer(0);
+  const t0 = Date.now();
+  await server.stop(true);
+  expect(Date.now() - t0).toBeLessThan(2_000);
+});
+
+test("flushConfigDirHardening scopes to one directory and is a no-op for a stranger", async () => {
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const spy = spyOn(windowsAcl, "hardenSecretDirAsync").mockImplementation(async () => { await pending; return { ok: true }; });
+  try {
+    hardenConfigDir();
+    let settled = false;
+    const own = flushConfigDirHardening(testDir).then(() => { settled = true; });
+    await flushConfigDirHardening(join(testDir, "not-a-flight"));
+    expect(settled).toBe(false);
+    release();
+    await own;
+    expect(settled).toBe(true);
+  } finally {
+    release();
+    spy.mockRestore();
+  }
+});

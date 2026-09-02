@@ -21,6 +21,7 @@ import {
   websocketsEnabled,
 } from "../config";
 import { grokDefaultReasoningEffort } from "../grok/effort";
+import { flushConfigDirHardening } from "../config/paths";
 import { reconcileOAuthProviders } from "../oauth";
 import { withCatalogWriteSerialization } from "../codex/catalog-write-serialization";
 import { invalidateCodexModelsCacheWithPermit } from "../codex/catalog/sync";
@@ -638,6 +639,9 @@ export function warnAgentTaskRecoveryStartup(config: {
 
 export function startServer(port?: number, deps: StartServerDeps = {}): Server<WsData> {
   const localAttestationSecret = deps.localAttestationSecret ?? createLocalAttestationSecret();
+  // Captured before loadConfig() starts the optional ACL flight so stop() drains the same dir
+  // even if OPENCODEX_HOME changes underneath a long-lived process.
+  const startupConfigDir = getConfigDir();
   const config = runModelRenameStartupMigration(runAlibabaRegionStartupMigration(runOpenAiTierStartupMigration(loadConfig())));
   warnAgentTaskRecoveryStartup(config);
   setLiveStateStoreConfig(config);
@@ -2312,6 +2316,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         async () => {
           await backgroundLifecycle.release();
           await releaseNativeMainStartupLifecycle(server);
+          // icacls.exe from hardenConfigDir() holds the config dir open; a caller that removes
+          // the dir right after stop() resolves would hit EPERM/EBUSY on Windows otherwise.
+          await flushConfigDirHardening(startupConfigDir);
         },
       );
     },
