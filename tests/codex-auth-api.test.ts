@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   acquireNativeMainProfileDrain,
@@ -71,10 +72,14 @@ import {
   resolveFirstUsableOpenAiSidecar,
 } from "../src/providers/openai-sidecar";
 import { BOUNDED_BODY_MAX_BYTES } from "../src/lib/bounded-body";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-codex-auth-api-test");
-const TEST_CODEX_HOME = join(TEST_DIR, "codex");
+let TEST_DIR = "";
+let TEST_CODEX_HOME = "";
 const MANUAL_IMPORT_ENV = "OPENCODEX_ENABLE_UNVERIFIED_CODEX_IMPORT";
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
 let previousManualImportEnv: string | undefined;
@@ -256,7 +261,10 @@ beforeEach(() => {
   previousCodexHome = process.env.CODEX_HOME;
   previousManualImportEnv = process.env[MANUAL_IMPORT_ENV];
   previousFetch = globalThis.fetch;
-  if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-auth-api-"));
+  TEST_CODEX_HOME = join(TEST_DIR, "codex");
   mkdirSync(TEST_CODEX_HOME, { recursive: true });
   process.env.OPENCODEX_HOME = TEST_DIR;
   process.env.CODEX_HOME = TEST_CODEX_HOME;
@@ -274,7 +282,7 @@ beforeEach(() => {
   resetJwtPlanNotesForTests();
 });
 
-afterEach(() => {
+afterEach(async () => {
   resetLifecycleDrainStateForTests();
   setPersistedConfigMutationBeforeCommitForTests(null);
   clearAccountNeedsReauth("__main__");
@@ -293,7 +301,12 @@ afterEach(() => {
   else process.env.CODEX_HOME = previousCodexHome;
   if (previousManualImportEnv === undefined) delete process.env[MANUAL_IMPORT_ENV];
   else process.env[MANUAL_IMPORT_ENV] = previousManualImportEnv;
-  if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  if (TEST_DIR) removeTreeWithRetry(TEST_DIR);
+  TEST_DIR = "";
+  TEST_CODEX_HOME = "";
 });
 
 describe("codex-auth API", () => {

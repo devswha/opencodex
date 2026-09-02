@@ -35,6 +35,25 @@ bun install --frozen-lockfile
 bun run build
 ```
 
+## Container deployment recipe
+
+Phase-5 remote-hub documentation includes an operator-owned multi-stage Dockerfile and Compose
+example in `guides/remote-hub`; the repository intentionally ships no root `Dockerfile`,
+`.dockerignore`, registry image, or publish workflow. An official image would create a release
+surface that also requires maintained base-image digest updates, vulnerability scanning, SBOM,
+signing, registry provenance, rollback, and support policy. Until those controls have an explicit
+owner, the guide requires operators to pin the Bun base digest, run non-root, persist
+`OPENCODEX_HOME`, mount the data token through `OCX_API_TOKEN_FILE`, and prove liveness, readiness,
+authenticated catalog access, and a real routed response themselves.
+
+[Decision Log]
+- 목적과 의도: Document a reproducible container topology without silently creating an official image channel.
+- 기존 구현 및 제약 조건: The repository has no maintained Docker release artifacts, registry workflow, scanner, SBOM/signing chain, or image rollback policy.
+- 검토한 주요 대안: Add a root Dockerfile and publish it; omit containers entirely; provide a complete operator-owned recipe in the remote-hub guide.
+- 선택한 방식: Keep the recipe in documentation, require an operator-resolved base digest and mounted secret file, and publish only the public data port.
+- 다른 대안 대신 이 방식을 선택한 이유: A source recipe communicates the supported runtime contract while leaving image provenance and operations with the party building it.
+- 장점, 단점 및 영향: Docker users have a concrete starting point, but opencodex does not claim to ship, scan, sign, or support the resulting image.
+
 ## Windows service wrapper and incomplete updates
 
 [Decision Log]
@@ -253,3 +272,7 @@ The Release workflow remains manual and publish-focused. Before any dry-run or p
 checks that the exact release commit (`GITHUB_SHA`) already has a successful Cross-platform CI run.
 This keeps release runs short and makes release a deployment of a verified commit rather than a
 second CI pipeline.
+
+## Remote Hub locale and release gate
+
+The Remote Hub guide and affected CLI, server-config, management-API, and dashboard references have eight sources: root English plus `fr`, `ko`, `zh-cn`, `zh-tw`, `ru`, `ja`, and `tr`. English is canonical; commands, defaults, endpoint auth, and warnings remain exact in translations. A release requires the remote-only focused/full gates, privacy scan, GUI/docs builds, protocol compatibility receipts, and the MAINTAINERS security review for the exact head.

@@ -739,42 +739,47 @@ function UsageWorkspaceBody({
 /** Held usage payloads so provider/surface tab switches skip a cold ~5s refetch. */
 const usageMemoryCache = new Map<string, UsageResponse>();
 
-function usageCacheKey(apiBase: string, range: Range, surface: UsageSurface): string {
-  return `ocx.usage.v1:${apiBase}:${range}:${surface}`;
+type UsageScope = "machine" | "hub";
+
+function usageCacheKey(apiBase: string, range: Range, surface: UsageSurface, connected: boolean, scope: UsageScope, apiKeyId?: string): string {
+  return `ocx.usage.v2:${apiBase}:${connected ? "connected" : "standalone"}:${scope}:${apiKeyId ?? ""}:${range}:${surface}`;
 }
 
-function readHeldUsage(apiBase: string, range: Range, surface: UsageSurface): UsageResponse | null {
-  const key = usageCacheKey(apiBase, range, surface);
+function readHeldUsage(apiBase: string, range: Range, surface: UsageSurface, connected: boolean, scope: UsageScope, apiKeyId?: string): UsageResponse | null {
+  const key = usageCacheKey(apiBase, range, surface, connected, scope, apiKeyId);
   return usageMemoryCache.get(key) ?? readSessionListCache<UsageResponse>(key);
 }
 
-function writeHeldUsage(apiBase: string, range: Range, surface: UsageSurface, value: UsageResponse) {
-  const key = usageCacheKey(apiBase, range, surface);
+function writeHeldUsage(apiBase: string, range: Range, surface: UsageSurface, connected: boolean, scope: UsageScope, apiKeyId: string | undefined, value: UsageResponse) {
+  const key = usageCacheKey(apiBase, range, surface, connected, scope, apiKeyId);
   usageMemoryCache.set(key, value);
   writeSessionListCache(key, value);
 }
 
-export default function Usage({ apiBase }: { apiBase: string }) {
+export default function Usage({ apiBase, connected = false, apiKeyId }: { apiBase: string; connected?: boolean; apiKeyId?: string }) {
   const { t, locale } = useI18n();
   const [range, setRange] = useState<Range>("30d");
   const [surface, setSurface] = useState<UsageSurface>("all");
+  const [scope, setScope] = useState<UsageScope>("machine");
   const [modelQuery, setModelQuery] = useState("");
 
   const loadUsage = useCallback(async (signal: AbortSignal): Promise<UsageResponse> => {
-    const response = await fetch(`${apiBase}/api/usage?range=${range}&surface=${surface}`, { signal });
+    const query = new URLSearchParams({ range, surface });
+    if (connected && scope === "machine" && apiKeyId) query.set("apiKeyId", apiKeyId);
+    const response = await fetch(`${apiBase}/api/usage?${query}`, { signal });
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`.trim());
     const next = await response.json() as UsageResponse;
-    writeHeldUsage(apiBase, range, surface, next);
+    writeHeldUsage(apiBase, range, surface, connected, scope, apiKeyId, next);
     return next;
-  }, [apiBase, range, surface]);
+  }, [apiBase, apiKeyId, connected, range, scope, surface]);
 
-  const resourceKey = usageCacheKey(apiBase, range, surface);
-  const cached = readHeldUsage(apiBase, range, surface);
+  const resourceKey = usageCacheKey(apiBase, range, surface, connected, scope, apiKeyId);
+  const cached = readHeldUsage(apiBase, range, surface, connected, scope, apiKeyId);
   // Range and surface identify different reports, so the key changes with both. That prevents
   // a force-loading dependency revalidation from ever showing a previous report as this one.
   const resource = useDataSurface<UsageResponse>(
     resourceKey,
-    [apiBase, range, surface],
+    [apiBase, apiKeyId, connected, range, scope, surface],
     loadUsage,
     { isEmpty: () => false, initialData: cached ?? undefined },
   );
@@ -808,19 +813,35 @@ export default function Usage({ apiBase }: { apiBase: string }) {
         <UsageFilters surface={surface} range={range} onSurface={setSurface} onRange={setRange} t={t} />
       </div>
       <p className="page-sub">{t("usage.subtitle")}</p>
+      {/*
+        Only shown when connected. Naming the source is a two-plane concept: it answers
+        "which store served these numbers", and that question only exists once there are
+        two. A standalone install has exactly one, so the row says nothing the page does
+        not already imply — while still being a line about topology that a user who never
+        enabled remote hub has to read past.
+      */}
+      {connected && (
+        <div className="usage-source-row">
+          <span>{t("usage.source.connected")}</span>
+          <div className="usage-scope-control" role="group" aria-label={t("usage.scope.label")}>
+            <button type="button" className={`btn btn-sm${scope === "machine" ? " btn-primary" : " btn-ghost"}`} aria-pressed={scope === "machine"} onClick={() => setScope("machine")}>{t("usage.scope.machine")}</button>
+            <button type="button" className={`btn btn-sm${scope === "hub" ? " btn-primary" : " btn-ghost"}`} aria-pressed={scope === "hub"} onClick={() => setScope("hub")}>{t("usage.scope.hub")}</button>
+          </div>
+        </div>
+      )}
 
       {state.showSkeleton && !data ? (
         <DataSurfaceSkeleton label={t("usage.loading")} rows={5} />
       ) : state.kind === "failed-cold" ? (
         <Notice tone="err">
-          {state.error instanceof Error ? `${t("usage.loadError")} ${state.error.message}` : t("usage.loadError")}{" "}
+          {connected ? t("usage.hubOffline") : state.error instanceof Error ? `${t("usage.loadError")} ${state.error.message}` : t("usage.loadError")}{" "}
           <button type="button" className="btn btn-ghost btn-sm" onClick={() => resource.refresh()}>
             {t("common.retry")}
           </button>
         </Notice>
       ) : (
         <>
-          {state.showError && <Notice tone="err">{t("usage.loadError")}</Notice>}
+          {state.showError && <Notice tone="err">{t(connected ? "usage.hubOffline" : "usage.loadError")}</Notice>}
           {data?.historyTruncated && (
             // Naming the loaded window is the point: without it, `30d` and "Available history"
             // look identical on a busy installation even though both may cover far less than

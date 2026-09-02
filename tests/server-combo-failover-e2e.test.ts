@@ -36,6 +36,7 @@ import {
   responseStatePersistPendingForTests,
 } from "../src/responses/state";
 import { clearCursorThreadContinuityForTests } from "../src/adapters/cursor/thread-continuity";
+import { COMPACT_PROMPT, encodeCompactionSummary } from "../src/responses/compaction";
 
 // Full-suite Windows load: startServer + combo rename/delete management flows exceed the
 // default 5s per-test budget (same flake class as 810fa115 / claude-management-api).
@@ -112,6 +113,7 @@ mock.module("../src/lib/upstream-retry", () => ({
 }));
 
 const { handleResponses } = await import("../src/server/responses");
+const { handleResponsesCompact } = await import("../src/server/responses/compact");
 type HandleOptions = NonNullable<Parameters<typeof handleResponses>[3]>;
 
 const TOKEN_ENDPOINT = "https://auth.x.ai/oauth/token";
@@ -198,6 +200,13 @@ function chatStream(text: string): Response {
     `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text }, finish_reason: null }] })}\n\n`,
     `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 } })}\n\n`,
     "data: [DONE]\n\n",
+  ].join("");
+  return new Response(frames, { headers: { "content-type": "text/event-stream" } });
+}
+
+function chatTruncatedZeroOutputStream(): Response {
+  const frames = [
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: null }] })}\n\n`,
   ].join("");
   return new Response(frames, { headers: { "content-type": "text/event-stream" } });
 }
@@ -476,6 +485,41 @@ describe("server combo failover 030 activation matrix", () => {
     const response = await postLogged(config, { stream: true });
     expect(response.status).toBe(200);
     expect(JSON.stringify(await collectSse(response))).toContain("stream backup");
+    expect(hits).toEqual(["a", "b"]);
+
+    const { log, usage } = await latestAttemptReceipts(config);
+    for (const receipt of [log, usage]) {
+      expect(receipt).toMatchObject({
+        provider: "combo",
+        model: "combo/free",
+        resolvedModel: "m2",
+        attempts: [
+          { ordinal: 1, provider: "a", model: "m1", status: 502 },
+          { ordinal: 2, provider: "b", model: "m2", status: 200 },
+        ],
+      });
+      expect(receipt.attempts[0]).not.toHaveProperty("firstOutputMs");
+    }
+  });
+
+  test("zero-output adapter EOF hops to the next combo target", async () => {
+    const hits: string[] = [];
+    const a = serve(() => {
+      hits.push("a");
+      return chatTruncatedZeroOutputStream();
+    });
+    const b = serve(() => {
+      hits.push("b");
+      return chatStream("stream backup after adapter eof");
+    });
+    const config = comboConfig({
+      a: provider("openai-chat", baseUrl(a), "key-a"),
+      b: provider("openai-chat", baseUrl(b), "key-b"),
+    });
+
+    const response = await postLogged(config, { stream: true });
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(await collectSse(response))).toContain("stream backup after adapter eof");
     expect(hits).toEqual(["a", "b"]);
 
     const { log, usage } = await latestAttemptReceipts(config);
@@ -819,28 +863,32 @@ describe("server combo failover 030 activation matrix", () => {
         body: JSON.stringify({ id: "free", combo: { ...combo, alias } }),
       });
 
-      expect((await publicRows()).filter(model => model.id === selector)).toEqual([
-        { id: selector, object: "model", created: 0, owned_by: "openai", is_combo: true },
-      ]);
+      // Rows also carry api_types/capabilities for Cursor local-agent discovery; match the
+      // combo-relevant shape and keep is_combo presence/absence explicit.
+      const initialRows = (await publicRows()).filter(model => model.id === selector);
+      expect(initialRows).toHaveLength(1);
+      expect(initialRows[0]).toMatchObject({ id: selector, object: "model", created: 0, owned_by: "openai", is_combo: true });
 
       const renamed = await updateAlias("fast-chat");
       expect(renamed.status).toBe(200);
       const renamedRows = await publicRows();
-      expect(renamedRows.filter(model => model.id === selector)).toEqual([
-        { id: selector, object: "model", created: 0, owned_by: "deepseek" },
-      ]);
-      expect(renamedRows.filter(model => model.id === "fast-chat")).toEqual([
-        { id: "fast-chat", object: "model", created: 0, owned_by: "openai", is_combo: true },
-      ]);
+      const renamedSelectorRows = renamedRows.filter(model => model.id === selector);
+      expect(renamedSelectorRows).toHaveLength(1);
+      expect(renamedSelectorRows[0]).toMatchObject({ id: selector, object: "model", created: 0, owned_by: "deepseek" });
+      expect(renamedSelectorRows[0].is_combo).toBeUndefined();
+      const renamedAliasRows = renamedRows.filter(model => model.id === "fast-chat");
+      expect(renamedAliasRows).toHaveLength(1);
+      expect(renamedAliasRows[0]).toMatchObject({ id: "fast-chat", object: "model", created: 0, owned_by: "openai", is_combo: true });
 
       const restored = await updateAlias(selector);
       expect(restored.status).toBe(200);
       const deleted = await fetch(new URL("/api/combos?id=free", server.url), { method: "DELETE" });
       expect(deleted.status).toBe(200);
       const deletedRows = await publicRows();
-      expect(deletedRows.filter(model => model.id === selector)).toEqual([
-        { id: selector, object: "model", created: 0, owned_by: "deepseek" },
-      ]);
+      const deletedSelectorRows = deletedRows.filter(model => model.id === selector);
+      expect(deletedSelectorRows).toHaveLength(1);
+      expect(deletedSelectorRows[0]).toMatchObject({ id: selector, object: "model", created: 0, owned_by: "deepseek" });
+      expect(deletedSelectorRows[0].is_combo).toBeUndefined();
       expect(deletedRows.some(model => model.is_combo === true)).toBe(false);
     } finally {
       await server.stop(true);
@@ -863,10 +911,11 @@ describe("server combo failover 030 activation matrix", () => {
       const payload = await response.json() as {
         data: Array<{ id: string; owned_by: string; is_combo?: boolean }>;
       };
-      expect(payload.data.filter(model => model.id.startsWith("a/vendor")).sort((a, b) => a.id.localeCompare(b.id))).toEqual([
-        { id: "a/vendor-model", object: "model", created: 0, owned_by: "openai", is_combo: true },
-        { id: "a/vendor/model", object: "model", created: 0, owned_by: "a" },
-      ]);
+      const vendorRows = payload.data.filter(model => model.id.startsWith("a/vendor")).sort((a, b) => a.id.localeCompare(b.id));
+      expect(vendorRows).toHaveLength(2);
+      expect(vendorRows[0]).toMatchObject({ id: "a/vendor-model", object: "model", created: 0, owned_by: "openai", is_combo: true });
+      expect(vendorRows[1]).toMatchObject({ id: "a/vendor/model", object: "model", created: 0, owned_by: "a" });
+      expect(vendorRows[1].is_combo).toBeUndefined();
     } finally {
       await server.stop(true);
     }
@@ -2205,7 +2254,13 @@ describe("server combo failover 030 activation matrix", () => {
     expect(response.status).toBe(200);
     expect(JSON.stringify(bodies[0]!.body)).not.toContain("data:image/png");
     expect(JSON.stringify(bodies[1]!.body)).toContain("data:image/png");
-    expect(bodies[0]!.body.reasoning_effort).toBeUndefined();
+    // #3108: the combo default is resolved against each target's ladder rather than
+    // dropped on an exact-membership miss. This combo's advertised default IS "low" —
+    // the catalog intersects member ladders (a: ["low"], b: ["low","high"]) to ["low"]
+    // and effectiveComboDefault("high", ["low"]) yields "low" — so sending "low" to the
+    // first target is what the served catalog promised. Previously nothing was sent and
+    // the provider default silently applied.
+    expect(bodies[0]!.body.reasoning_effort).toBe("low");
     expect(bodies[1]!.body.reasoning_effort).toBe("high");
 
     clearComboSelectionState();
@@ -2299,7 +2354,7 @@ describe("server combo failover 030 activation matrix", () => {
     let backupHits = 0;
     const auth: string[] = [];
     globalThis.fetch = (async (input, init) => {
-      const url = input instanceof Request ? input.url : String(input);
+      const url = typeof input === "object" && input !== null && "url" in input ? String((input as Request).url) : String(input);
       if (url === XAI_OAUTH_DISCOVERY_URL) {
         return Response.json({ authorization_endpoint: "https://auth.x.ai/oauth/authorize", token_endpoint: TOKEN_ENDPOINT });
       }
@@ -2944,5 +2999,186 @@ describe("cursor conversation continuity across store:false chains", () => {
 
     expect(seen).toHaveLength(2);
     expect(seen[1]).toBe(seen[0]);
+  });
+});
+
+describe("combo compact failover", () => {
+  function compactRequest(body: Record<string, unknown>): Request {
+    return new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  async function postCompactLogged(config: OcxConfig): Promise<Response> {
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const start = Date.now();
+    const response = await handleResponsesCompact(compactRequest({
+      model: "combo/free",
+      stream: false,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "earlier turn" }] }],
+    }), config, logCtx);
+    loggedRequestSequence += 1;
+    return responseWithDeferredRequestLog(response, `combo-compact-${loggedRequestSequence}`, start, logCtx);
+  }
+
+  function canonicalPoolConfig(
+    targets: Array<{ provider: string; model: string }>,
+    backupUrl?: string,
+  ): { config: OcxConfig } {
+    const config = comboConfig({
+      "openai-apikey": {
+        adapter: "openai-responses",
+        baseUrl: "https://api.openai.com/v1",
+        authMode: "key",
+        apiKey: "combo-compact-key",
+      },
+      backup: provider("openai-chat", backupUrl ?? "http://127.0.0.1:9", "key-b"),
+    }, targets);
+    return { config };
+  }
+
+  test("native-capable first target 429 hops compact to the backup target", async () => {
+    const childBodies: Array<Record<string, unknown>> = [];
+    const b = serve(async request => {
+      childBodies.push(JSON.parse(await request.text()) as Record<string, unknown>);
+      return chatStream("compact backup");
+    });
+    const { config } = canonicalPoolConfig([
+      { provider: "openai-apikey", model: "gpt-5.4" },
+      { provider: "backup", model: "m1" },
+    ], baseUrl(b));
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "object" && input !== null && "url" in input ? String((input as Request).url) : String(input);
+      if (url.includes("api.openai.com")) {
+        return Response.json({ error: { message: "rate limited" } }, { status: 429 });
+      }
+      return originalFetch(input as RequestInfo, init);
+    }) as typeof fetch;
+
+    const response = await postCompactLogged(config);
+    expect(response.status).toBe(200);
+    const json = await response.json() as { output?: unknown[] };
+    expect(JSON.stringify(json.output)).toContain("compact backup");
+
+    // The backup child received the synthetic summarizer turn as SSE, with the
+    // summarizer prompt present in its chat wire body.
+    expect(childBodies).toHaveLength(1);
+    expect(childBodies[0]!.stream).toBe(true);
+    expect(JSON.stringify(childBodies[0]!.messages)).toContain("CONTEXT CHECKPOINT COMPACTION");
+
+    const { log } = await latestAttemptReceipts(config);
+    const attempts = log.attempts as Array<Record<string, unknown>>;
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toMatchObject({
+      provider: "openai-apikey",
+      adapter: "openai-responses",
+      status: 429,
+    });
+    expect(attempts[1]).toMatchObject({ provider: "backup", adapter: "openai-chat", status: 200 });
+  });
+
+  test("account-gated first target failover decodes the backup ocx1 compaction", async () => {
+    const b = serve(() => chatStream("mixed combo backup summary"));
+    const { config } = canonicalPoolConfig([
+      { provider: "openai-apikey", model: "gpt-daybreak-blue-latest" },
+      { provider: "backup", model: "m1" },
+    ], baseUrl(b));
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "object" && input !== null && "url" in input ? String((input as Request).url) : String(input);
+      if (url.includes("api.openai.com")) {
+        return Response.json({ error: { message: "rate limited" } }, { status: 429 });
+      }
+      return originalFetch(input as RequestInfo, init);
+    }) as typeof fetch;
+
+    const response = await postCompactLogged(config);
+    expect(response.status).toBe(200);
+    const json = await response.json() as { output?: unknown[] };
+    expect(JSON.stringify(json.output)).toContain("mixed combo backup summary");
+    expect(JSON.stringify(json.output)).not.toContain("ocx1:");
+  });
+
+  test("combo compact runs the synthetic turn as SSE so a canonical child can serve it", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const { config } = canonicalPoolConfig([{ provider: "openai-apikey", model: "gpt-5.4" }]);
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "object" && input !== null && "url" in input
+        ? String((input as Request).url)
+        : String(input);
+      if (!url.includes("api.openai.com")) {
+        return originalFetch(input as RequestInfo, init);
+      }
+      // Only the codex/responses child turn is under test; side probes (e.g. the
+      // wham/usage quota check) just get a tolerated non-2xx.
+      if (!url.includes("api.openai.com/v1/responses")) {
+        return Response.json({ error: { message: "probe not under test" } }, { status: 403 });
+      }
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      bodies.push(body);
+      // Canonical ChatGPT Responses rejects non-streaming turns; a stream:false child
+      // request would strand every canonical-only combo here before the SSE coercion.
+      if (body.stream !== true) {
+        return Response.json({ error: { message: "non-streaming turns are rejected" } }, { status: 400 });
+      }
+      const completed = {
+        type: "response.completed",
+        response: {
+          id: "resp_compact",
+          status: "completed",
+          output: [{ type: "compaction", encrypted_content: "gAAAAABm-native-openai-ciphertext" }],
+        },
+      };
+      return new Response([
+        "event: response.created",
+        'data: {"type":"response.created","response":{"id":"resp_compact","status":"in_progress"}}',
+        "",
+        `event: ${completed.type}`,
+        `data: ${JSON.stringify(completed)}`,
+        "",
+        "",
+      ].join("\n"), { headers: { "content-type": "text/event-stream" } });
+    }) as typeof fetch;
+
+    const response = await postCompactLogged(config);
+    expect(response.status).toBe(200);
+    const json = await response.json() as { output?: unknown[] };
+    expect(json.output).toEqual([expect.objectContaining({
+      type: "compaction", encrypted_content: "gAAAAABm-native-openai-ciphertext",
+    })]);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.stream).toBe(true);
+    expect(JSON.stringify(bodies[0]!.input)).toContain("CONTEXT CHECKPOINT COMPACTION");
+  });
+
+  test("native compact rejects an empty ciphertext item", async () => {
+    const { config } = canonicalPoolConfig([{ provider: "openai-apikey", model: "gpt-5.4" }]);
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "object" && input !== null && "url" in input
+        ? String((input as Request).url)
+        : String(input);
+      if (!url.includes("api.openai.com/v1/responses")) {
+        return Response.json({ error: { message: "probe not under test" } }, { status: 403 });
+      }
+      const completed = {
+        type: "response.completed",
+        response: {
+          id: "resp_compact_empty",
+          status: "completed",
+          output: [{ type: "compaction", encrypted_content: "" }],
+        },
+      };
+      return new Response([
+        `event: ${completed.type}`,
+        `data: ${JSON.stringify(completed)}`,
+        "",
+        "",
+      ].join("\n"), { headers: { "content-type": "text/event-stream" } });
+    }) as typeof fetch;
+
+    const response = await postCompactLogged(config);
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain("empty summary");
   });
 });

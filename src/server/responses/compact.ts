@@ -3,13 +3,13 @@ import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type Resp
 import {
   getConfigPath,
   multiAgentGuidanceEnabled,
-  resolveEnvValue,
 } from "../../config";
+import { resolveProviderApiKey } from "../../providers/key-store";
 import { parseRequest } from "../../responses/parser";
 import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractCompactUserMessages } from "../../responses/compaction";
 import { FORWARD_HEADERS, sanitizeReasoningInputContent } from "../../adapters/openai-responses";
 import { expandPreviousResponseInput, previousResponseProviderState, rememberResponseState } from "../../responses/state";
-import { NoEligiblePolicyCandidateError, routeModel } from "../../router";
+import { NoEligiblePolicyCandidateError, routeCompactionModel } from "../../router";
 import { evidenceFromBody } from "../../routing/request-evidence";
 import {
   advanceComboAfterFailure,
@@ -267,6 +267,9 @@ async function refreshNativeMainCompactContext(args: {
     }
     return { ok: true, authCtx: refreshedAuthCtx, provider: refreshedProvider, headers };
   } catch (error) {
+    if (req.signal.aborted) {
+      return { ok: false, response: formatErrorResponse(499, "client_cancelled", "Client cancelled compact request") };
+    }
     return { ok: false, response: nativeMainRefreshFailureResponse(error) };
   }
 }
@@ -382,7 +385,10 @@ async function resolveAlternateCompactContext(args: {
       requestScopedMainCredential: hasForwardableCodexBearer(req.headers, config),
       beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
     });
-    if (!authCtx.accountId || authCtx.accountId === excludeAccountId) return null;
+    // Caller-owned main has no Pool account id. It is still a valid one-shot alternate after a
+    // stored account fails; resolveCodexAuthContext already prevents returning it when main is the
+    // excluded credential.
+    if (authCtx.accountId === excludeAccountId) return null;
     const provider = applyCodexAuthContextToProvider(route.provider, authCtx, route.codexAccountMode);
     const headers = new Headers({ "content-type": "application/json" });
     const selected = headersForCodexAuthContext(req.headers, authCtx);
@@ -395,7 +401,7 @@ async function resolveAlternateCompactContext(args: {
       headers.set("authorization", `Bearer ${override.accessToken}`);
       headers.set("chatgpt-account-id", override.chatgptAccountId);
     }
-    if (provider.apiKey) headers.set("authorization", `Bearer ${resolveEnvValue(provider.apiKey)}`);
+    if (provider.apiKey) headers.set("authorization", `Bearer ${resolveProviderApiKey(provider.apiKey)}`);
     return { authCtx, provider, headers };
   } catch (err) {
     if (err instanceof CodexMainProfileDrainingError) {
@@ -503,7 +509,10 @@ export async function handleResponsesCompact(
     // Compact requests route through the same policy evaluation as normal
     // turns, so body-derived evidence (tools/image) must reach the first
     // evaluation too - not only the later handleResponses dispatch.
-    route = routeModel(config, raw.model, evidenceFromBody(raw));
+    // Codex selects a bare native model for compaction even when the operator
+    // routes ordinary turns elsewhere (#2901); the compaction-scoped router
+    // may land that on the configured default provider instead of 404.
+    route = routeCompactionModel(config, raw.model, evidenceFromBody(raw));
   } catch (err) {
     if (err instanceof NoEligiblePolicyCandidateError) {
       // Persist the evaluation trace (per-candidate exclusions + the
@@ -556,7 +565,10 @@ export async function handleResponsesCompact(
   // Native /responses/compact exists on the canonical ChatGPT backend and on the
   // official OpenAI API. Any other Responses-shaped gateway must take the routed
   // summarizer path below, or compaction fails against an endpoint it never had (#422).
-  if (supportsNativeResponsesCompactEndpoint(route.providerName, route.provider) && !accountGatedCompactWireModel) {
+  // Combo-resolved targets skip native compact so failover can advance through the
+  // combo target list when the picked model returns 429/5xx — the routed path below
+  // dispatches through handleResponses → handleComboResponses with full failover.
+  if (supportsNativeResponsesCompactEndpoint(route.providerName, route.provider) && !accountGatedCompactWireModel && !route.combo) {
     if (req.signal.aborted) {
       return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
     }
@@ -614,6 +626,9 @@ export async function handleResponsesCompact(
         }
       }
     } catch (err) {
+      if (req.signal.aborted) {
+        return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
+      }
       const response = mapCodexAuthContextErrorToResponse(err, {
         accountSelector: route.codexAccountNamespace,
         now: Date.now(),
@@ -625,7 +640,7 @@ export async function handleResponsesCompact(
       ? CODEX_FORWARD_BASE_URL
       : (compactProvider.baseUrl ?? "").replace(/\/+$/, "");
     if (compactProvider.authMode !== "forward" && compactProvider.apiKey) {
-      headers.set("authorization", `Bearer ${resolveEnvValue(compactProvider.apiKey)}`);
+      headers.set("authorization", `Bearer ${resolveProviderApiKey(compactProvider.apiKey)}`);
     }
     const { reasoning: _reasoning, ...compactBodyRaw } = raw as typeof raw & { reasoning?: unknown };
     // The regular /v1/responses path applies sanitizeReasoningInputContent via the adapter's
@@ -994,8 +1009,10 @@ export async function handleResponsesCompact(
     ...raw,
     // Canonical ChatGPT Responses rejects non-streaming turns. Daybreak cannot use the
     // native compact endpoint either, so run its synthetic compaction as SSE and collapse
-    // the completed event back into the v1 compact JSON contract below.
-    stream: accountGatedCompactWireModel ? true : false,
+    // the completed event back into the v1 compact JSON contract below. Combo-dispatched
+    // turns also go out as SSE: failover can land on a canonical child that rejects a
+    // non-streaming turn, and every combo-capable provider already serves streaming traffic.
+    stream: accountGatedCompactWireModel || route.combo ? true : false,
     input: [...inputItems, { type: "compaction_trigger" }],
   };
   const internalHeaders = new Headers({ "content-type": "application/json" });
@@ -1069,9 +1086,12 @@ export async function handleResponsesCompact(
       `compaction turn produced ${compactionItems.length} compaction items, expected exactly 1`,
     );
   }
-  // The canonical Responses stream returns a real OpenAI-encrypted compaction item. OCX cannot
-  // and should not decrypt it; /responses/compact callers can consume that item directly.
-  if (accountGatedCompactWireModel) {
+  // Native Responses backends return a real opaque OpenAI-encrypted compaction item. OCX cannot
+  // and should not decrypt it; preserve that item for /responses/compact callers. Synthetic
+  // routed summaries are our `ocx1:` envelope and must be decoded into v1 history items.
+  if (typeof compactionItems[0]!.encrypted_content === "string"
+    && compactionItems[0]!.encrypted_content.trim().length > 0
+    && !compactionItems[0]!.encrypted_content.startsWith("ocx1:")) {
     const result = new Response(JSON.stringify({ output: compactionItems }), {
       headers: { "Content-Type": "application/json" },
     });

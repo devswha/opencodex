@@ -243,3 +243,7 @@ Authorization: Bearer <admin-token>
 ## 如何选择客户端
 
 对于日常管理，[Web 仪表板](/guides/web-dashboard/)提供了最安全的引导式流程。对于无头主机和自动化，请使用相应的 `ocx` 命令：它们调用的是同一个实时 API，并在代理不可达或操作失败时返回非零结果。直接 HTTP 最适合需要上述精确端点契约的集成。
+
+## 远程会话与数据密钥轮换
+
+`POST /api/keys/rotate {id}` 开始十分钟重叠期，并只返回一次新密钥。`POST /api/keys/rotate/commit {id,rotationId}` 提交，`DELETE /api/keys/rotate {id,rotationId}` 中止。它们都需要管理认证，数据密钥不能调用。`POST /api/session/logout` 需要当前 `gui-session`、匹配的 Origin 和 CSRF。Admin token 会收到 403，永远不能创建用户同意会话。

@@ -123,23 +123,37 @@ test("an explicit proxy still writes the marker", async () => {
   expect(shellEnvContents).toContain(`ANTHROPIC_AUTH_TOKEN='${PROXY_MARKER}'`);
 });
 
-// The admission key keeps its precedence: it is a separate axis from the marker.
-test("a configured admission key wins over the marker decision", async () => {
+// Proxy mode owns the Claude auth slot and may use the configured admission key.
+test("proxy mode writes the configured admission key instead of the marker", async () => {
   await injectSystemEnv(4567, {
     ...baseConfig,
+    claudeCode: { systemEnv: true, authMode: "proxy" },
     apiKeys: [{ key: "admission-key" }],
   } as unknown as OcxConfig);
   expect(shellEnvContents).toContain("ANTHROPIC_AUTH_TOKEN='admission-key'");
   expect(shellEnvContents).not.toContain(PROXY_MARKER);
 });
 
-// Detection is env-aware: an exported user key means auth is present, so auto resolves
-// subscription and the marker stays out of the file.
-test("auto with an exported user API key writes no marker", async () => {
+test("subscription mode omits the configured admission key", async () => {
+  await injectSystemEnv(4567, {
+    ...baseConfig,
+    claudeCode: { systemEnv: true, authMode: "subscription" },
+    apiKeys: [{ key: "admission-key" }],
+  } as unknown as OcxConfig);
+  expect(shellEnvContents).not.toContain("ANTHROPIC_AUTH_TOKEN='admission-key'");
+  expect(shellEnvContents).not.toContain(PROXY_MARKER);
+});
+
+// Detection is env-aware: a proof-bound parent export means auth is present, so auto
+// resolves subscription and the marker stays out of the file. An unproven Bun dotenv
+// value is deliberately ignored by system-env (covered in system-env.test.ts).
+test("auto with a proof-bound user API key writes no marker", async () => {
   const previous = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = "sk-ant-user";
   try {
-    await injectSystemEnv(4567, baseConfig);
+    await injectSystemEnv(4567, baseConfig, {
+      preBunAnthropicSlots: ["ANTHROPIC_API_KEY"],
+    });
     expect(shellEnvContents).not.toContain(PROXY_MARKER);
   } finally {
     if (previous === undefined) delete process.env.ANTHROPIC_API_KEY;

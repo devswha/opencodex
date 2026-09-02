@@ -23,6 +23,7 @@ import { stripGrokConfig } from "../grok/inject";
 import { afterCatalogWriteHandleAppServers } from "../codex/app-server-processes";
 import { normalizeUpdateChannel, runGuiUpdateWorker } from "../update/job";
 import { isJsonOption, takeFlag } from "./runtime-api";
+import type { ClientConnectionState } from "../client/state";
 
 export interface CliDispatchDeps {
   args: string[];
@@ -59,6 +60,13 @@ const commandRunners: Record<string, CommandRunner> = {
     return Number(process.exitCode ?? 0);
   },
   start: async deps => {
+    const { readClientConnectionState } = await import("../client/state");
+    const clientState = readClientConnectionState();
+    await reconcileClientJournalBeforeLifecycle(clientState);
+    if (clientState.kind === "invalid" || clientState.kind === "mismatched") {
+      console.error(`Client state is ${clientState.kind}: ${clientState.reason}`);
+      return 1;
+    }
     await deps.handleStart();
     return Number(process.exitCode ?? 0);
   },
@@ -245,6 +253,15 @@ const commandRunners: Record<string, CommandRunner> = {
     return 0;
   },
   ensure: async deps => {
+    const { readClientConnectionState } = await import("../client/state");
+    const clientState = readClientConnectionState();
+    await reconcileClientJournalBeforeLifecycle(clientState);
+    if (clientState.kind !== "disconnected") {
+      console.error(clientState.kind === "connected"
+        ? "Client mode does not start a local provider proxy; use 'ocx sync'."
+        : `Client state is ${clientState.kind}: ${clientState.reason}`);
+      return 1;
+    }
     await deps.handleEnsure();
     return Number(process.exitCode ?? 0);
   },
@@ -317,6 +334,31 @@ const commandRunners: Record<string, CommandRunner> = {
     // Separate flag on purpose: --restart-codex promises app-server-only scope,
     // and quitting the desktop app ends live conversations.
     const restartDesktopApp = syncArgs.includes("--restart-desktop-app");
+    const { readClientConnectionState } = await import("../client/state");
+    const clientState = readClientConnectionState();
+    if (clientState.kind === "invalid" || clientState.kind === "mismatched") {
+      console.error(`Client state is ${clientState.kind}: ${clientState.reason}`);
+      return 1;
+    }
+    if (clientState.kind === "connected") {
+      try {
+        const { syncConnectedClient } = await import("../client/connect");
+        const result = await syncConnectedClient({ restartCodex });
+        console.log(result.stale
+          ? "Hub unavailable; retained and applied the last-known-good remote catalog (stale)."
+          : "Remote hub catalog synchronized.");
+        await handleConnectedSyncCatalogWrite(result, restartCodex, restartDesktopApp);
+        // `process.exitCode` rather than a literal 0, for the same reason every other
+        // runner does it (tests/cli-transport-honesty.test.ts): the catalog-write helper
+        // drives app-server restarts, and one of those recording a failure must not be
+        // erased by the value this runner returns. It reads 0 on the ordinary path. Node
+        // types it as `number | string`; only a numeric code means anything here.
+        return typeof process.exitCode === "number" ? process.exitCode : 0;
+      } catch (error) {
+        console.error(`Connected sync failed without local fallback: ${error instanceof Error ? error.message : String(error)}`);
+        return 1;
+      }
+    }
     const live = await deps.findLiveProxy();
     const synced = await syncModelsToCodex(
       live?.port,
@@ -371,6 +413,14 @@ const commandRunners: Record<string, CommandRunner> = {
   v2: async deps => {
     const { cmdV2 } = await import("./v2");
     return await cmdV2(deps.args.slice(1), {}, async () => (await deps.findLiveProxy())?.port);
+  },
+  connect: async deps => {
+    const { handleConnectCommand } = await import("./connect");
+    return await handleConnectCommand(deps.args.slice(1));
+  },
+  disconnect: async deps => {
+    const { handleDisconnectCommand } = await import("./connect");
+    return await handleDisconnectCommand(deps.args.slice(1));
   },
   "sync-cache": async deps => {
     const cacheArgs = deps.args.slice(1);
@@ -451,27 +501,34 @@ const commandRunners: Record<string, CommandRunner> = {
     return ok ? 0 : 1;
   },
   gui: async deps => {
-    const config = deps.loadConfig();
-    // Identity-checked liveness (not the pid file + a fixed sleep): finds a fallback-port
-    // proxy and waits until the spawned one actually answers before opening the browser.
-    let live = await deps.findLiveProxy();
-    if (!live) {
-      console.log("Proxy not running. Starting...");
-      deps.spawnDetached(deps.startArgv((config.port ?? 10100) > 0 ? (config.port ?? 10100) : undefined));
-      live = await deps.waitForProxy();
-      if (!live) {
-        console.error("❌ Proxy did not become healthy after starting. Not opening the GUI.");
-        return 1;
-      }
-    }
-    // Open the host the proxy actually binds — `localhost` only answers for
-    // loopback/wildcard binds, not a concrete LAN/IPv6 hostname.
-    const guiHost = deps.probeHostname(live?.hostname ?? config.hostname);
-    const guiUrl = `http://${guiHost === "127.0.0.1" ? "localhost" : guiHost}:${live?.port ?? config.port}`;
-    console.log(`Opening ${guiUrl}`);
-    const { openUrl } = await import("../lib/open-url");
-    openUrl(guiUrl);
-    return 0;
+    const { runGuiCommand } = await import("./gui");
+    return runGuiCommand(deps.args.slice(1), {
+      loadConfig: deps.loadConfig,
+      findLiveProxy: deps.findLiveProxy,
+      openDefaultGui: async () => {
+        const config = deps.loadConfig();
+        // Identity-checked liveness (not the pid file + a fixed sleep): finds a fallback-port
+        // proxy and waits until the spawned one actually answers before opening the browser.
+        let live = await deps.findLiveProxy();
+        if (!live) {
+          console.log("Proxy not running. Starting...");
+          deps.spawnDetached(deps.startArgv((config.port ?? 10100) > 0 ? (config.port ?? 10100) : undefined));
+          live = await deps.waitForProxy();
+          if (!live) {
+            console.error("❌ Proxy did not become healthy after starting. Not opening the GUI.");
+            return 1;
+          }
+        }
+        // Open the host the proxy actually binds — `localhost` only answers for
+        // loopback/wildcard binds, not a concrete LAN/IPv6 hostname.
+        const guiHost = deps.probeHostname(live?.hostname ?? config.hostname);
+        const guiUrl = `http://${guiHost === "127.0.0.1" ? "localhost" : guiHost}:${live?.port ?? config.port}`;
+        console.log(`Opening ${guiUrl}`);
+        const { openUrl } = await import("../lib/open-url");
+        openUrl(guiUrl);
+        return 0;
+      },
+    });
   },
   service: async deps => {
     process.exitCode = 0;
@@ -779,6 +836,34 @@ export const DISPATCH_ALIASES: ReadonlyMap<string, string> = aliasTargets;
 
 /** Resolve the runner key for a command, following registry aliases to the
  * canonical runner. Returns undefined when the command is unknown. */
+/** What `handleStart` does about a live proxy it found before binding. */
+export type StartOwnerDecision = "refuse" | "service-stay-out" | "sibling";
+
+/**
+ * Pure decision for `handleStart` when the pre-bind probe found a live proxy.
+ *
+ * The #3106 guard exists so a bare `start` cannot shadow a healthy configured-port
+ * proxy with an ephemeral-port copy. An interactive `--port X` naming a DIFFERENT
+ * port than the live proxy's is an explicit sibling request, not that shadow — and
+ * refusing it also broke every spawned-launcher test on a machine running a real
+ * proxy, because the probe reaches the machine-global port across sandbox homes.
+ * The service wrapper always passes the configured port and keeps its exact
+ * stay-out-of-the-way semantics: it never takes the sibling path.
+ */
+export function decideStartWithLiveOwner(input: {
+  livePort: number;
+  requestedPort: number | undefined;
+  ocxService: string | undefined;
+}): StartOwnerDecision {
+  const sibling = input.requestedPort !== undefined
+    && input.requestedPort !== input.livePort
+    // Only the exact "1" sentinel is service context — the same check syncCleanup
+    // uses — so an env value like "0" or "false" cannot reach the stay-out path.
+    && input.ocxService !== "1";
+  if (sibling) return "sibling";
+  return input.ocxService === "1" ? "service-stay-out" : "refuse";
+}
+
 export function resolveDispatchCommand(command: string | undefined): string | undefined {
   if (command === undefined) return undefined;
   if (Object.prototype.hasOwnProperty.call(commandRunners, command)) return command;
@@ -846,4 +931,24 @@ async function handleDesktopAppRestart(log: Pick<Console, "log" | "error">): Pro
         log.log("Codex desktop app restarted; its model picker will re-read the catalog.");
       }
   }
+}
+
+async function handleConnectedSyncCatalogWrite(
+  result: { catalogWritten: boolean; cacheSynced: boolean },
+  restartCodex: boolean,
+  restartDesktopApp: boolean,
+): Promise<void> {
+  if (!result.catalogWritten && !result.cacheSynced) return;
+  afterCatalogWriteHandleAppServers({ restart: restartCodex, log: console });
+  if (restartDesktopApp) await handleDesktopAppRestart(console);
+}
+
+async function reconcileClientJournalBeforeLifecycle(
+  state: ClientConnectionState,
+): Promise<void> {
+  if (state.kind === "disconnected") return;
+  const { reconcileJournal } = await import("../codex/journal");
+  reconcileJournal(state.kind === "connected"
+    ? { activeClientApiKeyId: state.value.apiKeyId }
+    : undefined);
 }

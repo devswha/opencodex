@@ -215,7 +215,9 @@ function isErrno(error: unknown, code: string): boolean {
 }
 
 function canUseExclusiveCopyFallback(error: unknown): boolean {
-  return process.platform === "win32" || ["EPERM", "EACCES", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EXDEV"]
+  // Same platform seam as harden(): a fixture pinned to the POSIX lane on a Windows host must
+  // see a link failure as a failure, not as a cue to copy.
+  return windowsSecretAclApplies() || ["EPERM", "EACCES", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EXDEV"]
     .some(code => isErrno(error, code));
 }
 
@@ -235,7 +237,9 @@ function nextSpillHardenDeadlineMs(budget: SpillAclBudget | undefined): number |
 }
 
 function harden(path: string, mode: number, budget?: SpillAclBudget): void {
-  const aclApplies = budget ? windowsSecretAclApplies() : process.platform === "win32";
+  // One predicate for both lanes: the test seam that forces a platform must reach the
+  // sync harden too, or a fixture pinned to "linux" on a Windows host still spawns icacls.
+  const aclApplies = windowsSecretAclApplies();
   try {
     chmodSync(path, mode);
   } catch {
@@ -384,7 +388,8 @@ function publishNoReplace(
       else copyFileSync(tempPath, destinationPath, constants.COPYFILE_EXCL);
       copied = true;
       harden(destinationPath, 0o600, budget);
-      const copyFd = openSync(destinationPath, "r");
+      // "r+": a read-only handle cannot be fsynced on Windows (EPERM).
+      const copyFd = openSync(destinationPath, "r+");
       try {
         if (spillIoForTest?.fsync) spillIoForTest.fsync(copyFd);
         else fsyncSync(copyFd);
@@ -422,7 +427,7 @@ async function publishNoReplaceAsync(
       copied = true;
       await hardenAsync(destinationPath, 0o600, budget, retryTimedOutOnce);
       throwIfPublicationSuperseded(publicationControl);
-      const copyFd = openSync(destinationPath, "r");
+      const copyFd = openSync(destinationPath, "r+");
       try {
         if (spillIoForTest?.fsync) spillIoForTest.fsync(copyFd);
         else fsyncSync(copyFd);

@@ -16,6 +16,10 @@ import { CODEX_HOME, CODEX_CONFIG_PATH, CODEX_PROFILE_PATH } from "./paths";
  */
 export const JOURNAL_PATH = join(CODEX_HOME, "opencodex-journal.json");
 
+export type JournalOwner =
+  | { kind: "process"; pid: number }
+  | { kind: "client"; apiKeyId: string };
+
 interface Journal {
   version: 1;
   originalConfig: string;
@@ -41,10 +45,11 @@ interface Journal {
    */
   injectedCatalogPath?: string | null;
   pid: number;
+  owner?: JournalOwner;
   timestamp: string;
 }
 
-interface RestoreJournalResult {
+export interface RestoreJournalResult {
   configRestored: boolean;
   profileRestored: boolean;
   configChanged: boolean;
@@ -71,6 +76,7 @@ export interface WriteJournalOptions {
    * another process rewrites config.toml mid-flight.
    */
   configContent?: string;
+  owner?: { kind: "process" } | { kind: "client"; apiKeyId: string };
 }
 
 /**
@@ -103,6 +109,9 @@ export function writeJournal(options: WriteJournalOptions = {}): void {
     originalConfig: Buffer.from(config).toString("base64"),
     originalProfile: profile ? Buffer.from(profile).toString("base64") : null,
     pid: process.pid,
+    owner: options.owner?.kind === "client"
+      ? { kind: "client", apiKeyId: options.owner.apiKeyId }
+      : { kind: "process", pid: process.pid },
     timestamp: new Date().toISOString(),
   };
   atomicWriteFile(JOURNAL_PATH, JSON.stringify(journal));
@@ -168,6 +177,20 @@ function readJournal(): Journal | null {
   }
 }
 
+export function journalOwner(): JournalOwner | null {
+  const journal = readJournal();
+  if (!journal) return null;
+  if (journal.owner?.kind === "client" && typeof journal.owner.apiKeyId === "string" && journal.owner.apiKeyId) {
+    return { kind: "client", apiKeyId: journal.owner.apiKeyId };
+  }
+  if (journal.owner?.kind === "process" && Number.isSafeInteger(journal.owner.pid) && journal.owner.pid > 0) {
+    return { kind: "process", pid: journal.owner.pid };
+  }
+  return Number.isSafeInteger(journal.pid) && journal.pid > 0
+    ? { kind: "process", pid: journal.pid }
+    : null;
+}
+
 export function restoreJournalState(): RestoreJournalResult {
   const journal = readJournal();
   if (!journal) {
@@ -187,10 +210,22 @@ export function restoreJournalState(): RestoreJournalResult {
   if (profileUnchanged) {
     if (journal.originalProfile !== null) {
       atomicWriteFile(CODEX_PROFILE_PATH, Buffer.from(journal.originalProfile, "base64").toString("utf-8"));
+      profileRestored = true;
     } else if (existsSync(CODEX_PROFILE_PATH)) {
-      try { unlinkSync(CODEX_PROFILE_PATH); } catch { /* ignore */ }
+      // "There was no profile before, so remove the one we generated." Claiming success
+      // without checking is how a caller ends up deleting the journal, reporting a clean
+      // restore, and leaving our profile on disk with nothing left that records it should
+      // not be there. ENOENT is the one benign outcome: the file is already gone, which is
+      // the state we wanted.
+      try {
+        unlinkSync(CODEX_PROFILE_PATH);
+        profileRestored = true;
+      } catch (error) {
+        profileRestored = (error as NodeJS.ErrnoException).code === "ENOENT";
+      }
+    } else {
+      profileRestored = true;
     }
-    profileRestored = true;
   }
   const complete = configRestored && profileRestored;
   if (complete) removeJournal();
@@ -207,11 +242,24 @@ export function restoreJournal(): boolean {
   return restoreJournalState().complete;
 }
 
-export function reconcileJournal(): boolean {
+export interface ReconcileJournalOptions {
+  activeClientApiKeyId?: string;
+}
+
+export function reconcileJournal(options: ReconcileJournalOptions = {}): boolean {
   const journal = readJournal();
   if (!journal) return false;
+  const owner = journalOwner();
+  if (owner?.kind === "client") {
+    if (options.activeClientApiKeyId === owner.apiKeyId) return false;
+    const restored = restoreJournalState();
+    if (!restored.configRestored && !restored.profileRestored) return false;
+    console.error(`⚠️  Uncommitted or mismatched client routing (${owner.apiKeyId}) was restored from the Codex journal.`);
+    return true;
+  }
+  const pid = owner?.kind === "process" ? owner.pid : journal.pid;
   try {
-    process.kill(journal.pid, 0);
+    process.kill(pid, 0);
     return false;
   } catch (e: unknown) {
     if ((e as NodeJS.ErrnoException).code === "EPERM") {
@@ -220,6 +268,6 @@ export function reconcileJournal(): boolean {
   }
   const restored = restoreJournalState();
   if (!restored.configRestored && !restored.profileRestored) return false;
-  console.error(`⚠️  Previous session (PID ${journal.pid}) did not shut down cleanly. Codex state restored from journal.`);
+  console.error(`⚠️  Previous session (PID ${pid}) did not shut down cleanly. Codex state restored from journal.`);
   return true;
 }

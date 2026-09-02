@@ -7,7 +7,7 @@
 | `bin/ocx.mjs` | Published npm `bin` entry (Node shim). Resolves the bundled or explicit Bun binary before project dotenv can load, stamps its runtime provenance plus a proof-bound Anthropic parent-env snapshot, lazy-runs `bun/install.js` if only the placeholder stub is present, then execs `src/cli/index.ts` under Bun. Lets `npm install -g` work without a separately-installed Bun. The exact `system codex-cli-update` inspection namespace skips both boot repair and lazy Bun installation; missing runtime support fails closed instead of mutating state. |
 | `src/lib/bun-runtime.ts` | Bundled-Bun resolution: `isRealBunBinary()` (size gate vs the ~450-byte placeholder stub), `bundledBunPath()`, and `durableBunPath()` (path baked into service/shim artifacts). Durable selection accepts only the source/path pair already stamped for the running executable; it never re-reads a project-dotenv `OPENCODEX_BUN_PATH`. |
 | `src/cli/index.ts` | `ocx` / `opencodex` CLI. Lifecycle: init, start, stop, restart, status, sync, restore/eject, gui, service, update. Configuration: provider, account, models, combo/route, access, integrations, v2. Client launchers: Claude, OpenCode, MiniMax Code, and MiniMax CLI text. The MMX launcher owns a child-lifetime loopback path bridge from the client's hard-coded `/anthropic/v1/messages` path to the canonical `/v1/messages` data plane; the server does not expose an extra auth surface. Diagnostics: doctor, debug, observe, health. Windows adds tray. The full command surface is `src/cli/help.ts`; this table names the groups, not every verb. After help/version early exits, ordinary commands run the bounded best-effort Codex-shim auto-restore policy before dispatch. `system codex-cli-update` is the deliberate read-only exception and suppresses auto-restore for its whole namespace, including malformed invocations. Keeps the `#!/usr/bin/env bun` shebang for from-source dev (`bun run src/cli/index.ts`). |
-| `src/server/index.ts` | Bun server entrypoint: `startServer`, `/v1/responses` HTTP + WebSocket routing (compact handled before generic Responses), exact `POST /v1/images/generations` and `POST /v1/images/edits` routing, `/v1/models`, the Anthropic-shaped `/v1/messages` and OpenAI-shaped `/v1/chat/completions` compatibility surfaces, the Live/Realtime surface, the hosted-search relay, artifact serving, `/healthz`, the `/api/*` auth gate, the `/v1/*` JSON 404 guard, GUI fallback, and facade re-exports for split server modules. |
+| `src/server/index.ts` | Bun server entrypoint: `startServer`, `/v1/responses` HTTP + WebSocket routing (compact handled before generic Responses), exact `POST /v1/images/generations` and `POST /v1/images/edits` routing, `/v1/models`, the Anthropic-shaped `/v1/messages` and OpenAI-shaped `/v1/chat/completions` compatibility surfaces, the Live/Realtime surface, the hosted-search relay, artifact serving, `/healthz`, the `/api/*` auth gate, the `/v1/*` JSON 404 guard, GUI fallback, the opt-in loopback-only hub-management listener, and facade re-exports for split server modules. |
 | `src/server/images.ts` | Standalone Images data plane: default OpenAI or explicit custom-provider selection, Codex account affinity, bounded opaque request relay, single-attempt upstream fetch, pool health recording, and safe response/cancellation relay. |
 | `src/config.ts` | Persisted `~/.opencodex/config.json` schema, defaults, migrations, transactions, and compatibility re-exports for split config modules. |
 | `src/config/paths.ts` | Resolves `OPENCODEX_HOME`, `config.json`, and owner-only directory hardening. |
@@ -52,6 +52,23 @@ their own files.
 until shutdown. Normal shutdown restores native Codex. Service mode sets
 `OCX_SERVICE=1`, so managed restarts do not repeatedly restore/reinject; explicit service stop and
 uninstall still restore.
+
+`startServer` composes up to three sockets in one synchronous startup transaction: the public data
+listener, the optional unauthenticated data-loopback listener, and the optional hub-management
+listener. The hub-management socket is enabled only by `runtimeRole: "hub"` plus
+`hub.managementIngress.enabled`, always binds `127.0.0.1`, and default-denies everything except GUI,
+session bootstrap/exchange, and `/api/*`. A failed optional bind initiates rollback of every earlier
+socket; normal stop joins all bound sockets before lifecycle release. The existing launchd/systemd
+installer remains the service owner and continues loading the data token from `service-api-token`;
+hub mode adds no service-manager fork and no token-bearing unit/plist field.
+
+[Decision Log]
+- 목적과 의도: Give a headless hub a browser management ingress without widening its data plane or trusting spoofable forwarding headers on the public listener.
+- 기존 구현 및 제약 조건: `startServer` is synchronous through Lab activation, already owns an optional-listener transaction, and the service installer already has an owner-only token-file flow.
+- 검토한 주요 대안: Add management routes to the public listener; infer trusted ingress from `Host`/`Forwarded`/Tailscale headers; create a separate service manager; extend the existing composition root.
+- 선택한 방식: Bind a third socket exactly to `127.0.0.1`, select trust by receiving `Bun.serve` instance, keep a fixed route allowlist, and reuse the current launchd/systemd definitions.
+- 다른 대안 대신 이 방식을 선택한 이유: Headers do not prove which transport received a request, while a kernel loopback bind plus Tailscale Serve supplies a concrete ingress boundary without duplicating lifecycle or secret delivery.
+- 장점, 단점 및 영향: Public/default behavior stays unchanged and management can use Tailscale identity; operators must provide a co-located HTTPS frontend and pairing remains necessary for generic TLS proxies.
 
 The process-state boundary deliberately exposes two PID checks. `readAlivePid()` is the cheap
 non-destructive probe used by liveness polling. `readPid()` and `verifyPidIdentity()` include the
@@ -141,3 +158,7 @@ destination, and key boundary instead of being silently canonicalized onto the n
 OAuth presets resolve discovery against the same canonical registry transport as normal routing
 before any adapter-specific transport override, so a stale configured `baseUrl` cannot receive an
 OAuth bearer token.
+
+## Remote Hub hardening ownership
+
+`src/remote/protocol.ts` owns pure interval/feature negotiation. `src/client/hub-client.ts` owns bounded, schema-validated remote catalog consumption and key-id probes. `src/client/hub-relay.ts` is a fixed-authority management relay with URL, header, body, redirect, and stream bounds. The public data listener remains the direct client→hub path; the loopback management ingress never serves data-plane routes.

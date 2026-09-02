@@ -5,7 +5,7 @@
  * encrypted native-only fallback, native passthrough terminal finalization.
  */
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +44,7 @@ import {
   encryptedInput as recoverableEncryptedInput,
   recoverySse,
 } from "./helpers/agent-task-recovery";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 setDefaultTimeout(30_000);
 
@@ -79,7 +80,7 @@ afterEach(() => {
   resetAgentTaskRecoveryState();
   resetSubagentModelFallbackStateForTests();
   setMainAccountPlan(null);
-  rmSync(testDir, { recursive: true, force: true });
+  removeTreeWithRetry(testDir);
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -263,6 +264,7 @@ async function postDirectCodex(
   config: OcxConfig,
   body: Record<string, unknown>,
   options: Parameters<typeof handleResponses>[3] = {},
+  headers: HeadersInit = {},
 ): Promise<Response> {
   return handleResponses(
     new Request("http://localhost/v1/responses", {
@@ -270,6 +272,7 @@ async function postDirectCodex(
       headers: {
         "content-type": "application/json",
         authorization: "Bearer caller-codex-token",
+        ...headers,
       },
       body: JSON.stringify(body),
     }),
@@ -1774,6 +1777,57 @@ describe("account-gated retry entitlement boundary", () => {
     expect(fetchCalls).toBe(3);
     expect(mainExclusions).toEqual([true, true, true]);
     expect(selectionReleases).toBe(3);
+  });
+
+  test("a lost Pool model grant retries once with the validated caller-owned main credential", async () => {
+    const now = 1_800_000_000_000;
+    Date.now = () => now;
+    installPoolCredential("pool-a", "pool_acc_a", now);
+    const cfg = retryConfig();
+    let entitlementCalls = 0;
+    const observed: Array<{ authorization: string | null; accountId: string | null }> = [];
+    let callerRosterReads = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(String(input));
+      const headers = new Headers(init?.headers);
+      if (url.pathname.endsWith("/models")) {
+        callerRosterReads += 1;
+        expect(headers.get("authorization")).toBe("Bearer caller-codex-token");
+        expect(headers.get("chatgpt-account-id")).toBe("caller-main-account");
+        return Response.json({
+          models: [{ slug: model, supported_in_api: true, visibility: "list" }],
+        });
+      }
+      observed.push({
+        authorization: headers.get("authorization"),
+        accountId: headers.get("chatgpt-account-id"),
+      });
+      return observed.length === 1
+        ? unsupportedCodexModelResponse(model)
+        : Response.json({ id: "caller-main-success", status: "completed", output: [] });
+    }) as typeof fetch;
+
+    const response = await postDirectCodex(
+      cfg,
+      { model, input: "hello", stream: false },
+      {
+        resolveCodexModelEntitlements: async () => {
+          entitlementCalls += 1;
+          return entitlementCalls === 1
+            ? entitlementSnapshot({ "pool-a": [model] })
+            : entitlementSnapshot({ "pool-a": ["gpt-5.6-sol"] });
+        },
+      },
+      { "chatgpt-account-id": "caller-main-account" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(observed).toEqual([
+      { authorization: "Bearer pool-a_token", accountId: "pool_acc_a" },
+      { authorization: "Bearer caller-codex-token", accountId: "caller-main-account" },
+    ]);
+    expect(callerRosterReads).toBe(1);
+    expect(entitlementCalls).toBe(3);
   });
 
   test("a first-refresh programmer error cancels the 400 and releases its quota probe", async () => {

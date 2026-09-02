@@ -91,11 +91,16 @@ export async function fulfillImageCall(
     typeof obj.image_url === "string" ? obj.image_url : typeof obj.image === "string" ? obj.image : undefined;
   const size = typeof obj.size === "string" ? obj.size : plan.defaultSize;
   const quality = typeof obj.quality === "string" ? obj.quality : plan.defaultQuality;
+  // Forward the raw literal and let callXaiImages own validation. Folding "auto"
+  // to undefined here would make the request look like it carried no ratio at
+  // all, so the client would derive one from `size` — the opposite of what an
+  // explicit Auto selection asks for.
+  const aspectRatio = typeof obj.aspect_ratio === "string" ? obj.aspect_ratio : undefined;
 
   let result;
   try {
     result = await callXaiImages(
-      { prompt, model: plan.model, n, imageUrl, size, quality },
+      { prompt, model: plan.model, n, imageUrl, size, quality, aspectRatio },
       plan.auth,
       signal,
       plan.timeoutMs,

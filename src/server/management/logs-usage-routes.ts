@@ -202,10 +202,11 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     const filter = {
       provider: url.searchParams.get("provider"),
       model: url.searchParams.get("model"),
+      apiKeyId: url.searchParams.get("apiKeyId"),
     };
     const project = <T extends UsageSummary>(summary: T, entries?: PersistedUsageEntry[]) =>
       projectUsageSummary(summary, filter, entries);
-    const filterRequested = Boolean(filter.provider ?? filter.model);
+    const filterRequested = Boolean(filter.provider ?? filter.model ?? filter.apiKeyId);
     const now = Date.now();
     try {
       const cacheKey = `${range}:${surface}`;

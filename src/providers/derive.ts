@@ -44,6 +44,7 @@ export interface DerivedKeyLoginProvider {
   preserveReasoningContentModels?: string[];
   requiresReasoningPlaceholderModels?: string[];
   reasoningSplitModels?: string[];
+  reasoningDetailsModels?: string[];
   thinkingToggleModels?: string[];
   thinkingBudgetModels?: string[];
   escapeBuiltinToolNames?: boolean;
@@ -230,6 +231,7 @@ export function providerConfigSeed(entry: ProviderRegistryEntry): OcxProviderCon
     ...(liveModels !== undefined ? { liveModels } : {}),
     ...(entry.contextWindow !== undefined ? { contextWindow: entry.contextWindow } : {}),
     ...(entry.modelContextWindows ? { modelContextWindows: { ...entry.modelContextWindows } } : {}),
+    ...(entry.modelDisplayNames ? { modelDisplayNames: { ...entry.modelDisplayNames } } : {}),
     ...(entry.modelInputModalities ? { modelInputModalities: cloneRecordOfArrays(entry.modelInputModalities) } : {}),
     ...(entry.modelMaxInputTokens ? { modelMaxInputTokens: { ...entry.modelMaxInputTokens } } : {}),
     ...(entry.defaultMaxOutputTokens !== undefined ? { defaultMaxOutputTokens: entry.defaultMaxOutputTokens } : {}),
@@ -261,6 +263,7 @@ export function providerConfigSeed(entry: ProviderRegistryEntry): OcxProviderCon
     ...(entry.preserveReasoningContentModels ? { preserveReasoningContentModels: [...entry.preserveReasoningContentModels] } : {}),
     ...(entry.requiresReasoningPlaceholderModels ? { requiresReasoningPlaceholderModels: [...entry.requiresReasoningPlaceholderModels] } : {}),
     ...(entry.reasoningSplitModels ? { reasoningSplitModels: [...entry.reasoningSplitModels] } : {}),
+    ...(entry.reasoningDetailsModels ? { reasoningDetailsModels: [...entry.reasoningDetailsModels] } : {}),
     ...(entry.thinkingToggleModels ? { thinkingToggleModels: [...entry.thinkingToggleModels] } : {}),
     ...(entry.thinkingBudgetModels ? { thinkingBudgetModels: [...entry.thinkingBudgetModels] } : {}),
     ...(entry.escapeBuiltinToolNames !== undefined ? { escapeBuiltinToolNames: entry.escapeBuiltinToolNames } : {}),
@@ -308,6 +311,7 @@ export function deriveKeyLoginMap(): Record<string, DerivedKeyLoginProvider> {
       ...(entry.preserveReasoningContentModels ? { preserveReasoningContentModels: [...entry.preserveReasoningContentModels] } : {}),
       ...(entry.requiresReasoningPlaceholderModels ? { requiresReasoningPlaceholderModels: [...entry.requiresReasoningPlaceholderModels] } : {}),
       ...(entry.reasoningSplitModels ? { reasoningSplitModels: [...entry.reasoningSplitModels] } : {}),
+      ...(entry.reasoningDetailsModels ? { reasoningDetailsModels: [...entry.reasoningDetailsModels] } : {}),
       ...(entry.thinkingToggleModels ? { thinkingToggleModels: [...entry.thinkingToggleModels] } : {}),
       ...(entry.thinkingBudgetModels ? { thinkingBudgetModels: [...entry.thinkingBudgetModels] } : {}),
       ...(entry.escapeBuiltinToolNames !== undefined ? { escapeBuiltinToolNames: entry.escapeBuiltinToolNames } : {}),
@@ -475,6 +479,11 @@ export function enrichProviderFromRegistry(name: string, prov: OcxProviderConfig
   if (prov.liveModels === undefined && seed.liveModels !== undefined) prov.liveModels = seed.liveModels;
   if (prov.contextWindow === undefined && seed.contextWindow !== undefined) prov.contextWindow = seed.contextWindow;
   if (!prov.modelContextWindows && seed.modelContextWindows) prov.modelContextWindows = { ...seed.modelContextWindows };
+  // Per-model fill, not all-or-nothing: an operator who renamed ONE model must still receive
+  // labels for the rest, and an existing install must pick up newly seeded rows on enrich.
+  if (seed.modelDisplayNames) {
+    prov.modelDisplayNames = { ...seed.modelDisplayNames, ...(prov.modelDisplayNames ?? {}) };
+  }
   if (seed.modelInputModalities) prov.modelInputModalities = fillRecordOfArrays(seed.modelInputModalities, prov.modelInputModalities);
   if (prov.defaultMaxOutputTokens === undefined && seed.defaultMaxOutputTokens !== undefined) prov.defaultMaxOutputTokens = seed.defaultMaxOutputTokens;
   if (!prov.modelMaxOutputTokens && seed.modelMaxOutputTokens) prov.modelMaxOutputTokens = { ...seed.modelMaxOutputTokens };
@@ -542,6 +551,7 @@ export function enrichProviderFromRegistry(name: string, prov: OcxProviderConfig
   if (!prov.preserveReasoningContentModels && seed.preserveReasoningContentModels) prov.preserveReasoningContentModels = [...seed.preserveReasoningContentModels];
   if (!prov.requiresReasoningPlaceholderModels && seed.requiresReasoningPlaceholderModels) prov.requiresReasoningPlaceholderModels = [...seed.requiresReasoningPlaceholderModels];
   if (!prov.reasoningSplitModels && seed.reasoningSplitModels) prov.reasoningSplitModels = [...seed.reasoningSplitModels];
+  if (!prov.reasoningDetailsModels && seed.reasoningDetailsModels) prov.reasoningDetailsModels = [...seed.reasoningDetailsModels];
   if (!prov.thinkingToggleModels && seed.thinkingToggleModels) prov.thinkingToggleModels = [...seed.thinkingToggleModels];
   if (!prov.thinkingBudgetModels && seed.thinkingBudgetModels) prov.thinkingBudgetModels = [...seed.thinkingBudgetModels];
   if (prov.escapeBuiltinToolNames === undefined && seed.escapeBuiltinToolNames !== undefined) prov.escapeBuiltinToolNames = seed.escapeBuiltinToolNames;

@@ -15,14 +15,14 @@ import { SidebarGithubRow } from "./components/sidebar-github-row";
 import { IconGrid, IconServer, IconBoxes, IconBot, IconList, IconActivity, IconHardDrive, IconKey, IconMenu, IconSun, IconMoon, IconMonitor, IconGlobe, IconPower, IconX, IconRefresh} from "./icons";
 import { useI18n, useT, LOCALES, localeDisplayName, type Locale, type TKey } from "./i18n/shared";
 import { Select } from "./ui";
-import { installApiAuthFetch } from "./api";
+import { configureApiTargets, hasApiSession, installApiAuthFetch, installApiSessionFromHtml, logoutApiSession } from "./api";
+import { apiBaseForPlane, discoverApiTargets, isConnectedRuntime, standaloneApiTargets, type ApiTargets } from "./api-targets";
+import { ConnectPairingForm } from "./connect-pairing";
 import { type Page } from "./app-routing";
 import { readModelsTab, type ModelsTab } from "./pages/models-tab";
 import { useAppRouteState } from "./use-app-route-state";
 import { requestProxyStop } from "./stop-proxy";
 import { useCodexRestart } from "./use-codex-restart";
-
-installApiAuthFetch();
 
 type Theme = "light" | "dark" | "system";
 
@@ -40,6 +40,9 @@ const PAGE_TKEY: Record<Page, TKey> = {
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
+const INITIAL_TARGETS = standaloneApiTargets(API_BASE);
+configureApiTargets(INITIAL_TARGETS);
+installApiAuthFetch();
 const THEME_KEY = "ocx-theme";
 
 /**
@@ -101,6 +104,42 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
   const { locale, setLocale } = useI18n();
   const t = useT();
+  const [targets, setTargets] = useState<ApiTargets>(INITIAL_TARGETS);
+  // Standalone starts settled: there is nothing to discover, so nothing to wait for.
+  // Gating the page on discovery made a plain install show remote-hub loading copy before
+  // its own dashboard, for a feature the operator never enabled.
+  const [targetsSettled, setTargetsSettled] = useState(() => !isConnectedRuntime());
+  const [targetError, setTargetError] = useState(false);
+  const [sharedSessionReady, setSharedSessionReady] = useState(() => hasApiSession("shared"));
+  const [sessionLoggingOut, setSessionLoggingOut] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void discoverApiTargets(API_BASE, controller.signal).then(async next => {
+      configureApiTargets(next);
+      setTargets(next);
+      if (next.connected && !hasApiSession("shared")) {
+        try {
+          const response = await fetch(next.shared.bootstrapPath, {
+            cache: "no-store",
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]),
+          });
+          if (response.ok) installApiSessionFromHtml("shared", await response.text());
+        } catch { /* pairing form remains available */ }
+      }
+      if (controller.signal.aborted) return;
+      setSharedSessionReady(hasApiSession("shared"));
+      setTargetError(false);
+      setTargetsSettled(true);
+    }).catch(() => {
+      if (controller.signal.aborted) return;
+      setTargetError(true);
+      setTargetsSettled(true);
+    });
+    return () => controller.abort();
+  }, []);
+  const machineBase = apiBaseForPlane("machine", targets);
+  const sharedBase = apiBaseForPlane("shared", targets);
 
   // Narrow screens: the sidebar becomes an off-canvas drawer behind a hamburger toggle.
   const [navOpen, setNavOpen] = useState(false);
@@ -126,14 +165,14 @@ export default function App() {
   }, [theme]);
 
   const healthPoll = useKeyedClientResource(
-    `app-healthz:${API_BASE}`,
-    [],
+    `app-healthz:${machineBase}`,
+    [machineBase, targetsSettled],
     async (signal) => {
-      const res = await fetch(`${API_BASE}/healthz`, { signal });
+      const res = await fetch(`${machineBase}/healthz`, { signal });
       if (!res.ok) return null;
       return readRuntimeVersion(await res.json());
     },
-    { pollMs: 30_000 },
+    { pollMs: 30_000, enabled: targetsSettled },
   );
 
   const cycleTheme = () => setTheme(t => (t === "light" ? "dark" : t === "dark" ? "system" : "light"));
@@ -175,15 +214,16 @@ export default function App() {
   // sharing a controller — the backend is already single-flight, so what is missing
   // is invalidation, not mutual exclusion.
   const [codexRestartEpoch, setCodexRestartEpoch] = useState(0);
-  const { restarting: codexRestarting, restart: handleCodexRestart } = useCodexRestart(API_BASE, {
+  const { restarting: codexRestarting, restart: handleCodexRestart } = useCodexRestart(sharedBase, {
     onSettled: () => setCodexRestartEpoch(epoch => epoch + 1),
   });
 
   const handleStop = async () => {
-    if (!confirm(t("dash.stopConfirm"))) return;
+    if (!confirm(t(targets.connected ? "connection.disconnectConfirm" : "dash.stopConfirm"))) return;
     setStopping(true);
-    const outcome = await requestProxyStop(API_BASE, {
+    const outcome = await requestProxyStop(machineBase, {
       formatFailure: status => t("dash.stopFailed", { status: String(status) }),
+      mode: targets.connected ? "client" : "standalone",
     });
     // Refusals and restore failures return normally instead of dropping the connection.
     // In both cases the proxy did not reach a clean-stop result, so re-enable the control
@@ -192,6 +232,15 @@ export default function App() {
       setStopping(false);
       alert(outcome.message);
     }
+  };
+
+  const handleSessionLogout = async () => {
+    if (sessionLoggingOut) return;
+    setSessionLoggingOut(true);
+    const loggedOut = await logoutApiSession("shared");
+    setSessionLoggingOut(false);
+    if (loggedOut) setSharedSessionReady(false);
+    else alert(t("connection.sessionLogoutFailed"));
   };
 
   const brand = (
@@ -213,8 +262,14 @@ export default function App() {
         </button>
         {brand}
         <div className="mobile-topbar-actions">
+          {targets.connected && sharedSessionReady && (
+            <button type="button" className="sidebar-orb" onClick={() => { void handleSessionLogout(); }} disabled={sessionLoggingOut}
+              aria-label={t(sessionLoggingOut ? "connection.sessionLoggingOut" : "connection.sessionLogout")} title={t("connection.sessionLogout")}>
+              <IconX />
+            </button>
+          )}
           <button type="button" className="sidebar-orb sidebar-orb--danger" onClick={handleStop} disabled={stopping}
-            aria-label={t("dash.stop")} title={t("dash.stop")}>
+            aria-label={t(targets.connected ? "connection.disconnect" : "dash.stop")} title={t(targets.connected ? "connection.disconnect" : "dash.stop")}>
             <IconPower />
           </button>
           <button type="button" className="sidebar-orb"
@@ -284,10 +339,17 @@ export default function App() {
           <div className="sidebar-action-row">
             <span className="sidebar-action-label">{t("dash.actions")}</span>
             <div className="sidebar-action-orbs">
+              {targets.connected && sharedSessionReady && (
+                <button type="button" className="sidebar-orb" onClick={() => { void handleSessionLogout(); }} disabled={sessionLoggingOut}
+                  aria-label={t(sessionLoggingOut ? "connection.sessionLoggingOut" : "connection.sessionLogout")}
+                  title={t("connection.sessionLogout")}>
+                  <IconX />
+                </button>
+              )}
               <button type="button" className="sidebar-orb sidebar-orb--danger"
                 onClick={handleStop} disabled={stopping}
-                aria-label={stopping ? t("dash.stopping") : t("dash.stop")}
-                title={stopping ? t("dash.stopping") : t("dash.stop")}>
+                aria-label={stopping ? t("dash.stopping") : t(targets.connected ? "connection.disconnect" : "dash.stop")}
+                title={stopping ? t("dash.stopping") : t(targets.connected ? "connection.disconnect" : "dash.stop")}>
                 <IconPower />
               </button>
               <button type="button" className="sidebar-orb"
@@ -299,7 +361,7 @@ export default function App() {
             </div>
           </div>
           <SidebarGithubRow
-            apiBase={API_BASE}
+            apiBase={sharedBase}
             onOpenUpdate={() => {
               // The update dialog lives on the dashboard maintenance panel. Deep-link to
               // `#dashboard/update` and let the dashboard own the check/run flow — no
@@ -328,16 +390,34 @@ export default function App() {
             detailsLabel={t("errorBoundary.details")}
             reloadLabel={t("errorBoundary.reload")}
           >
-            {page === "dashboard" && <Dashboard apiBase={API_BASE} />}
-            {page === "startup" && <Startup apiBase={API_BASE} />}
-            {page === "providers" && <Providers apiBase={API_BASE} />}
-            {page === "models" && <Models key={API_BASE} apiBase={API_BASE} restartEpoch={codexRestartEpoch} />}
-            {page === "subagents" && <Subagents key={API_BASE} apiBase={API_BASE} />}
-            {page === "logs" && <Logs apiBase={API_BASE} />}
-            {page === "usage" && <Usage apiBase={API_BASE} />}
-            {page === "storage" && <Storage apiBase={API_BASE} />}
-            {page === "codex-set" && <CodexSet apiBase={API_BASE} />}
-            {page === "integrations" && <Integrations apiBase={API_BASE} />}
+            {!targetsSettled ? (
+              <div className="alert">{t("connection.discovering")}</div>
+            ) : (
+              <>
+                {/*
+                  A failed discovery is a banner, not a replacement. It used to take over the
+                  whole body, so a slow or restarting proxy cost a standalone user their
+                  dashboard over a plane they never turned on. The requests that actually
+                  need the machine plane report their own errors.
+                */}
+                {targetError && (
+                  <div className="alert alert-err" role="alert">{t("connection.machineUnavailable")}</div>
+                )}
+                {targets.connected && !sharedSessionReady && (
+                  <ConnectPairingForm target={targets.shared} onConnected={() => setSharedSessionReady(true)} />
+                )}
+                {page === "dashboard" && <Dashboard apiBase={sharedBase} />}
+                {page === "startup" && <Startup apiBase={sharedBase} machineApiBase={machineBase} connected={targets.connected} />}
+                {page === "providers" && <Providers apiBase={sharedBase} />}
+                {page === "models" && <Models key={sharedBase} apiBase={sharedBase} restartEpoch={codexRestartEpoch} />}
+                {page === "subagents" && <Subagents key={sharedBase} apiBase={sharedBase} />}
+                {page === "logs" && <Logs apiBase={sharedBase} />}
+                {page === "usage" && <Usage apiBase={sharedBase} connected={targets.connected} apiKeyId={targets.apiKeyId} />}
+                {page === "storage" && <Storage apiBase={sharedBase} />}
+                {page === "codex-set" && <CodexSet apiBase={sharedBase} />}
+                {page === "integrations" && <Integrations apiBase={sharedBase} machineApiBase={machineBase} connected={targets.connected} />}
+              </>
+            )}
           </ErrorBoundary>
         </div>
       </main>

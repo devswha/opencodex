@@ -1,15 +1,20 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fallbackCodexAccountLogLabel } from "../src/codex/account-label";
 import { saveCodexAccountCredential } from "../src/codex/account-store";
 import { clearAccountQuota, updateAccountQuota } from "../src/codex/auth-api";
 import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/main-account";
-import { clearCodexUpstreamHealth, clearThreadAccountMap } from "../src/codex/routing";
+import {
+  clearCodexUpstreamHealth,
+  clearThreadAccountMap,
+  getCodexUpstreamHealth,
+} from "../src/codex/routing";
 import type { RequestLogContext } from "../src/server/request-log";
 import { handleResponses } from "../src/server/responses";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const originalFetch = globalThis.fetch;
 
@@ -77,7 +82,7 @@ async function withPoolHome<T>(run: (home: string) => Promise<T>): Promise<T> {
     clearCodexUpstreamHealth();
     clearThreadAccountMap();
     clearAccountQuota();
-    rmSync(home, { recursive: true, force: true });
+    removeTreeWithRetry(home);
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -142,6 +147,66 @@ describe("Responses account usage attribution", () => {
       expect(bearers).toEqual(["Bearer pool-a-access-token", "Bearer pool-b-access-token"]);
       expect(logCtx.accountLogLabel).toBe(fallbackCodexAccountLogLabel("pool-b"));
       expect(logCtx.activeAttempt?.accountLogLabel).toBe(fallbackCodexAccountLogLabel("pool-b"));
+    });
+  });
+
+  test("a quota message wrapped in HTTP 502 cools the account and retries an alternate", async () => {
+    await withPoolHome(async () => {
+      const config = poolConfig(["pool-a", "pool-b"]);
+      for (const id of ["pool-a", "pool-b"]) {
+        savePoolCredential(id);
+        updateAccountQuota(id, id === "pool-a" ? 10 : 20);
+      }
+      const bearers: string[] = [];
+      globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const bearer = new Headers(init?.headers).get("authorization") ?? "";
+        bearers.push(bearer);
+        if (bearer === "Bearer pool-a-access-token") {
+          return Response.json({ error: { message: "The usage limit has been reached" } }, {
+            status: 502,
+          });
+        }
+        return completedResponse("pool-b-response");
+      }) as typeof fetch;
+
+      const response = await handleResponses(request(), config, { model: "", provider: "" }, {});
+
+      expect(response.status).toBe(200);
+      expect(bearers).toEqual([
+        "Bearer pool-a-access-token",
+        "Bearer pool-a-access-token",
+        "Bearer pool-a-access-token",
+        "Bearer pool-b-access-token",
+      ]);
+      expect(getCodexUpstreamHealth("pool-a")).toMatchObject({
+        lastFailureStatus: 429,
+        cooldownSource: "default",
+      });
+      expect(getCodexUpstreamHealth("pool-a")?.cooldownUntil).toBeGreaterThan(Date.now());
+    });
+  });
+
+  test("a wrapped quota failure cools a sole account when no alternate exists", async () => {
+    await withPoolHome(async () => {
+      const config = poolConfig(["pool-a"]);
+      savePoolCredential("pool-a");
+      updateAccountQuota("pool-a", 10);
+      let sends = 0;
+      globalThis.fetch = (async () => {
+        sends += 1;
+        return Response.json({ error: { message: "The usage limit has been reached" } }, {
+          status: 502,
+        });
+      }) as typeof fetch;
+
+      const response = await handleResponses(request(), config, { model: "", provider: "" }, {});
+
+      expect(response.status).toBe(502);
+      expect(sends).toBe(3);
+      expect(getCodexUpstreamHealth("pool-a")).toMatchObject({
+        cooldownSource: "default",
+      });
+      expect(getCodexUpstreamHealth("pool-a")?.cooldownUntil).toBeGreaterThan(Date.now());
     });
   });
 });

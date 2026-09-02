@@ -26,7 +26,7 @@ test("Codex Set is always present in the sidebar, never filtered by view mode", 
 
   // It stays in the nav table and remains routable for deep links.
   expect(src).toContain('{ id: "codex-set", tkey: "nav.codexSet", Icon: IconKey }');
-  expect(src).toContain('{page === "codex-set" && <CodexSet apiBase={API_BASE} />}');
+  expect(src).toContain('{page === "codex-set" && <CodexSet apiBase={sharedBase} />}');
 });
 
 test("the shipped #codex-auth bookmark still resolves", async () => {

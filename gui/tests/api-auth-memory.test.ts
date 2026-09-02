@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { installApiAuthFetch, resetApiAuthFetchForTests } from "../src/api";
+import { configureApiTargets, installApiAuthFetch, installApiSessionFromHtml, resetApiAuthFetchForTests } from "../src/api";
+import { targetsFromMachineStatus, type MachineStatusV1 } from "../src/api-targets";
 
 const LEGACY_TOKEN_KEY = "opencodex-api-token";
 const globals = ["document", "window", "navigator", "sessionStorage", "fetch"] as const;
@@ -19,8 +20,18 @@ beforeEach(() => {
     fetch: { configurable: true, value: testWindow.fetch.bind(testWindow) },
   });
   originalPrompt = window.prompt;
+  // happy-dom does not implement `prompt`, so the admin-token fallback below throws a
+  // TypeError instead of returning null the moment a test actually reaches it. Most tests
+  // never do; the ones that clear a rejected session do, and they failed on a missing
+  // function rather than on the behavior they assert. A null-returning stub is the honest
+  // stand-in for "the operator dismissed the prompt".
+  if (typeof window.prompt !== "function") {
+    Object.defineProperty(testWindow, "prompt", { configurable: true, writable: true, value: () => null });
+  }
   resetApiAuthFetchForTests(async () => {
-    return window.prompt("OpenCodex admin token (OPENCODEX_ADMIN_AUTH_TOKEN)")?.trim() || null;
+    return typeof window.prompt === "function"
+      ? window.prompt("OpenCodex admin token (OPENCODEX_ADMIN_AUTH_TOKEN)")?.trim() || null
+      : null;
   });
   sessionStorage.clear();
 });
@@ -352,11 +363,12 @@ test("data-plane requests never receive the management token or prompt", async (
   expect(promptCalls).toBe(beforeCrossPrompts);
 });
 
-function injectSessionMeta(token: string, csrf: string, origin: string): void {
+function injectSessionMeta(token: string, csrf: string, browserOrigin: string, serverOrigin = browserOrigin): void {
   for (const [name, content] of [
     ["opencodex-session-token", token],
     ["opencodex-session-csrf", csrf],
-    ["opencodex-session-origin", origin],
+    ["opencodex-session-origin", browserOrigin],
+    ["opencodex-session-server-origin", serverOrigin],
   ] as const) {
     const meta = document.createElement("meta");
     meta.setAttribute("name", name);
@@ -365,14 +377,21 @@ function injectSessionMeta(token: string, csrf: string, origin: string): void {
   }
 }
 
-function sessionDocumentHtml(token: string, csrf: string, origin: string): string {
+function sessionDocumentHtml(token: string, csrf: string, browserOrigin: string, serverOrigin = browserOrigin): string {
   return [
     "<!doctype html><html><head>",
     `<meta name="opencodex-session-token" content="${token}">`,
     `<meta name="opencodex-session-csrf" content="${csrf}">`,
-    `<meta name="opencodex-session-origin" content="${origin}">`,
+    `<meta name="opencodex-session-origin" content="${browserOrigin}">`,
+    `<meta name="opencodex-session-server-origin" content="${serverOrigin}">`,
     "</head><body></body></html>",
   ].join("");
+}
+
+function htmlResponseAt(html: string, url: string): Response {
+  const response = new Response(html, { status: 200, headers: { "Content-Type": "text/html" } });
+  Object.defineProperty(response, "url", { configurable: true, value: url });
+  return response;
 }
 
 test("expired session silently re-bootstraps from the served document without prompting", async () => {
@@ -392,10 +411,10 @@ test("expired session silently re-bootstraps from the served document without pr
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
     if (url.pathname === "/opencodex-session") {
       bootstrapFetches += 1;
-      return new Response(sessionDocumentHtml("ocx_session_fresh", "fresh-csrf", "http://localhost"), {
-        status: 200,
-        headers: { "Content-Type": "text/html" },
-      });
+      return htmlResponseAt(
+        sessionDocumentHtml("ocx_session_fresh", "fresh-csrf", "http://localhost"),
+        "http://localhost/opencodex-session",
+      );
     }
     seenApiKeys.push(headers.get("X-OpenCodex-API-Key"));
     seenGuiOrigins.push(headers.get("X-OpenCodex-GUI-Origin"));
@@ -428,10 +447,10 @@ test("a session minted for another origin is rejected and the prompt fallback st
     const url = new URL(raw, "http://localhost/");
     const headers = new Headers(init?.headers);
     if (url.pathname === "/opencodex-session") {
-      return new Response(sessionDocumentHtml("ocx_session_foreign", "foreign-csrf", "http://192.0.2.10:10100"), {
-        status: 200,
-        headers: { "Content-Type": "text/html" },
-      });
+      return htmlResponseAt(
+        sessionDocumentHtml("ocx_session_foreign", "foreign-csrf", "http://192.0.2.10:10100"),
+        "http://localhost/opencodex-session",
+      );
     }
     if (headers.get("X-OpenCodex-API-Key") === "manual-admin-token") return new Response("{}", { status: 200 });
     return new Response("unauthorized", { status: 401 });
@@ -445,4 +464,114 @@ test("a session minted for another origin is rejected and the prompt fallback st
   const res = await fetch("/api/config");
   expect(res.status).toBe(200);
   expect(promptCalls).toBe(1);
+});
+
+test("a renewed two-origin session attaches only to its bound server and carries browser origin plus CSRF", async () => {
+  injectSessionMeta("ocx_session_stale", "stale-csrf", "http://localhost");
+  const status: MachineStatusV1 = {
+    mode: "client", connected: true, machineBase: "http://localhost",
+    sharedBase: "https://hub.example.test", sharedServerOrigin: "https://hub.example.test",
+    managementTransport: "direct", apiKeyId: "client-key-a", protocolVersion: 1,
+    connectedAt: "2026-08-28T00:00:00.000Z", hubReachability: "unknown",
+  };
+  configureApiTargets(targetsFromMachineStatus("", status));
+  const seen = new Map<string, Headers[]>();
+  let localApiCalls = 0;
+  const record = (origin: string, headers: Headers) => {
+    const entries = seen.get(origin) ?? [];
+    entries.push(headers);
+    seen.set(origin, entries);
+  };
+  const mockFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input), "http://localhost/");
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    if (url.origin === "https://hub.example.test" && url.pathname === "/opencodex-session") {
+      return htmlResponseAt(
+        sessionDocumentHtml("ocx_session_remote", "remote-csrf", "http://localhost", "https://hub.example.test"),
+        "https://hub.example.test/opencodex-session",
+      );
+    }
+    record(url.origin, headers);
+    if (url.origin === "https://hub.example.test") {
+      localApiCalls += 1;
+      return new Response("{}", { status: localApiCalls === 1 ? 401 : 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  await installMockAuthFetch(mockFetch);
+
+  expect((await fetch("https://hub.example.test/api/config", { method: "POST" })).status).toBe(200);
+  expect((await fetch("/api/machine/status")).status).toBe(200);
+  expect((await fetch("https://evil.example.test/api/config")).status).toBe(200);
+
+  const hubHeaders = seen.get("https://hub.example.test")?.at(-1);
+  expect(hubHeaders?.get("X-OpenCodex-API-Key")).toBe("ocx_session_remote");
+  expect(hubHeaders?.get("X-OpenCodex-GUI-Origin")).toBe("http://localhost");
+  expect(hubHeaders?.get("X-OpenCodex-CSRF-Token")).toBe("remote-csrf");
+  const evilHeaders = seen.get("https://evil.example.test")?.[0];
+  expect(evilHeaders?.get("X-OpenCodex-API-Key")).toBeNull();
+  expect(evilHeaders?.get("X-OpenCodex-GUI-Origin")).toBeNull();
+});
+
+test("relay requests carry independent shared and machine sessions without cross-target leakage", async () => {
+  injectSessionMeta("ocx_session_machine", "machine-csrf", "http://localhost");
+  const seen = new Map<string, Headers>();
+  const mockFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input), "http://localhost/");
+    seen.set(url.pathname, new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  await installMockAuthFetch(mockFetch);
+  const relayStatus: MachineStatusV1 = {
+    mode: "client", connected: true, machineBase: "http://localhost",
+    sharedBase: "http://localhost/api/machine/hub-relay", sharedServerOrigin: "https://hub.example.test",
+    managementTransport: "relay", apiKeyId: "client-key-a", protocolVersion: 1,
+    connectedAt: "2026-08-28T00:00:00.000Z", hubReachability: "unknown",
+  };
+  configureApiTargets(targetsFromMachineStatus("", relayStatus));
+  expect(installApiSessionFromHtml("shared", sessionDocumentHtml(
+    "ocx_session_hub", "hub-csrf", "http://localhost", "https://hub.example.test",
+  ))).toBe(true);
+
+  await fetch("/api/machine/status");
+  await fetch("/api/machine/hub-relay/api/config", { method: "POST" });
+  await fetch("https://evil.example/api/config");
+
+  const machine = seen.get("/api/machine/status")!;
+  expect(machine.get("x-opencodex-api-key")).toBe("ocx_session_machine");
+  expect(machine.get("x-opencodex-machine-session")).toBeNull();
+  const relay = seen.get("/api/machine/hub-relay/api/config")!;
+  expect(relay.get("x-opencodex-api-key")).toBe("ocx_session_hub");
+  expect(relay.get("x-opencodex-csrf-token")).toBe("hub-csrf");
+  expect(relay.get("x-opencodex-machine-session")).toBe("ocx_session_machine");
+  expect(relay.get("x-opencodex-machine-csrf-token")).toBe("machine-csrf");
+  const unknown = seen.get("/api/config")!;
+  expect(unknown.get("x-opencodex-api-key")).toBeNull();
+  expect(unknown.get("x-opencodex-machine-session")).toBeNull();
+});
+
+test("a mismatched bootstrap response/server origin clears every in-memory session field", async () => {
+  injectSessionMeta("ocx_session_stale", "stale-csrf", "http://localhost");
+  const seenKeys: Array<string | null> = [];
+  let apiCalls = 0;
+  const mockFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input), "http://localhost/");
+    if (url.pathname === "/opencodex-session") {
+      return htmlResponseAt(
+        sessionDocumentHtml("ocx_session_rejected", "new-csrf", "http://localhost", "https://evil.example.test"),
+        "https://hub.example.test/opencodex-session",
+      );
+    }
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    seenKeys.push(headers.get("X-OpenCodex-API-Key"));
+    apiCalls += 1;
+    return new Response("unauthorized", { status: 401 });
+  }) as typeof fetch;
+  await installMockAuthFetch(mockFetch);
+
+  expect((await fetch("/api/config")).status).toBe(401);
+  expect(apiCalls).toBe(1);
+  expect((await fetch("https://hub.example.test/api/config")).status).toBe(401);
+  expect(seenKeys).toEqual(["ocx_session_stale", null]);
+  expect(sessionStorage.getItem(LEGACY_TOKEN_KEY)).toBeNull();
 });

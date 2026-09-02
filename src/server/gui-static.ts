@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { browserSecurityHeaders } from "./auth-cors";
-import type { GuiSessionBootstrap } from "./management-auth";
+import type { GuiSessionBootstrap } from "./gui-session";
 
 /** opencodex version, read from the packaged package.json (same source as the server bootstrap). */
 const VERSION = (() => {
@@ -70,8 +70,24 @@ function sessionBootstrapMeta(session: GuiSessionBootstrap): string {
   return [
     `<meta name="opencodex-session-token" content="${escapeHtmlAttribute(session.token)}">`,
     `<meta name="opencodex-session-csrf" content="${escapeHtmlAttribute(session.csrfToken)}">`,
-    `<meta name="opencodex-session-origin" content="${escapeHtmlAttribute(session.origin)}">`,
+    `<meta name="opencodex-session-origin" content="${escapeHtmlAttribute(session.browserOrigin)}">`,
+    `<meta name="opencodex-session-server-origin" content="${escapeHtmlAttribute(session.serverOrigin)}">`,
   ].join("");
+}
+
+/**
+ * Runtime role, emitted on every served document.
+ *
+ * Separate from the session block on purpose: the session exists only once a GUI session
+ * has been issued, but the role has to be known on the very first paint of a plain
+ * standalone install — which never issues one. Without it the GUI has to ASK, and asking
+ * means a request to a remote-hub endpoint from a user who never enabled remote hub.
+ *
+ * Non-secret: it names which topology this proxy is running, which the operator configured
+ * and which the dashboard already reflects everywhere else.
+ */
+function runtimeRoleMeta(runtimeRole: string): string {
+  return `<meta name="opencodex-runtime-role" content="${escapeHtmlAttribute(runtimeRole)}">`;
 }
 
 function htmlDocumentResponse(html: string): Response {
@@ -85,10 +101,10 @@ function htmlDocumentResponse(html: string): Response {
   });
 }
 
-function htmlResponse(path: string, session?: GuiSessionBootstrap): Response {
+function htmlResponse(path: string, session?: GuiSessionBootstrap, runtimeRole?: string): Response {
   let html = readFileSync(path, "utf8");
-  if (session) {
-    const bootstrap = sessionBootstrapMeta(session);
+  const bootstrap = `${runtimeRole ? runtimeRoleMeta(runtimeRole) : ""}${session ? sessionBootstrapMeta(session) : ""}`;
+  if (bootstrap) {
     html = html.includes("</head>") ? html.replace("</head>", `${bootstrap}</head>`) : `${bootstrap}${html}`;
   }
   return htmlDocumentResponse(html);
@@ -109,6 +125,7 @@ export function serveGuiFile(
   pathname: string,
   guiDist = findGuiDist(),
   session?: GuiSessionBootstrap,
+  runtimeRole?: string,
 ): Response | null {
   if (!guiDist) return null;
   const filePath = resolveGuiFilePath(guiDist, pathname);
@@ -118,7 +135,7 @@ export function serveGuiFile(
     if (!extname(pathname)) {
       const indexPath = join(guiDist, "index.html");
       if (isFile(indexPath)) {
-        return htmlResponse(indexPath, session);
+        return htmlResponse(indexPath, session, runtimeRole);
       }
     }
     return null;
@@ -126,7 +143,7 @@ export function serveGuiFile(
 
   const ext = extname(filePath);
   const contentType = MIME_TYPES[ext] || "application/octet-stream";
-  if (ext === ".html") return htmlResponse(filePath, session);
+  if (ext === ".html") return htmlResponse(filePath, session, runtimeRole);
   // Snapshot bytes before returning the response. Bun.file is lazy: if gui/dist is replaced
   // after Bun frames the response but before the stream finishes, its Content-Length can
   // describe the old file while the body comes from the new one (#2792).

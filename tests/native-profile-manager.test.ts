@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { NativeProfileManager } from "../src/codex/native-profile-manager";
@@ -15,11 +15,12 @@ import {
 } from "../src/codex/native-profile-store";
 import { NativeProfileError, type NativeProfileKey, type NativeProfileKeyProvider } from "../src/codex/native-profile-types";
 import { codexCredentialMutationEpoch } from "../src/codex/credential-mutation-epoch";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const roots: string[] = [];
 
 afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  for (const root of roots.splice(0)) removeTreeWithRetry(root);
 });
 
 class MemoryKeyProvider implements NativeProfileKeyProvider {
@@ -128,10 +129,24 @@ async function leavePendingJournal(f: Awaited<ReturnType<typeof enrolledFixture>
   return interrupted;
 }
 
-async function waitForPath(path: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
+/**
+ * The first Bun child a busy windows-latest shard spawns can take several seconds just to
+ * boot the TS helper; on run 33595585136 that alone burned a private 5 s wait while the
+ * child was healthy. The crash case, which is the first spawn in the file, gets a wait
+ * sized inside its 15 s test budget. On timeout the child's stderr is part of the error so
+ * a real crash is not mistaken for a slow start.
+ */
+async function waitForPath(path: string, child?: ReturnType<typeof Bun.spawn>, waitMs = 5_000): Promise<void> {
+  const deadline = Date.now() + waitMs;
   while (!existsSync(path) && Date.now() < deadline) await Bun.sleep(10);
-  if (!existsSync(path)) throw new Error(`Timed out waiting for child marker ${path}`);
+  if (existsSync(path)) return;
+  let detail = "";
+  if (child) {
+    child.kill();
+    const stderr = child.stderr && typeof child.stderr !== "number" ? await new Response(child.stderr).text() : "";
+    detail = ` (child exit ${await child.exited}; stderr: ${stderr.trim().slice(0, 800) || "<empty>"})`;
+  }
+  throw new Error(`Timed out waiting for child marker ${path}${detail}`);
 }
 
 function spawnLockHolder(
@@ -180,7 +195,7 @@ describe("native main profile transactions", () => {
     const f = fixture();
     const readyPath = join(f.root, "crash-ready");
     const child = spawnLockHolder(f, readyPath, join(f.root, "unused-release"), { crash: true });
-    await waitForPath(readyPath);
+    await waitForPath(readyPath, child, 12_000);
     expect(await child.exited).toBe(87);
 
     const successor = new NativeProfileManager({ ...f.options, lockWaitMs: 250 });
@@ -248,14 +263,14 @@ describe("native main profile transactions", () => {
     const first = spawnLockHolder(f, firstReady, firstRelease);
     let second: ReturnType<typeof Bun.spawn> | undefined;
     try {
-      await waitForPath(firstReady);
+      await waitForPath(firstReady, first);
       second = spawnLockHolder(f, secondReady, secondRelease, { contention: secondContention });
-      await waitForPath(secondContention);
+      await waitForPath(secondContention, second);
       expect(existsSync(secondReady)).toBe(false);
 
       writeFileSync(firstRelease, "release");
       expect(await first.exited).toBe(0);
-      await waitForPath(secondReady);
+      await waitForPath(secondReady, second);
 
       const contender = new NativeProfileManager({ ...f.options, lockWaitMs: 100 });
       let caught: unknown;
@@ -285,7 +300,7 @@ describe("native main profile transactions", () => {
     const release = join(f.root, "canonical-home-release");
     const first = spawnLockHolder(f, ready, release);
     try {
-      await waitForPath(ready);
+      await waitForPath(ready, first);
       const contender = new NativeProfileManager({ ...f.options, configDir: secondConfigDir, lockWaitMs: 100 });
       const owner = new NativeProfileManager(f.options);
       expect(contender.context.rootDir).toBe(owner.context.rootDir);
@@ -374,7 +389,7 @@ describe("native main profile transactions", () => {
     let caught: unknown;
     try { await manager.register("personal"); } catch (error) { caught = error; }
     finally {
-      try { rmSync(manager.context.rootDir, { recursive: true, force: true }); } catch { /* fixture cleanup */ }
+      try { removeTreeWithRetry(manager.context.rootDir); } catch { /* fixture cleanup */ }
       if (existsSync(displaced) && !existsSync(manager.context.rootDir)) renameSync(displaced, manager.context.rootDir);
     }
     expect(caught).toBeInstanceOf(NativeProfileError);

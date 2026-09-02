@@ -12,6 +12,9 @@ import {
 const USAGE = `Usage:
   ocx access key [list] [--json]
   ocx access key create [name] [--json]
+  ocx access key rotate <id> [--json]
+  ocx access key rotate commit <id> <rotation-id> [--json]
+  ocx access key rotate abort <id> <rotation-id> [--json]
   ocx access key remove <id> --yes [--json]
   ocx access endpoints [--json]
   ocx access models [--json]
@@ -85,6 +88,33 @@ async function key(argv: string[], deps: RuntimeApiDeps): Promise<void> {
       `Created API key ${String(result.name ?? name)} (${String(result.id ?? "")}).`,
       `Key (shown once): ${String(result.key ?? "")}`,
     ]);
+    return;
+  }
+  if (action === "rotate") {
+    const operation = args[0] === "commit" || args[0] === "abort" ? args.shift()! : "start";
+    const id = args.shift();
+    if (!id) throw new CliUsageError("key id is required", USAGE);
+    if (operation === "start") {
+      rejectArgs(args, USAGE);
+      const result = await runtimeRequest<Record<string, unknown>>("/api/keys/rotate", {
+        method: "POST",
+        body: JSON.stringify({ id }),
+      }, deps);
+      printData(result, wantsJson, [
+        `Started rotation for API key ${id}.`,
+        `New key (shown once): ${String(result.key ?? "")}`,
+        `After the client accepts it, commit with rotation id ${String(result.rotationId ?? "")}.`,
+      ]);
+      return;
+    }
+    const rotationId = args.shift();
+    if (!rotationId) throw new CliUsageError("rotation id is required", USAGE);
+    rejectArgs(args, USAGE);
+    const result = await runtimeRequest(operation === "commit" ? "/api/keys/rotate/commit" : "/api/keys/rotate", {
+      method: operation === "commit" ? "POST" : "DELETE",
+      body: JSON.stringify({ id, rotationId }),
+    }, deps);
+    printData(result, wantsJson, [`${operation === "commit" ? "Committed" : "Aborted"} rotation for API key ${id}.`]);
     return;
   }
   if (action === "remove" || action === "delete") {

@@ -15,6 +15,7 @@ export interface ProxyStopOptions {
   fetchFn?: typeof fetch;
   timeoutMs?: number;
   formatFailure?: (status: number) => string;
+  mode?: "standalone" | "client";
 }
 
 function failureMessage(
@@ -46,11 +47,14 @@ export async function requestProxyStop(
     fetchFn = fetch,
     timeoutMs = DEFAULT_STOP_TIMEOUT_MS,
     formatFailure = status => `Failed to stop proxy (HTTP ${status}).`,
+    mode = "standalone",
   } = options;
   let response: Response;
   try {
-    response = await fetchFn(`${apiBase}/api/stop`, {
+    const path = mode === "client" ? "/api/machine/disconnect" : "/api/stop";
+    response = await fetchFn(`${apiBase}${path}`, {
       method: "POST",
+      ...(mode === "client" ? { headers: { "Content-Type": "application/json" }, body: "{}" } : {}),
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {

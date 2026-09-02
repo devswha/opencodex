@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { KIRO_COMPLETION_TOOL_NAME } from "../src/adapters/kiro-constants";
@@ -9,6 +9,7 @@ import { startServer } from "../src/server";
 import { clearRequestLogsForTests, getRequestLogEntries } from "../src/server/request-log";
 import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const enc = new TextEncoder();
 const originalFetch = globalThis.fetch;
@@ -36,7 +37,7 @@ afterEach(() => {
   else process.env.KIRO_REGION = previousRegion;
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
-  rmSync(testDir, { recursive: true, force: true });
+  removeTreeWithRetry(testDir);
 });
 
 function eventFrame(eventType: string, payload: Record<string, unknown>): Uint8Array {

@@ -105,7 +105,8 @@ Le port est obligatoire et doit différer du port proxy. Il n'est jamais attribu
 changerait au fil des redémarrages tandis que les serveurs d'applications déjà en cours d'exécution conservaient le `base_url` précédent.
 
 L'écouteur ne sert que `POST /v1/responses`, sa mise à niveau WebSocket, `POST /v1/responses/compact`,
-et `GET /v1/models`. Tout le reste, y compris `/api/*` et le tableau de bord, renvoie `404`.
+`POST /v1/alpha/search` (le relais de recherche web natif de Codex), `GET /v1/models` et les mises à
+niveau WebSocket vocales autonomes. Tout le reste, y compris `/api/*` et le tableau de bord, renvoie `404`.
 
 :::danger[Surface non authentifiée]
 Chaque processus de la machine peut utiliser cet écouteur. Il consomme le quota du compte et utilise les identifiants de
@@ -251,3 +252,9 @@ Les images `https:` distantes et les descriptions échouées ou vides ne sont pa
 
 Les services auxiliaires Anthropic OAuth réutilisent l'empreinte OAuth Claude Code existante d'opencodex. Effectuez un test d'endurance avec le
 compte et la charge de travail prévus.
+
+## Clés Remote Hub et valeurs par défaut
+
+`runtimeRole` vaut `standalone` par défaut. Un hub utilise `hub.managementPublicOrigin`, `hub.managementIngress` limité au loopback (`enabled:false` si absent) et les identités exactes de `remoteGui.allowedTailscaleUsers` (liste vide si absente). La clé client reste dans `service-api-token`, jamais dans `config.json`; `service-api-token.prev` peut exister pendant une rotation. Les usages ne sont pas répliqués.
+
+`remoteGui.allowInsecureHttp` est un ancien no-op déprécié, conservé uniquement pour que les anciens fichiers passent encore le schéma strict. Supprimez-le de la configuration : les grants de pairing ne sont acceptés que sur loopback ou via HTTPS authentifié, et `true` ne réactive pas le pairing HTTP en clair.

@@ -366,6 +366,117 @@ describe("Responses parser", () => {
 
     expect(parsed._imageGeneration?.toolNames.has("image_generation")).toBe(true);
     expect(parsed.options.toolChoice).toEqual({ name: "image_gen" });
+    expect(parsed.context.tools?.some(
+      tool => tool.name === "image_gen" && tool.imageGeneration === true,
+    )).toBe(true);
+  });
+
+  test("namespaced ordinary image_gen does not suppress the synthetic root image tool", () => {
+    const parsed = parseRequest({
+      model: "grok-4.6",
+      input: "draw a cat",
+      tools: [
+        {
+          type: "namespace",
+          name: "mcp_pack",
+          tools: [{ type: "function", name: "image_gen", parameters: { type: "object" } }],
+        },
+        { type: "image_generation" },
+      ],
+    });
+
+    const tools = parsed.context.tools ?? [];
+    const namespaced = tools.find(tool => tool.name === "image_gen" && tool.namespace === "mcp_pack");
+    const synthetic = tools.find(tool => tool.name === "image_gen" && !tool.namespace);
+    expect(namespaced).toBeDefined();
+    expect(namespaced?.imageGeneration).toBeUndefined();
+    expect(synthetic?.imageGeneration).toBe(true);
+  });
+
+  test("hosted image_generation then a root ordinary image_gen keeps one synthetic tool", () => {
+    const parsed = parseRequest({
+      model: "grok-4.6",
+      input: "draw a cat",
+      tools: [
+        { type: "image_generation" },
+        { type: "function", name: "image_gen", parameters: { type: "object" } },
+      ],
+    });
+
+    const root = (parsed.context.tools ?? []).filter(tool => tool.name === "image_gen" && !tool.namespace);
+    expect(root).toHaveLength(1);
+    expect(root[0]?.imageGeneration).toBe(true);
+  });
+
+  test("hosted image_generation then a root custom image_gen keeps one synthetic tool", () => {
+    const parsed = parseRequest({
+      model: "grok-4.6",
+      input: "draw a cat",
+      tools: [
+        { type: "image_generation" },
+        { type: "custom", name: "image_gen" },
+      ],
+    });
+
+    const root = (parsed.context.tools ?? []).filter(tool => tool.name === "image_gen" && !tool.namespace);
+    expect(root).toHaveLength(1);
+    expect(root[0]?.imageGeneration).toBe(true);
+    expect(root[0]?.freeform).toBeUndefined();
+  });
+
+  test("both root declarations before hosted image_generation collapse to one synthetic tool", () => {
+    // Reverse order of the two cases above. Removing only the first colliding root
+    // left the second behind, so the catalog stayed ambiguous on one wire name.
+    const parsed = parseRequest({
+      model: "grok-4.6",
+      input: "draw a cat",
+      tools: [
+        { type: "function", name: "image_gen", parameters: { type: "object" } },
+        { type: "custom", name: "image_gen" },
+        { type: "image_generation" },
+      ],
+    });
+
+    const root = (parsed.context.tools ?? []).filter(tool => tool.name === "image_gen" && !tool.namespace);
+    expect(root).toHaveLength(1);
+    expect(root[0]?.imageGeneration).toBe(true);
+    expect(root[0]?.freeform).toBeUndefined();
+  });
+
+  test("a root image_gen on each side of hosted image_generation still collapses", () => {
+    const parsed = parseRequest({
+      model: "grok-4.6",
+      input: "draw a cat",
+      tools: [
+        { type: "function", name: "image_gen", parameters: { type: "object" } },
+        { type: "image_generation" },
+        { type: "custom", name: "image_gen" },
+      ],
+    });
+
+    const root = (parsed.context.tools ?? []).filter(tool => tool.name === "image_gen" && !tool.namespace);
+    expect(root).toHaveLength(1);
+    expect(root[0]?.imageGeneration).toBe(true);
+  });
+
+  test("a namespaced image_gen survives the root collapse", () => {
+    const parsed = parseRequest({
+      model: "grok-4.6",
+      input: "draw a cat",
+      tools: [
+        { type: "function", name: "image_gen", parameters: { type: "object" } },
+        {
+          type: "namespace",
+          name: "mcp_pack",
+          tools: [{ type: "function", name: "image_gen", parameters: { type: "object" } }],
+        },
+        { type: "image_generation" },
+      ],
+    });
+
+    const tools = parsed.context.tools ?? [];
+    expect(tools.filter(tool => tool.name === "image_gen" && !tool.namespace)).toHaveLength(1);
+    expect(tools.find(tool => tool.name === "image_gen" && tool.namespace === "mcp_pack")).toBeDefined();
   });
 
   test("preserves requested service_tier for request logging", () => {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyNativeVisibility, augmentRoutedModelsWithMetadata, augmentRoutedModelsWithRegistryOpenAiApiRows, buildCatalogEntries, buildComboCatalogOmission, catalogModelSlug, clampCatalogModelsToCodexSupport, clampEntryToCodexSupportedEfforts, clampedDefaultEffort, CODEX_ACCOUNT_BOUND_CATALOG_KIND, CODEX_NATIVE_ALIAS_CATALOG_KIND, comboCatalogOmissionReason, deriveComboCatalogModel, exactComboCatalogSlugs, filterCatalogVisibleModels, filterSupportedNativeSlugs, gatherRoutedModels as gatherRoutedModelsDirect, isDatedVariantId, isMediaGenerationModelId, loadBundledCodexCatalog, materializeBundledCodexCatalog, mergeCatalogEntriesForSync, NATIVE_DAYBREAK_BLUE_MODEL, NATIVE_OPENAI_MODELS, nativeDefaultReasoningEffort, nativeInputModalities, nativeOpenAiCapabilitySourceSlug, nativeOpenAiContextWindow, nativeReasoningEfforts, normalizeRoutedCatalogEntry, resetCatalogRuntimeStateForTests, resetOpenAiApiCatalogWarningStateForTests, resolveComboCatalogMember, shouldExposeRoutedModel, upstreamNativeEntry } from "../src/codex/catalog";
@@ -47,6 +47,7 @@ import {
   mergeCatalogEntriesFromObservedState,
   type ObservedCatalogMergeInput,
 } from "../src/codex/catalog/sync";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const originalFetch = globalThis.fetch;
 
@@ -72,6 +73,7 @@ function normalizedCombo(
     strategy: "failover",
     stickyLimit: 1,
     defaultEffort: "medium",
+    reasoningEffortMode: "strict",
     imageInput: "auto",
     alias: null,
     nativeAlias: false,
@@ -263,6 +265,33 @@ describe("combo catalog capability intersection", () => {
     ]);
     expect(empty?.reasoningEfforts).toEqual([]);
     expect(empty).not.toHaveProperty("defaultReasoningEffort");
+  });
+
+  test("adaptive mode keeps the surviving ladder when a target advertises no effort control", () => {
+    // The strict case above is the baseline: memberB's explicit [] empties the picker for
+    // the whole combo. Adaptive is the opt-in that excludes it instead, so the effort
+    // control stays usable for the siblings that do support tuning.
+    const adaptive = deriveComboCatalogModel(
+      "adaptive",
+      normalizedCombo({ defaultEffort: "medium", reasoningEffortMode: "adaptive" }),
+      [memberA, { ...memberB, reasoningEfforts: [] }],
+    );
+    expect(adaptive?.reasoningEfforts).toEqual(["low", "medium", "high"]);
+    expect(adaptive?.defaultReasoningEffort).toBe("medium");
+
+    // Adaptive only drops EMPTY ladders; non-empty ones still intersect normally.
+    expect(deriveComboCatalogModel(
+      "adaptive-intersect",
+      normalizedCombo({ defaultEffort: "medium", reasoningEffortMode: "adaptive" }),
+      [memberA, { ...memberB, reasoningEfforts: ["medium", "high"] }],
+    )?.reasoningEfforts).toEqual(["medium", "high"]);
+
+    // Every target empty under adaptive still yields no ladder — there is nothing to keep.
+    expect(deriveComboCatalogModel(
+      "adaptive-all-empty",
+      normalizedCombo({ defaultEffort: "medium", reasoningEffortMode: "adaptive" }),
+      [{ ...memberA, reasoningEfforts: [] }, { ...memberB, reasoningEfforts: [] }],
+    )?.reasoningEfforts).toEqual([]);
   });
 
   test("fails closed for missing members, unknown context, duplicate targets, and empty modalities", () => {
@@ -1789,6 +1818,172 @@ describe("Cursor Kimi K3 catalog default effort", () => {
   });
 });
 
+describe("provider discovered model display names", () => {
+  const provider = {
+    adapter: "openai-responses",
+    baseUrl: "https://api.x.ai/v1",
+    modelDisplayNames: { "grok-4.6": "Grok 4.6" },
+  };
+
+  test("an exact provider model id receives only the configured display name", () => {
+    const discovered = {
+      provider: "xai",
+      id: "grok-4.6",
+      displayName: "Provider Grok",
+      contextWindow: 131_072,
+      maxInputTokens: 100_000,
+      autoCompactTokenLimit: 90_000,
+      inputModalities: ["text", "image"],
+      reasoningEfforts: ["low", "high"],
+      defaultReasoningEffort: "high",
+      supportsReasoningSummaries: true,
+      supportsVerbosity: false,
+      priority: 17,
+      fallbackModels: ["grok-4.5"],
+      owned_by: "xai",
+    } as const;
+
+    const output = applyProviderConfigHints("xai", provider, discovered);
+    const { displayName: _beforeDisplayName, ...beforeIdentity } = discovered;
+    const { displayName: _afterDisplayName, ...afterIdentity } = output;
+
+    expect(output.displayName).toBe("Grok 4.6");
+    expect(afterIdentity).toEqual({ ...beforeIdentity, supportsServiceTier: false });
+    expect(catalogModelSlug(output)).toBe("xai/grok-4.6");
+  });
+
+  test("display names use exact case-sensitive ids and stay provider scoped", () => {
+    const wrongCase = applyProviderConfigHints("xai", provider, { provider: "xai", id: "GROK-4.6" });
+    const otherProvider = applyProviderConfigHints("other", {
+      ...provider,
+      modelDisplayNames: { "grok-4.6": "Other Grok" },
+    }, { provider: "other", id: "grok-4.6" });
+
+    expect(wrongCase.displayName).toBeUndefined();
+    expect(otherProvider.displayName).toBe("Other Grok");
+  });
+
+  test("provider metadata remains when no operator display name exists", () => {
+    const output = applyProviderConfigHints("xai", {
+      ...provider,
+      modelDisplayNames: undefined,
+    }, {
+      provider: "xai",
+      id: "grok-4.6",
+      displayName: "Provider Grok",
+    });
+
+    expect(output.displayName).toBe("Provider Grok");
+  });
+
+  test("a configured display name emits into the Codex picker without changing its slug", () => {
+    const model = applyProviderConfigHints("xai", provider, { provider: "xai", id: "grok-4.6" });
+    const row = buildCatalogEntries(nativeTemplate(), [], [model])
+      .find(entry => entry.slug === "xai/grok-4.6");
+
+    expect(row?.display_name).toBe("Grok 4.6");
+    expect(row?.slug).toBe("xai/grok-4.6");
+  });
+
+  test("the label survives static, live, and configured failure catalog paths", async () => {
+    const staticModels = await gatherRoutedModels({
+      defaultProvider: "display-static",
+      providers: {
+        "display-static": {
+          adapter: "openai-chat",
+          baseUrl: "https://static.example.test/v1",
+          liveModels: false,
+          models: ["model-a"],
+          modelDisplayNames: { "model-a": "Static Model" },
+        },
+      },
+    });
+    expect(staticModels).toContainEqual(expect.objectContaining({
+      provider: "display-static",
+      id: "model-a",
+      displayName: "Static Model",
+    }));
+
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      data: [{ id: "model-a", name: "Provider Model" }],
+    }), { headers: { "content-type": "application/json" } })) as typeof fetch;
+    const liveModels = await gatherRoutedModels({
+      defaultProvider: "display-live",
+      providers: {
+        "display-live": {
+          adapter: "openai-chat",
+          baseUrl: "https://93.184.216.34/v1",
+          apiKey: "sk-test",
+          modelDisplayNames: { "model-a": "Live Model" },
+        },
+      },
+    });
+    expect(liveModels).toContainEqual(expect.objectContaining({
+      provider: "display-live",
+      id: "model-a",
+      displayName: "Live Model",
+    }));
+
+    globalThis.fetch = (async () => new Response(null, { status: 503 })) as typeof fetch;
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const failedModels = await gatherRoutedModels({
+        defaultProvider: "display-failure",
+        providers: {
+          "display-failure": {
+            adapter: "openai-chat",
+            baseUrl: "https://93.184.216.34/v1",
+            apiKey: "sk-test",
+            models: ["model-a"],
+            modelDisplayNames: { "model-a": "Failure Model" },
+          },
+        },
+      });
+      expect(failedModels).toContainEqual(expect.objectContaining({
+        provider: "display-failure",
+        id: "model-a",
+        displayName: "Failure Model",
+      }));
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  test("a stale cached row receives the current operator label on every gather", async () => {
+    const providerName = "display-stale";
+    setCached(providerName, [{
+      provider: providerName,
+      id: "model-a",
+      displayName: "Old Provider Name",
+    }], Date.now() - 10_000);
+    globalThis.fetch = (async () => new Response(null, { status: 503 })) as typeof fetch;
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const config = {
+        modelCacheTtlMs: 1,
+        defaultProvider: providerName,
+        providers: {
+          [providerName]: {
+            adapter: "openai-chat" as const,
+            baseUrl: "https://93.184.216.34/v1",
+            apiKey: "sk-test",
+            modelDisplayNames: { "model-a": "Current Name" },
+          },
+        },
+      };
+      const first = await gatherRoutedModels(config);
+      const second = await gatherRoutedModels(config);
+
+      expect(first).toContainEqual(expect.objectContaining({ id: "model-a", displayName: "Current Name" }));
+      expect(second).toContainEqual(expect.objectContaining({ id: "model-a", displayName: "Current Name" }));
+      expect(first.filter(model => catalogModelSlug(model) === `${providerName}/model-a`)).toHaveLength(1);
+    } finally {
+      warning.mockRestore();
+      clearModelCache(providerName);
+    }
+  });
+});
+
 describe("configured CatalogModel displayName -> catalog display_name", () => {
   test("a routed CatalogModel displayName becomes the catalog display_name", () => {
     const model = { provider: "deepseek", id: "deepseek-v4", displayName: "DeepSeek V4", owned_by: "deepseek" };
@@ -2712,7 +2907,7 @@ describe("Codex catalog routed normalization", () => {
       expect(existsSync(path)).toBe(true);
       expect(JSON.parse(readFileSync(path, "utf8")).models[0].slug).toBe("gpt-5.5");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -5364,6 +5559,49 @@ describe("Codex catalog routed normalization", () => {
     // The configured value supplies capacity when upstream has none; it never inflates a
     // capacity upstream actually reported.
     expect(routed?.context_window).toBe(64_000);
+  });
+
+  test("GitHub Copilot capabilities preserve the live context window (#3156)", async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      data: [{
+        id: "copilot-wide-model",
+        capabilities: {
+          limits: { max_context_window_tokens: 1_000_000 },
+        },
+      }, {
+        id: "copilot-existing-metadata",
+        metadata: { limits: { max_context_length: 256_000 } },
+        capabilities: {
+          limits: { max_context_window_tokens: 1_000_000 },
+        },
+      }, {
+        id: "copilot-invalid-window",
+        capabilities: {
+          limits: { max_context_window_tokens: -1 },
+        },
+      }],
+    }))) as typeof fetch;
+
+    const models = await gatherRoutedModels({
+      port: 10100,
+      defaultProvider: "github-copilot",
+      providers: {
+        "github-copilot": {
+          adapter: "openai-chat",
+          baseUrl: "https://api.githubcopilot.com",
+          apiKey: "sk-test",
+        },
+      },
+    });
+    const routed = buildCatalogEntries(nativeTemplate(), [], models)
+      .find(entry => entry.slug === "github-copilot/copilot-wide-model");
+
+    expect(models.find(model => model.id === "copilot-wide-model")?.contextWindow).toBe(1_000_000);
+    expect(routed?.context_window).toBe(1_000_000);
+    expect(routed?.max_context_window).toBe(1_000_000);
+    expect(routed?.auto_compact_token_limit).toBe(900_000);
+    expect(models.find(model => model.id === "copilot-existing-metadata")?.contextWindow).toBe(256_000);
+    expect(models.find(model => model.id === "copilot-invalid-window")?.contextWindow).toBeUndefined();
   });
 
   test("liveModels false preserves configured catalog metadata without live fetch", async () => {

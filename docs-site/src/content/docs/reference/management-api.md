@@ -286,3 +286,7 @@ For ordinary administration, the [Web Dashboard](/guides/web-dashboard/) gives t
 workflow. For headless hosts and automation, use the corresponding `ocx` commands: they call this
 same live API and return a nonzero result when the proxy is unreachable or the operation fails.
 Direct HTTP is most useful for integrations that need the exact endpoint contracts above.
+
+## Remote sessions and data-key rotation
+
+`POST /api/keys/rotate {id}` starts a ten-minute overlap and returns the new data secret once. `POST /api/keys/rotate/commit {id,rotationId}` commits it; `DELETE /api/keys/rotate {id,rotationId}` aborts it. All require management authentication; data keys cannot call them. `POST /api/session/logout` requires the current `gui-session`, matching Origin, and CSRF. An admin token receives 403 and can never mint or exchange into a consent session.

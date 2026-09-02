@@ -28,6 +28,7 @@ function entry(overrides: Partial<PersistedUsageEntry> & { ts: number }): Persis
     ...(rest.usage ? { usage: rest.usage } : {}),
     ...(rest.totalTokens !== undefined ? { totalTokens: rest.totalTokens } : {}),
     ...(rest.attempts ? { attempts: rest.attempts } : {}),
+    ...(rest.apiKeyId !== undefined ? { apiKeyId: rest.apiKeyId } : {}),
   };
 }
 
@@ -397,6 +398,50 @@ describe("projectUsageSummary", () => {
     const wider = projectUsageSummary(summarizeUsage(entries, "30d", midday), { provider: "rare-provider" }, entries);
     expect(wider.summary.requests).toBe(1);
     expect(wider.filter?.matched).toBe(true);
+  });
+
+  test("filters by exact api key id before provider and model attribution", () => {
+    const entries = [
+      entry({ ts: at, requestId: "key-a-openai", apiKeyId: "Key-A", provider: "openai", model: "gpt-5.5", usageStatus: "reported", usage: priced, accountLogLabel: "main" }),
+      entry({ ts: at + 1, requestId: "key-a-anthropic", apiKeyId: "Key-A", provider: "anthropic", model: "claude-opus", usageStatus: "reported", usage: priced, accountLogLabel: "pabc123" }),
+      entry({ ts: at + 2, requestId: "key-b", apiKeyId: "key-a", provider: "openai", model: "gpt-5.5", usageStatus: "reported", usage: priced, accountLogLabel: "pffffff" }),
+      entry({ ts: at + 3, requestId: "legacy", provider: "openai", model: "gpt-5.5", usageStatus: "reported", usage: priced }),
+    ];
+    const summary = summarizeUsage(entries, "30d", at + 4);
+
+    const byKey = projectUsageSummary(summary, { apiKeyId: " Key-A " }, entries);
+    expect(byKey.filter).toMatchObject({ apiKeyId: "Key-A", provider: null, model: null, matched: true });
+    expect(byKey.summary.requests).toBe(2);
+    expect(byKey.models).toHaveLength(2);
+    expect(byKey.providers).toHaveLength(2);
+    expect(byKey.accounts.map(row => row.accountLogLabel).sort()).toEqual(["main", "pabc123"]);
+
+    const combined = projectUsageSummary(summary, {
+      apiKeyId: "Key-A",
+      provider: "OPENAI",
+      model: "GPT-5.5",
+    }, entries);
+    expect(combined.summary.requests).toBe(1);
+    expect(combined.models).toHaveLength(1);
+    expect(combined.accounts).toEqual([]);
+
+    const wrongCase = projectUsageSummary(summary, { apiKeyId: "key-a" }, entries);
+    expect(wrongCase.summary.requests).toBe(1);
+    expect(wrongCase.filter?.apiKeyId).toBe("key-a");
+  });
+
+  test("an absent api key id excludes legacy and environment-token rows", () => {
+    const entries = [entry({ ts: at, requestId: "legacy", usageStatus: "reported", usage: priced })];
+    const projected = projectUsageSummary(
+      summarizeUsage(entries, "30d", at + 1),
+      { apiKeyId: "missing-key" },
+      entries,
+    );
+    expect(projected.filter).toMatchObject({ apiKeyId: "missing-key", matched: false });
+    expect(projected.summary.requests).toBe(0);
+    expect(projected.models).toEqual([]);
+    expect(projected.providers).toEqual([]);
+    expect(projected.accounts).toEqual([]);
   });
 });
 

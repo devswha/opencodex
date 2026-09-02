@@ -21,6 +21,7 @@ describe("GUI management session bootstrap", () => {
       ["opencodex-session-token", "ocx_session_browser-secret"],
       ["opencodex-session-csrf", "csrf-browser-secret"],
       ["opencodex-session-origin", "http://localhost:10100"],
+      ["opencodex-session-server-origin", "http://localhost:10100"],
     ]);
     const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       seen.push({

@@ -3,7 +3,7 @@
  * so the proxy must relay it to an OpenAI upstream instead of the /v1/* JSON-404 guard.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../src/codex/account-store";
 import { clearAccountNeedsReauth, clearAccountQuota } from "../src/codex/auth-api";
@@ -25,6 +25,7 @@ import { beginShutdownDrain, isDraining, resetLifecycleDrainStateForTests } from
 import type { OcxConfig } from "../src/types";
 import { fakeChatGptJwt } from "./helpers/fake-chatgpt-jwt";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const previousApiToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
@@ -34,7 +35,7 @@ let isolatedCodexHome: IsolatedCodexHome | null = null;
 const DIRECT_CHATGPT_TOKEN = fakeChatGptJwt({ chatgpt_account_id: "acct-123" });
 
 beforeEach(() => {
-  if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
   mkdirSync(TEST_DIR, { recursive: true });
   process.env.OPENCODEX_HOME = TEST_DIR;
   delete process.env.OPENCODEX_API_AUTH_TOKEN;
@@ -58,7 +59,7 @@ afterEach(() => {
   clearThreadAccountMap();
   clearAccountNeedsReauth("pool-a");
   clearAccountQuota();
-  if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
 });
 
 interface CapturedRequest {
@@ -119,6 +120,14 @@ function forwardConfig(): OcxConfig {
       },
     },
   } as OcxConfig;
+}
+
+function expectReadyProtocolMetadata(body: Record<string, unknown>, managementUrl: string): void {
+  expect(body).toMatchObject({
+    protocol: 1,
+    minimumClientProtocol: 1,
+    managementUrl,
+  });
 }
 
 function multipartLiveBody(
@@ -1231,13 +1240,17 @@ describe("GET /readyz", () => {
       try {
         const pending = await fetch(new URL("/readyz", server.url));
         expect(pending.status).toBe(503);
-        expect(((await pending.json()) as { status: string }).status).toBe("pending");
+        const pendingBody = (await pending.json()) as Record<string, unknown>;
+        expect(pendingBody.status).toBe("pending");
+        expectReadyProtocolMetadata(pendingBody, new URL(server.url).origin);
 
         await runStartupReadinessSync(gate, async () => outcome);
 
         const settled = await fetch(new URL("/readyz", server.url));
         expect(settled.status).toBe(expectedHttp);
-        expect(((await settled.json()) as { status: string }).status).toBe(expectedStatus);
+        const settledBody = (await settled.json()) as Record<string, unknown>;
+        expect(settledBody.status).toBe(expectedStatus);
+        expectReadyProtocolMetadata(settledBody, new URL(server.url).origin);
       } finally {
         await server.stop(true);
       }
@@ -1268,10 +1281,41 @@ describe("GET /readyz", () => {
       expect(typeof readyzBody.uptime).toBe("number");
       expect(typeof readyzBody.pid).toBe("number");
       expect(typeof readyzBody.port).toBe("number");
+      expectReadyProtocolMetadata(readyzBody, new URL(base).origin);
       // Sanitization: the body must never carry sync diagnostics, paths, or warnings.
-      expect(Object.keys(readyzBody).sort()).toEqual(["pid", "port", "service", "status", "uptime", "version"]);
+      expect(Object.keys(readyzBody).sort()).toEqual([
+        "managementUrl", "minimumClientProtocol", "pid", "port", "protocol", "service", "status", "uptime", "version",
+      ]);
       expect(JSON.stringify(readyzBody)).not.toContain("warning");
       expect(JSON.stringify(readyzBody)).not.toContain("path");
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("hub readiness prefers the configured public management origin over the observed listener", async () => {
+    saveConfig({
+      ...forwardConfig(),
+      runtimeRole: "hub",
+      hub: { managementPublicOrigin: "https://hub.example.test" },
+    });
+    const server = startServer(0);
+    try {
+      const ready = await fetch(new URL("/readyz", server.url), {
+        headers: {
+          Host: "observed.example.test:8443",
+          "X-Forwarded-Host": "attacker.example.test",
+          "X-Forwarded-Proto": "http",
+        },
+      });
+      const body = await ready.json() as Record<string, unknown>;
+      expectReadyProtocolMetadata(body, "https://hub.example.test");
+
+      const health = await fetch(new URL("/healthz", server.url));
+      const healthBody = await health.json() as Record<string, unknown>;
+      expect(healthBody.guiPairCapability).toBe("v1");
+      expect(JSON.stringify(healthBody)).not.toContain("ocx_session_");
+      expect(JSON.stringify(healthBody)).not.toContain("csrf");
     } finally {
       await server.stop(true);
     }
@@ -1517,7 +1561,9 @@ describe("GET /readyz while draining", () => {
       const drainRes = await fetch(new URL("/readyz", base));
       expect(drainRes.status).toBe(503);
       expect(drainRes.headers.get("retry-after")).toBe("1");
-      expect(((await drainRes.json()) as { status: string }).status).toBe("pending");
+      const drainBody = (await drainRes.json()) as Record<string, unknown>;
+      expect(drainBody.status).toBe("pending");
+      expectReadyProtocolMetadata(drainBody, new URL(base).origin);
 
       // The gate itself is untouched — draining is a listener state, not a gate
       // transition, so the startup-sync ownership contract is preserved.

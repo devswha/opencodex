@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { BULK_DURABLE_IO_BUDGET_MS } from "./helpers/test-budget";
+import { findDeadPid } from "./helpers/dead-pid";
 import {
   closeSync,
   existsSync,
@@ -8,12 +9,12 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   statSync,
   symlinkSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,6 +57,7 @@ import {
   pendingResponseSpillMetricsForTests,
 } from "../src/responses/state";
 import {
+  RESPONSE_SPILL_DIR_NAME,
   readResponseSpill,
   deleteResponseSpill,
   recoverOrphanedResponseSpills,
@@ -67,6 +69,7 @@ import {
 } from "../src/responses/spill-store";
 import { adapterNeedsForcedContinuation, injectDeveloperMessage } from "../src/server/responses";
 import { watchdogMs } from "./helpers/ci-watchdog";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 /**
  * Windows without Developer Mode or admin cannot create a file symlink (EPERM).
@@ -83,7 +86,7 @@ const canSymlink = (() => {
     if ((e as NodeJS.ErrnoException).code === "EPERM") return false;
     throw e;
   } finally {
-    rmSync(probeDir, { recursive: true, force: true });
+    removeTreeWithRetry(probeDir);
   }
 })();
 import {
@@ -97,6 +100,33 @@ import {
   setStatForTests,
   timedOutSecretPathCountForTests,
 } from "../src/lib/windows-secret-acl";
+import {
+  resetWindowsPrincipalForTests,
+  setAsyncWindowsPrincipalRunnerForTests,
+  setWindowsPrincipalRunnerForTests,
+} from "../src/lib/windows-user-principal";
+
+/**
+ * Windows-lane fixture. Forcing the platform alone left the principal lookup real: on a
+ * Windows host it shelled out to PowerShell and, on the hosted runner, failed with
+ * EACLIDENTITY before the case reached its own seams (run 33584155821, :1304). Both
+ * resolvers are injected so the lane is hermetic on every host.
+ */
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+/**
+ * Gated runners must only gate SPILL hardens. On a real Windows host the snapshot flush also
+ * hardens responses-state.json through the same async runner; a gate that swallowed that
+ * call held flushResponseState() open until the 30 s ACL deadline (run 33595585136, shard 2).
+ */
+function isSpillAclTarget(args: string[]): boolean {
+  return args.some(arg => arg.includes(RESPONSE_SPILL_DIR_NAME));
+}
+const SYNTHETIC_SID = { success: true, exitCode: 0, timedOut: false, stdout: "S-1-5-21-1-2-3-1001\nocx-test\n" };
+function forceWindowsAclLane(): void {
+  setPlatformForTests("win32");
+  setWindowsPrincipalRunnerForTests(() => SYNTHETIC_SID);
+  setAsyncWindowsPrincipalRunnerForTests(async () => SYNTHETIC_SID);
+}
 
 function feedInspector(
   inspector: ReturnType<typeof createSseInspector>,
@@ -254,6 +284,9 @@ describe("Responses previous_response_id state", () => {
     home = mkdtempSync(join(tmpdir(), "ocx-state-test-"));
     process.env["OPENCODEX_HOME"] = home;
     clearResponseStateMemoryForTests();
+    // Generic cases assert the synchronous spill lane. A Windows host would otherwise route
+    // them through the queued async publication and they would read stale state.
+    setPlatformForTests("linux");
   });
 
   test("a slow progressing Cursor chain remains replayable beyond the reported 18 continuations", () => {
@@ -291,6 +324,9 @@ describe("Responses previous_response_id state", () => {
     setIcaclsRunnerForTests(null);
     setNowForTests(null);
     setPlatformForTests(null);
+    setWindowsPrincipalRunnerForTests(null);
+    setAsyncWindowsPrincipalRunnerForTests(null);
+    resetWindowsPrincipalForTests();
     setStatForTests(null);
     resetHardenedStateForTests();
     delete process.env.OPENCODEX_ACL_TIMEOUT_MS;
@@ -299,7 +335,7 @@ describe("Responses previous_response_id state", () => {
     setResponseStateByteCapForTests(null);
     setSpilledResponseByteCapForTests(null);
     clearResponseStateForTests();
-    rmSync(home, { recursive: true, force: true });
+    removeTreeWithRetry(home);
     if (priorHome === undefined) delete process.env["OPENCODEX_HOME"];
     else process.env["OPENCODEX_HOME"] = priorHome;
   });
@@ -854,19 +890,20 @@ describe("Responses previous_response_id state", () => {
   });
 
   test("Windows spill ACL hardening yields the event loop and swaps only after publication", async () => {
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const started = new Promise<void>(resolve => { entered = resolve; });
     let announced = false;
-    setAsyncIcaclsRunnerForTests(async () => {
+    setAsyncIcaclsRunnerForTests(async args => {
+      if (!isSpillAclTarget(args)) return ICACLS_OK;
       if (!announced) {
         announced = true;
         entered();
       }
       await gate;
-      return { success: true, exitCode: 0, timedOut: false, stdout: "" };
+      return ICACLS_OK;
     });
     setResponseStateByteCapForTests(1_024);
 
@@ -899,7 +936,7 @@ describe("Responses previous_response_id state", () => {
     // The peak is TWO envelopes, not one: when hard-linking fails, publication copies
     // with COPYFILE_EXCL and then hardens the destination, so the temp and the copy exist
     // together. This drives that exact path and measures real bytes on disk.
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     setResponseStateByteCapForTests(1_024);
 
     let gateDestinationHarden = false;
@@ -981,7 +1018,7 @@ describe("Responses previous_response_id state", () => {
     // any file is created. Deleting the overflow afterwards is not equivalent — on
     // Windows the file outlives the decision by however long ACL hardening takes, which
     // is the window the measured 6.8 GiB accumulated in.
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     setResponseStateByteCapForTests(1_024);
     setAsyncIcaclsRunnerForTests(async () => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
 
@@ -1011,7 +1048,7 @@ describe("Responses previous_response_id state", () => {
   });
 
   test("Windows spill retries one transient ACL timeout without installing a tombstone", async () => {
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     process.env.OPENCODEX_ACL_TIMEOUT_MS = "1000";
     let clock = 0;
     let grantCalls = 0;
@@ -1042,7 +1079,7 @@ describe("Responses previous_response_id state", () => {
   });
 
   test("Windows async spill attempts share one bounded ACL budget across every harden", async () => {
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     let clock = 0;
     let firstGrant = true;
     const deadlines: number[] = [];
@@ -1098,19 +1135,20 @@ describe("Responses previous_response_id state", () => {
   }, { timeout: (2 * watchdogMs(1_500)) + 2_000 });
 
   test("Windows pending spill publication cannot overwrite a newer same-id generation", async () => {
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const started = new Promise<void>(resolve => { entered = resolve; });
     let announced = false;
-    setAsyncIcaclsRunnerForTests(async () => {
+    setAsyncIcaclsRunnerForTests(async args => {
+      if (!isSpillAclTarget(args)) return ICACLS_OK;
       if (!announced) {
         announced = true;
         entered();
       }
       await gate;
-      return { success: true, exitCode: 0, timedOut: false, stdout: "" };
+      return ICACLS_OK;
     });
     setResponseStateByteCapForTests(1_024);
 
@@ -1131,20 +1169,21 @@ describe("Responses previous_response_id state", () => {
   });
 
   test("shutdown flush stays pending while Windows spill ACL publication is gated", async () => {
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     setResponseSpillShutdownBudgetForTests({ totalMs: 1_000, fallbackReserveMs: 500 });
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const started = new Promise<void>(resolve => { entered = resolve; });
     let announced = false;
-    setAsyncIcaclsRunnerForTests(async () => {
+    setAsyncIcaclsRunnerForTests(async args => {
+      if (!isSpillAclTarget(args)) return ICACLS_OK;
       if (!announced) {
         announced = true;
         entered();
       }
       await gate;
-      return { success: true, exitCode: 0, timedOut: false, stdout: "" };
+      return ICACLS_OK;
     });
     setResponseStateByteCapForTests(1_024);
     rememberLarge("resp_shutdown_pending", "p".repeat(2 * 1024 * 1024 + 4_096));
@@ -1162,20 +1201,21 @@ describe("Responses previous_response_id state", () => {
   });
 
   test("shutdown flush installs an oversized spill before snapshot and restart replay", async () => {
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     setResponseSpillShutdownBudgetForTests({ totalMs: 1_000, fallbackReserveMs: 500 });
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const started = new Promise<void>(resolve => { entered = resolve; });
     let announced = false;
-    setAsyncIcaclsRunnerForTests(async () => {
+    setAsyncIcaclsRunnerForTests(async args => {
+      if (!isSpillAclTarget(args)) return ICACLS_OK;
       if (!announced) {
         announced = true;
         entered();
       }
       await gate;
-      return { success: true, exitCode: 0, timedOut: false, stdout: "" };
+      return ICACLS_OK;
     });
     setResponseStateByteCapForTests(1_024);
     const payload = `restart-${"r".repeat(2 * 1024 * 1024 + 4_096)}`;
@@ -1201,7 +1241,7 @@ describe("Responses previous_response_id state", () => {
   });
 
   test("shutdown drain reaches a stable tail after a publication is appended mid-drain", async () => {
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     setResponseSpillShutdownBudgetForTests({ totalMs: 1_000, fallbackReserveMs: 500 });
     let releaseFirst!: () => void;
     let releaseSecond!: () => void;
@@ -1243,16 +1283,23 @@ describe("Responses previous_response_id state", () => {
   });
 
   test("shutdown drain cap expiry enters the synchronous spill fallback", async () => {
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
+    // Freeze the ACL/spill clocks: the sync fallback harden now really runs on every host
+    // (harden() follows the platform seam), and its budget must not race a loaded CI
+    // shard's wall clock inside the 80 ms reserve — run 33603770447 shard 3 lost that race.
+    let aclClock = 0;
+    setNowForTests(() => aclClock);
+    setResponseSpillNowForTests(() => aclClock);
     setResponseSpillShutdownBudgetForTests({ totalMs: 120, fallbackReserveMs: 80 });
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const started = new Promise<void>(resolve => { entered = resolve; });
-    setAsyncIcaclsRunnerForTests(async () => {
+    setAsyncIcaclsRunnerForTests(async args => {
+      if (!isSpillAclTarget(args)) return ICACLS_OK;
       entered();
       await gate;
-      return { success: true, exitCode: 0, timedOut: false, stdout: "" };
+      return ICACLS_OK;
     });
     let synchronousCalls = 0;
     setIcaclsRunnerForTests(() => {
@@ -1279,35 +1326,45 @@ describe("Responses previous_response_id state", () => {
     // against a total short by a whole envelope, and a cap sitting between
     // (debt + footprint) and (old + debt + footprint) admits a publication that puts the
     // directory over budget.
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
+    // Freeze the ACL/spill clocks: the sync fallback harden now really runs on every host
+    // (harden() follows the platform seam), and its budget must not race a loaded CI
+    // shard's wall clock inside the 80 ms reserve — run 33603770447 shard 3 lost that race.
+    let aclClock = 0;
+    setNowForTests(() => aclClock);
+    setResponseSpillNowForTests(() => aclClock);
     setResponseSpillShutdownBudgetForTests({ totalMs: 120, fallbackReserveMs: 80 });
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const started = new Promise<void>(resolve => { entered = resolve; });
     let announced = false;
-    setAsyncIcaclsRunnerForTests(async () => {
+    setAsyncIcaclsRunnerForTests(async args => {
+      if (!isSpillAclTarget(args)) return ICACLS_OK;
       if (!announced) {
         announced = true;
         entered();
       }
       await gate;
-      return { success: true, exitCode: 0, timedOut: false, stdout: "" };
+      return ICACLS_OK;
     });
     setIcaclsRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
     setResponseStateByteCapForTests(1_024);
 
-    // First generation settles to a real file, then a same-id replacement makes the job
-    // the owner of that superseded generation.
-    rememberLarge("resp_shutdown_superseded", "o".repeat(8_000));
-    await flushPendingResponseSpillsForTests();
-    const oldBytes = getSpilledResponseBytesForTests();
-    expect(oldBytes).toBeGreaterThan(0);
-
-    rememberLarge("resp_shutdown_superseded", "n".repeat(8_000));
-    await started;
-
+    // The gate is released in a finally that covers EVERY await after its creation. When
+    // the first flush threw before the old try/finally, the held runner never resolved,
+    // and the next case queued behind that tail until Bun's 60 s ceiling (run 33584155821).
     try {
+      // First generation settles to a real file, then a same-id replacement makes the job
+      // the owner of that superseded generation.
+      rememberLarge("resp_shutdown_superseded", "o".repeat(8_000));
+      await flushPendingResponseSpillsForTests();
+      const oldBytes = getSpilledResponseBytesForTests();
+      expect(oldBytes).toBeGreaterThan(0);
+
+      rememberLarge("resp_shutdown_superseded", "n".repeat(8_000));
+      await started;
+
       // Cap allows the new publication on its own, but not alongside the superseded
       // generation the job still owns.
       setSpilledResponseByteCapForTests(Math.floor(oldBytes * 2.4));
@@ -1325,7 +1382,7 @@ describe("Responses previous_response_id state", () => {
   });
 
   test("shutdown fallback spends only its reserved ACL budget", async () => {
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     const totalMs = 500;
     const fallbackReserveMs = 300;
     setResponseSpillShutdownBudgetForTests({ totalMs, fallbackReserveMs });
@@ -1335,10 +1392,11 @@ describe("Responses previous_response_id state", () => {
     const started = new Promise<void>(resolve => { entered = resolve; });
     let aclClock = 0;
     setNowForTests(() => aclClock);
-    setAsyncIcaclsRunnerForTests(async () => {
+    setAsyncIcaclsRunnerForTests(async args => {
+      if (!isSpillAclTarget(args)) return ICACLS_OK;
       entered();
       await gate;
-      return { success: true, exitCode: 0, timedOut: false, stdout: "" };
+      return ICACLS_OK;
     });
     const deadlines: number[] = [];
     setIcaclsRunnerForTests((_args, timeoutMs) => {
@@ -1362,8 +1420,12 @@ describe("Responses previous_response_id state", () => {
   });
 
   test("late async spill completion cannot overwrite the shutdown fallback", async () => {
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     setStatForTests(() => ({ dev: 1n, ino: 10n, ctimeNs: 100n }));
+    // Frozen clocks for the same reason as the drain-cap case above.
+    let aclClock = 0;
+    setNowForTests(() => aclClock);
+    setResponseSpillNowForTests(() => aclClock);
     setResponseSpillShutdownBudgetForTests({ totalMs: 120, fallbackReserveMs: 80 });
     let release!: () => void;
     let entered!: () => void;
@@ -1420,7 +1482,7 @@ describe("Responses previous_response_id state", () => {
   });
 
   test("shutdown cleanup failure still persists unrelated response state and reports failure", async () => {
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     // The drain must expire, but the fallback reserve must NOT: this test asserts that a
     // cleanup failure still persists unrelated state. Under load the previous 80ms reserve
     // could itself expire, terminalizing `resp_cleanup_unrelated` into a tombstone and
@@ -1554,7 +1616,7 @@ describe("Responses previous_response_id state", () => {
     const previousUsername = process.env.USERNAME;
     process.env.USERNAME = "ocx-test-user";
     resetHardenedStateForTests();
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     setIcaclsRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
     const seedTempMemo = (event: string): void => {
       if (event !== "harden") return;
@@ -2339,7 +2401,7 @@ describe("Responses previous_response_id state", () => {
     const previousUsername = process.env.USERNAME;
     process.env.USERNAME = "ocx-test-user";
     resetHardenedStateForTests();
-    setPlatformForTests("win32");
+    forceWindowsAclLane();
     setIcaclsRunnerForTests(() => ({ success: false, exitCode: null, timedOut: true, stdout: "" }));
     try {
       // A temp-keyed timeout memo exists while the temp is on disk.
@@ -2526,7 +2588,7 @@ describe("Responses previous_response_id state", () => {
 
   test("recovers only old response-state temps owned by dead processes", () => {
     const old = new Date(Date.now() - 60 * 60 * 1_000);
-    const deadPid = process.pid === 4242 ? 4243 : 4242;
+    const deadPid = findDeadPid();
     const stale = join(home, `responses-state.json.ocx.${deadPid}.1.tmp`);
     const live = join(home, "responses-state.json.ocx.5252.2.tmp");
     const current = join(home, `responses-state.json.ocx.${process.pid}.3.tmp`);
@@ -2560,21 +2622,7 @@ describe("Responses previous_response_id state", () => {
     symlinkSync(realSnapshot, join(home, "responses-state.json"));
 
     // This test drives the REAL load path, whose sweep probes live pids with kill(pid, 0).
-    // A hardcoded "dead" pid can collide with a live process on a shared CI runner, so
-    // probe for a genuinely dead one instead (ESRCH). EPERM means alive-but-not-ours.
-    let deadPid = -1;
-    for (let candidate = 4242; candidate < 5242; candidate++) {
-      if (candidate === process.pid) continue;
-      try {
-        process.kill(candidate, 0);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ESRCH") {
-          deadPid = candidate;
-          break;
-        }
-      }
-    }
-    expect(deadPid).toBeGreaterThan(0);
+    const deadPid = findDeadPid();
     const stranded = join(realDir, `responses-state.json.ocx.${deadPid}.1.tmp`);
     writeFileSync(stranded, "private state");
     const old = new Date(Date.now() - 60 * 60 * 1_000);
@@ -2584,11 +2632,11 @@ describe("Responses previous_response_id state", () => {
     previousResponseProviderState("trigger-load");
 
     expect(existsSync(stranded)).toBe(false);
-    rmSync(realDir, { recursive: true, force: true });
+    removeTreeWithRetry(realDir);
   });
 
   test("stale temp recovery is best-effort when unlink fails", () => {
-    const deadPid = process.pid === 4242 ? 4243 : 4242;
+    const deadPid = findDeadPid();
     const path = join(home, `responses-state.json.ocx.${deadPid}.1.tmp`);
     writeFileSync(path, "private state");
     const old = new Date(Date.now() - 60 * 60 * 1_000);
@@ -2653,7 +2701,7 @@ describe("Responses previous_response_id state", () => {
     // schedulePersist site sits downstream of, so a process had its only look BEFORE it
     // wrote anything. Here nothing touches the continuation store at all.
     const old = new Date(Date.now() - 60 * 60 * 1_000);
-    const deadPid = process.pid === 4242 ? 4243 : 4242;
+    const deadPid = findDeadPid();
     const stale = join(home, `responses-state.json.ocx.${deadPid}.1.tmp`);
     const young = join(home, "responses-state.json.ocx.6262.4.tmp");
     for (const path of [stale, young]) writeFileSync(path, "private state");
@@ -2751,7 +2799,7 @@ describe("Responses previous_response_id state", () => {
     // Report and reclaim must share one predicate. If they drift, doctor tells an operator
     // to reclaim files it will then refuse to touch (or vice versa).
     const old = new Date(Date.now() - 60 * 60 * 1_000);
-    const deadPid = process.pid === 4242 ? 4243 : 4242;
+    const deadPid = findDeadPid();
     const stale = join(home, `responses-state.json.ocx.${deadPid}.1.tmp`);
     const live = join(home, "responses-state.json.ocx.5252.2.tmp");
     const young = join(home, "responses-state.json.ocx.6262.3.tmp");
@@ -3208,14 +3256,23 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
     home = mkdtempSync(join(tmpdir(), "ocx-state-admission-"));
     process.env["OPENCODEX_HOME"] = home;
     clearResponseStateMemoryForTests();
+    // Every case here asserts the synchronous direct-spill lane; see the outer describe.
+    setPlatformForTests("linux");
   });
 
   afterEach(() => {
     setSpillIoForTest(null);
     setResponseStateByteCapForTests(null);
     setResponseSpillPayloadCapForTests(null);
+    setPlatformForTests(null);
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    setWindowsPrincipalRunnerForTests(null);
+    setAsyncWindowsPrincipalRunnerForTests(null);
+    resetWindowsPrincipalForTests();
+    resetHardenedStateForTests();
     clearResponseStateForTests();
-    rmSync(home, { recursive: true, force: true });
+    removeTreeWithRetry(home);
     if (priorHome === undefined) delete process.env["OPENCODEX_HOME"];
     else process.env["OPENCODEX_HOME"] = priorHome;
   });
@@ -3413,6 +3470,73 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
     expandPreviousResponseInput(body);
     expect(previousResponseReplayFailure(body)?.reason).toBe("spill_failed");
     expect((expandChained("resp_keep") as { input: unknown[] }).input.length).toBeGreaterThan(1);
+  });
+
+  // Windows routes oversized admission through the queued async publication
+  // (src/responses/state.ts runPendingResponseSpill). The two cases above prove the sync
+  // lane; these prove the same contract on the async one, after the queue settles.
+  test("win32: post-write envelope enforcement tombstones through the async lane", async () => {
+    forceWindowsAclLane();
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    setResponseStateByteCapForTests(1024);
+    rememberResponseState({ model: "m", input: "env" }, completedResponse("resp_env_w", "e".repeat(4096)));
+    await flushPendingResponseSpillsForTests();
+    const dir = responseSpillDirectory();
+    const files = readdirSync(dir);
+    expect(files.length).toBe(1);
+    const envelope = statSync(join(dir, files[0])).size;
+    const firstGeneration = files[0];
+    clearResponseStateMemoryForTests();
+    setResponseSpillPayloadCapForTests(envelope - 1);
+    const dropsBefore = responseAdmissionCountersForTests().oversizedDrops;
+    rememberResponseState({ model: "m", input: "env" }, completedResponse("resp_env_w", "e".repeat(4096)));
+    await flushPendingResponseSpillsForTests();
+    expect(responseAdmissionCountersForTests().oversizedDrops).toBe(dropsBefore + 1);
+    const body = {
+      model: "m",
+      previous_response_id: "resp_env_w",
+      input: [{ type: "function_call_output", call_id: "c", output: "ok" }],
+    };
+    expandPreviousResponseInput(body);
+    // The async lane deletes the over-ceiling file and tombstones at publication time, so
+    // replay reports the tombstone (spill_failed); the sync lane's spill_too_large is a
+    // read-time classification of a file that was never written here.
+    expect(previousResponseReplayFailure(body)?.reason).toBe("spill_failed");
+    // The over-ceiling publication was deleted; only the first generation's file (orphaned by
+    // the memory clear, owned by the orphan GC) remains.
+    expect(readdirSync(dir)).toEqual([firstGeneration]);
+  });
+
+  test("win32: async direct-spill write failure installs a tombstone and keeps unrelated residents", async () => {
+    forceWindowsAclLane();
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    setResponseStateByteCapForTests(4 * 1024);
+    rememberResponseState({ model: "m", input: "a" }, completedResponse("resp_keep_w", "keep"));
+    await flushPendingResponseSpillsForTests();
+    // Unlike the sync lane, the queued candidate counts against the RAM cap while it waits,
+    // which demotes "keep" too. Fail only the oversized candidate's write so the case still
+    // proves the tombstone is scoped to the failing generation.
+    const bigBytes = 8 * 1024;
+    setSpillIoForTest({
+      write: (fd, bytes) => {
+        if (bytes.byteLength >= bigBytes) throw new Error("injected write failure");
+        let offset = 0;
+        while (offset < bytes.byteLength) offset += writeSync(fd, bytes, offset, bytes.byteLength - offset);
+      },
+    });
+    rememberResponseState({ model: "m", input: "big" }, completedResponse("resp_fail_w", "v".repeat(bigBytes)));
+    await flushPendingResponseSpillsForTests();
+    setSpillIoForTest(null);
+    const body = {
+      model: "m",
+      previous_response_id: "resp_fail_w",
+      input: [{ type: "function_call_output", call_id: "c", output: "ok" }],
+    };
+    expandPreviousResponseInput(body);
+    expect(previousResponseReplayFailure(body)?.reason).toBe("spill_failed");
+    expect((expandChained("resp_keep_w") as { input: unknown[] }).input.length).toBeGreaterThan(1);
   });
 
   test("same-ID oversized replacement releases the old resident exactly once", () => {

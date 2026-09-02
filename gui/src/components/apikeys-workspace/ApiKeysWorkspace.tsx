@@ -43,6 +43,8 @@ export interface ApiKeysWorkspaceProps {
   creating: boolean;
   newKey: string | null;
   copied: boolean;
+  rotationSecret?: { id: string; key: string; rotationId: string } | null;
+  rotationCopied?: boolean;
   filteredModels: ExternalModelRow[];
   modelsLoading: boolean;
   /** Quiet revalidation / retry over rows already on screen — not a skeleton. */
@@ -60,6 +62,11 @@ export interface ApiKeysWorkspaceProps {
   onCopyKey: () => void;
   onDelete: (id: string) => Promise<boolean>;
   onRename: (id: string, name: string) => Promise<boolean>;
+  onRotationStart?: (id: string) => Promise<boolean>;
+  onRotationCommit?: (id: string, rotationId: string) => Promise<boolean>;
+  onRotationAbort?: (id: string, rotationId: string) => Promise<boolean>;
+  onCopyRotationSecret?: () => void;
+  onDismissRotationSecret?: () => void;
   onModelQueryChange: (value: string) => void;
   onCopyModelId: (modelId: string) => void;
   onTestModel: (model: ExternalModelRow, protocol: GatewayInboundProtocol) => void;
@@ -83,6 +90,8 @@ export default function ApiKeysWorkspace({
   creating,
   newKey,
   copied,
+  rotationSecret = null,
+  rotationCopied = false,
   filteredModels,
   modelsLoading,
   modelsRefreshing = false,
@@ -99,6 +108,11 @@ export default function ApiKeysWorkspace({
   onCopyKey,
   onDelete,
   onRename,
+  onRotationStart,
+  onRotationCommit,
+  onRotationAbort,
+  onCopyRotationSecret,
+  onDismissRotationSecret,
   onModelQueryChange,
   onCopyModelId,
   onTestModel,
@@ -119,9 +133,31 @@ export default function ApiKeysWorkspace({
    *  and can end up attached to whichever key the user selects next. */
   const [renameFailed, setRenameFailed] = useState(false);
   const [deleteFailed, setDeleteFailed] = useState(false);
+  const [rotationPending, setRotationPending] = useState(false);
+  const [rotationFailed, setRotationFailed] = useState(false);
 
   const selected = selectedId ? (keys.find(k => k.id === selectedId) ?? null) : null;
-  const mutationPending = deleting || renamePending;
+  const selectedRotationId = selected
+    ? (rotationSecret?.id === selected.id ? rotationSecret.rotationId : selected.pendingRotation?.id)
+    : undefined;
+  const mutationPending = deleting || renamePending || rotationPending;
+
+  const runRotation = async (operation: "start" | "commit" | "abort") => {
+    if (!selected || rotationPending) return;
+    setRotationPending(true);
+    setRotationFailed(false);
+    try {
+      const rotationId = selectedRotationId;
+      const ok = operation === "start"
+        ? (await onRotationStart?.(selected.id)) ?? false
+        : rotationId
+          ? (await (operation === "commit" ? onRotationCommit : onRotationAbort)?.(selected.id, rotationId)) ?? false
+          : false;
+      if (!ok) setRotationFailed(true);
+    } finally {
+      setRotationPending(false);
+    }
+  };
 
   /** The strip's items. Counts sit in `meta` so the strip reports scale, not just names. */
   const sectionTabs = useMemo(() => [
@@ -319,6 +355,45 @@ export default function ApiKeysWorkspace({
                       <dd>{formatCreatedDate(selected.createdAt, localeTag)}</dd>
                     </div>
                   </dl>
+                </div>
+                <div className="awi-section" aria-live="polite">
+                  <h3 className="awi-section-title">{t("api.rotation.title")}</h3>
+                  {selectedRotationId ? (
+                    <>
+                      <p className="muted">{t("api.rotation.pending")}</p>
+                      {selected.pendingRotation && (
+                        <p className="muted">{t("api.rotation.expires")} {formatCreatedDate(selected.pendingRotation.expiresAt, localeTag)}</p>
+                      )}
+                      {rotationSecret?.id === selected.id && (
+                        <div className="api-key-reveal" role="status">
+                          <p>{t("api.rotation.secretOnce")}</p>
+                          <code>{rotationSecret.key}</code>
+                          <span>
+                            <button type="button" className="btn btn-sm" onClick={onCopyRotationSecret}>
+                              {rotationCopied ? t("api.copied") : t("api.copy")}
+                            </button>
+                            <button type="button" className="btn btn-ghost btn-sm" onClick={onDismissRotationSecret}>{t("common.close")}</button>
+                          </span>
+                        </div>
+                      )}
+                      <div className="awi-detail-actions">
+                        <button type="button" className="btn btn-sm" disabled={rotationPending} onClick={() => { void runRotation("commit"); }}>
+                          {t("api.rotation.commit")}
+                        </button>
+                        <button type="button" className="btn btn-ghost btn-sm" disabled={rotationPending} onClick={() => { void runRotation("abort"); }}>
+                          {t("api.rotation.abort")}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="muted">{t("api.rotation.description")}</p>
+                      <button type="button" className="btn btn-ghost btn-sm" disabled={rotationPending} onClick={() => { void runRotation("start"); }}>
+                        {rotationPending ? t("api.rotation.starting") : t("api.rotation.start")}
+                      </button>
+                    </>
+                  )}
+                  {rotationFailed && <p className="awi-delete-error" role="alert">{t("api.rotation.failed")}</p>}
                 </div>
                 <div className="awi-section">
                   <h3 className="awi-section-title">{t("api.attribution.title")}</h3>

@@ -153,7 +153,7 @@ describe("cross-surface invalidation", () => {
   test("the epoch is the only cross-surface coupling, not a shared controller", () => {
     // Two controllers is deliberate: the backend is single-flight, so what was
     // missing is invalidation rather than mutual exclusion.
-    expect(APP_SRC).toContain("useCodexRestart(API_BASE, {");
+    expect(APP_SRC).toContain("useCodexRestart(sharedBase, {");
     expect(MODELS).toContain("useCodexRestart(apiBase, {");
   });
 });

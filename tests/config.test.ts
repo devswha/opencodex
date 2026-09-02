@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import {
@@ -22,6 +22,7 @@ import {
   readRuntimePort,
   removePid,
   removeRuntimePort,
+  runtimeRole,
   ocxStartProcessCacheSizeForTests,
   setOcxStartProcessCacheForTests,
   setProcessCommandLineExecForTests,
@@ -37,6 +38,7 @@ import { AtomicWriteResidualTempError, atomicWriteFile, atomicWriteFileAsync, ha
 import { nextAtomicTempSequence } from "../src/config/atomic-write";
 import { flushConfigDirHardeningForTests } from "../src/config/paths";
 import { providerManagementConfigError } from "../src/server/auth-cors";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 let testDir = "";
 
 /**
@@ -54,7 +56,7 @@ const canSymlink = (() => {
     if ((e as NodeJS.ErrnoException).code === "EPERM") return false;
     throw e;
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTreeWithRetry(dir);
   }
 })();
 
@@ -65,7 +67,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.OPENCODEX_HOME;
-  if (testDir && existsSync(testDir)) rmSync(testDir, { recursive: true, force: true });
+  if (testDir && existsSync(testDir)) removeTreeWithRetry(testDir);
   testDir = "";
 });
 
@@ -115,6 +117,261 @@ function writeAccountNamespaceConfig(
 }
 
 describe("opencodex config defaults", () => {
+  test("runtime role is absent-by-default and resolves to standalone", () => {
+    const defaults = getDefaultConfig();
+    expect(Object.hasOwn(defaults, "runtimeRole")).toBe(false);
+    expect(runtimeRole(defaults)).toBe("standalone");
+    writeConfig(defaults);
+    const before = readFileSync(getConfigPath(), "utf8");
+    expect(runtimeRole(loadConfig())).toBe("standalone");
+    expect(readFileSync(getConfigPath(), "utf8")).toBe(before);
+  });
+
+  test("runtime role accepts standalone/hub alone while client requires atomic state", () => {
+    for (const role of ["standalone", "hub"] as const) {
+      expect(validateConfigCandidate({ ...getDefaultConfig(), runtimeRole: role })).toMatchObject({
+        ok: true,
+        config: { runtimeRole: role },
+      });
+    }
+    expect(validateConfigCandidate({ ...getDefaultConfig(), runtimeRole: "client" })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("requires a complete client connection"),
+    });
+  });
+
+  test("runtime role rejects malformed live candidates", () => {
+    for (const runtimeRole of ["server", "", 1, null]) {
+      expect(validateConfigCandidate({ ...getDefaultConfig(), runtimeRole })).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("runtimeRole"),
+      });
+    }
+  });
+
+  test("a malformed persisted runtime role preserves providers and API keys", () => {
+    const invalidRole = "future-secret-shaped-role";
+    writeConfig({
+      port: 12345,
+      runtimeRole: invalidRole,
+      defaultProvider: "custom",
+      providers: { custom: { adapter: "openai-chat", baseUrl: "https://example.test/v1", apiKey: "upstream-secret" } },
+      apiKeys: [{ id: "key-1", name: "default", key: "ocx_persisted", createdAt: "2026-08-28T00:00:00.000Z" }],
+    });
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const loaded = loadConfig();
+      const diagnostics = readConfigDiagnostics();
+      expect(runtimeRole(loaded)).toBe("standalone");
+      expect(loaded.runtimeRole).toBeUndefined();
+      expect(loaded).toMatchObject({
+        port: 12345,
+        defaultProvider: "custom",
+        providers: { custom: { baseUrl: "https://example.test/v1", apiKey: "upstream-secret" } },
+        apiKeys: [expect.objectContaining({ id: "key-1", key: "ocx_persisted" })],
+      });
+      expect(diagnostics).toMatchObject({
+        source: "file",
+        error: null,
+        warnings: [expect.stringContaining("runtimeRole ignored")],
+      });
+      expect(backupNames()).toEqual([]);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls.flat().join(" ")).not.toContain(invalidRole);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("hub and remote GUI config normalize valid origins and exact Tailscale users", () => {
+    expect(validateConfigCandidate({
+      ...getDefaultConfig(),
+      runtimeRole: "hub",
+      hub: { managementPublicOrigin: "https://hub.example.test:443" },
+      remoteGui: {
+        allowedTailscaleUsers: [" alice@example.test ", "bob@example.test"],
+        allowInsecureHttp: false,
+      },
+    })).toMatchObject({
+      ok: true,
+      config: {
+        hub: { managementPublicOrigin: "https://hub.example.test" },
+        remoteGui: { allowedTailscaleUsers: ["alice@example.test", "bob@example.test"] },
+      },
+    });
+    expect(validateConfigCandidate({
+      ...getDefaultConfig(),
+      runtimeRole: "hub",
+      hub: { managementPublicOrigin: "http://hub.example.test" },
+      remoteGui: { allowInsecureHttp: true },
+    }).ok).toBe(true);
+  });
+
+  test("remote GUI live candidates reject unsafe origins and malformed identity allowlists", () => {
+    for (const managementPublicOrigin of [
+      "ftp://hub.example.test",
+      "https://user@hub.example.test",
+      "https://hub.example.test/path",
+      "https://hub.example.test/?query=1",
+      "https://hub.example.test/#fragment",
+    ]) {
+      const result = validateConfigCandidate({
+        ...getDefaultConfig(),
+        hub: { managementPublicOrigin },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("hub.managementPublicOrigin");
+    }
+    for (const allowedTailscaleUsers of [
+      [""],
+      ["alice@example.test", " alice@example.test "],
+      ["alice\n@example.test"],
+      ["x".repeat(321)],
+      Array.from({ length: 65 }, (_, index) => `user-${index}@example.test`),
+    ]) {
+      const result = validateConfigCandidate({
+        ...getDefaultConfig(),
+        remoteGui: { allowedTailscaleUsers },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("remoteGui.allowedTailscaleUsers");
+    }
+  });
+
+  test("a malformed persisted remote GUI block is disabled without discarding providers or API keys", () => {
+    const malformedValue = "https://hub.example.test/private-secret-path";
+    writeConfig({
+      port: 12345,
+      runtimeRole: "hub",
+      hub: { managementPublicOrigin: malformedValue },
+      remoteGui: { allowedTailscaleUsers: ["alice@example.test"] },
+      defaultProvider: "custom",
+      providers: { custom: { adapter: "openai-chat", baseUrl: "https://example.test/v1", apiKey: "upstream-secret" } },
+      apiKeys: [{ id: "key-1", name: "default", key: "ocx_persisted", createdAt: "2026-08-28T00:00:00.000Z" }],
+    });
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const loaded = loadConfig();
+      expect(loaded.hub).toBeUndefined();
+      expect(loaded.remoteGui).toEqual({ allowedTailscaleUsers: ["alice@example.test"] });
+      expect(loaded.providers.custom?.apiKey).toBe("upstream-secret");
+      expect(loaded.apiKeys?.[0]?.key).toBe("ocx_persisted");
+      expect(readConfigDiagnostics().warnings?.join(" ")).toContain("hub.managementPublicOrigin");
+      expect(warnSpy.mock.calls.flat().join(" ")).not.toContain(malformedValue);
+      expect(backupNames()).toEqual([]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("remote GUI config round-trips but remains inert outside the hub role", () => {
+    for (const runtimeRole of [undefined, "standalone"] as const) {
+      const result = validateConfigCandidate({
+        ...getDefaultConfig(),
+        ...(runtimeRole ? { runtimeRole } : {}),
+        hub: { managementPublicOrigin: "https://hub.example.test" },
+        remoteGui: { allowedTailscaleUsers: ["alice@example.test"], allowInsecureHttp: true },
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.config.runtimeRole).toBe(runtimeRole);
+    }
+  });
+
+  test("remote client state round-trips without accepting a secret field", () => {
+    const client = {
+      serverUrl: "https://hub.example.test",
+      managementUrl: "https://manage.example.test:443",
+      managementTransport: "direct" as const,
+      selectedClients: ["codex", "claude"] as const,
+      tokenEnv: "OPENCODEX_API_AUTH_TOKEN" as const,
+      apiKeyId: "issued-key-id",
+      tokenFingerprint: "a".repeat(64),
+      protocolVersion: 1 as const,
+      connectedAt: "2026-08-28T00:00:00.000Z",
+      catalogFingerprint: "sha256-example",
+      catalogSyncedAt: "2026-08-28T00:01:00.000Z",
+      pendingOperation: {
+        kind: "rotate" as const,
+        rotationId: "rotation-1",
+        newKeyIssuedAt: "2026-08-28T00:02:00.000Z",
+        oldKeyBackupPath: join(testDir, "service-api-token.prev"),
+      },
+    };
+    const result = validateConfigCandidate({
+      ...getDefaultConfig(),
+      runtimeRole: "client",
+      client,
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      config: {
+        runtimeRole: "client",
+        client: {
+          serverUrl: "https://hub.example.test",
+          managementUrl: "https://manage.example.test",
+          apiKeyId: "issued-key-id",
+        },
+      },
+    });
+    if (!result.ok) return;
+    saveConfig(result.config);
+    expect(loadConfig().client).toEqual(result.config.client);
+    expect(readFileSync(getConfigPath(), "utf8")).not.toContain("ocx_data_");
+
+    expect(validateConfigCandidate({
+      ...getDefaultConfig(),
+      runtimeRole: "client",
+      client: { ...client, key: "ocx_data_forbidden" },
+    })).toMatchObject({ ok: false, error: expect.stringContaining("client") });
+  });
+
+  test("remote client state rejects half-present and malformed rotation recovery state", () => {
+    const validClient = {
+      serverUrl: "https://hub.example.test",
+      managementUrl: "https://hub.example.test",
+      managementTransport: "direct",
+      selectedClients: ["codex"],
+      tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
+      apiKeyId: "issued-key-id",
+      tokenFingerprint: "b".repeat(64),
+      protocolVersion: 1,
+      connectedAt: "2026-08-28T00:00:00.000Z",
+    };
+    expect(validateConfigCandidate({ ...getDefaultConfig(), runtimeRole: "client" })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("requires a complete client connection"),
+    });
+    expect(validateConfigCandidate({ ...getDefaultConfig(), client: validClient })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("requires runtimeRole client"),
+    });
+    for (const pendingOperation of [
+      { kind: "rotate", newKeyIssuedAt: "2026-08-28T00:00:00.000Z", oldKeyBackupPath: join(testDir, "service-api-token.prev") },
+      { kind: "rotate", rotationId: "r", newKeyIssuedAt: "not-a-time", oldKeyBackupPath: join(testDir, "service-api-token.prev") },
+      { kind: "rotate", rotationId: "r", newKeyIssuedAt: "2026-08-28T00:00:00.000Z", oldKeyBackupPath: join(testDir, "foreign.prev") },
+    ]) {
+      expect(validateConfigCandidate({
+        ...getDefaultConfig(),
+        runtimeRole: "client",
+        client: { ...validClient, pendingOperation },
+      })).toMatchObject({ ok: false, error: expect.stringContaining("client.pendingOperation") });
+    }
+  });
+
+  test("an unrelated save cannot erase malformed-present client state", () => {
+    const raw = {
+      ...getDefaultConfig(),
+      runtimeRole: "client",
+      client: { apiKeyId: "half-present", key: "must-not-be-reemitted" },
+    };
+    writeConfig(raw);
+    const before = readFileSync(getConfigPath(), "utf8");
+    const loaded = loadConfig();
+    loaded.codexAutoStart = false;
+    expect(() => saveConfig(loaded)).toThrow("malformed or mismatched remote client state");
+    expect(readFileSync(getConfigPath(), "utf8")).toBe(before);
+  });
+
   test("malformed classifier config is normalized at load, even with subagentEffort absent (#1697)", () => {
     // normalizePersistedClaudeCode used to be reached only through a subagentEffort short-circuit,
     // so a config whose ONLY defect was elsewhere in claudeCode was never normalized. These
@@ -1057,7 +1314,7 @@ describe("opencodex config defaults", () => {
       expect(getPidPath()).toBe(join(expectedConfigDir, "ocx.pid"));
     } finally {
       process.chdir(oldCwd);
-      rmSync(parent, { recursive: true, force: true });
+      removeTreeWithRetry(parent);
     }
   });
 
@@ -1154,7 +1411,7 @@ describe("opencodex config defaults", () => {
       { adapter: "openai-chat", baseUrl: "https://example.test/v1", headers: { Authorization: "Bearer secret" } },
       { adapter: "openai-chat", baseUrl: "https://example.test/v1", headers: { "X-Custom": "ok\r\nInjected: yes" } },
     ]) {
-      rmSync(testDir, { recursive: true, force: true });
+      removeTreeWithRetry(testDir);
       mkdirSync(testDir, { recursive: true });
       writeConfig({
         port: 10100,
@@ -1217,7 +1474,7 @@ describe("opencodex config defaults", () => {
 
     expect(loadConfig().providerContextCaps).toEqual({ custom: 350_000 });
 
-    rmSync(testDir, { recursive: true, force: true });
+    removeTreeWithRetry(testDir);
     mkdirSync(testDir, { recursive: true });
     writeConfig({
       port: 10100,
@@ -1654,7 +1911,7 @@ describe("opencodex config defaults", () => {
     expect(readConfigDiagnostics().source).toBe("fallback");
     expect(readConfigDiagnostics().error).toContain("providers.custom.defaultMaxOutputTokens");
 
-    rmSync(testDir, { recursive: true, force: true });
+    removeTreeWithRetry(testDir);
     mkdirSync(testDir, { recursive: true });
     writeConfig({
       port: 10100,
@@ -1694,7 +1951,7 @@ describe("opencodex config defaults", () => {
     expect(readConfigDiagnostics().source).toBe("fallback");
     expect(readConfigDiagnostics().error).toContain("providers.custom.modelAutoCompactTokenLimits");
 
-    rmSync(testDir, { recursive: true, force: true });
+    removeTreeWithRetry(testDir);
     mkdirSync(testDir, { recursive: true });
     writeConfig({
       port: 10100,
@@ -1731,7 +1988,7 @@ describe("opencodex config defaults", () => {
       modelOpenRouterRouting: { "anthropic/claude-sonnet-5": { only: ["anthropic"] } },
     });
 
-    rmSync(testDir, { recursive: true, force: true });
+    removeTreeWithRetry(testDir);
     mkdirSync(testDir, { recursive: true });
     writeConfig({
       port: 10100,
@@ -1777,7 +2034,7 @@ describe("opencodex config defaults", () => {
 
     expect(loadConfig().contextCapValue).toBe(500_000);
 
-    rmSync(testDir, { recursive: true, force: true });
+    removeTreeWithRetry(testDir);
     mkdirSync(testDir, { recursive: true });
     writeConfig({
       port: 10100,

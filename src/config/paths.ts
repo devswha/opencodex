@@ -49,7 +49,21 @@ export function hardenConfigDir(): void {
   }
 }
 
-/** Test-only: settle optional config-directory hardening without exposing it to production callers. */
+/**
+ * Settle the optional hardening flight for one config directory.
+ *
+ * The flight spawns `icacls.exe`, which holds the directory open until it exits. Windows file
+ * locking is mandatory, so anything that removes or renames that directory after a "clean"
+ * shutdown — a test fixture teardown, an uninstaller, a home move — gets EPERM/EBUSY unless the
+ * process that started the child also waits for it. `server.stop` calls this so the shutdown
+ * contract owns every child it started. No-op when nothing is in flight.
+ */
+export async function flushConfigDirHardening(dir: string = getConfigDir()): Promise<void> {
+  const flight = configDirHardeningFlights.get(dir);
+  if (flight) await flight;
+}
+
+/** Test-only: settle every in-flight config-directory harden regardless of directory. */
 export async function flushConfigDirHardeningForTests(): Promise<void> {
   await Promise.all([...configDirHardeningFlights.values()]);
 }

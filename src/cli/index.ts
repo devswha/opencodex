@@ -9,6 +9,7 @@ import {
   runCodexHistoryJob,
 } from "../codex/history-job";
 import { reconcileJournal } from "../codex/journal";
+import { inspectClientRotationRecoveryGate, readClientConnectionState } from "../client/state";
 import {
   codexAutoStartEnabled,
   getConfigDir,
@@ -48,7 +49,7 @@ import {
 } from "./tray-proxy";
 import { requestBoundSystemRestart } from "./system-restart-client";
 import { installCrashGuards } from "../lib/crash-guard";
-import { dispatchCommand } from "./dispatch";
+import { dispatchCommand , decideStartWithLiveOwner } from "./dispatch";
 import { findAvailablePort, isAddrInUse, PortUnavailableError, shouldPersistSelectedPort, waitForPortAvailable } from "../server/ports";
 import { findLiveProxy, probeHostname, type LiveProxy } from "../server/proxy-liveness";
 import { createReadinessGate } from "../server/readiness";
@@ -58,7 +59,6 @@ import { isProcessAlive, ProxyOwnershipRefusedError, stopProxy } from "../lib/pr
 import { loadServiceTokenFromFile } from "../lib/service-secrets";
 import { assertNotAdminToken, diagnoseService, isServiceOwnershipError, proxyStillLiveAfterStop, serviceCommand, serviceEnvironmentOwnedHere, serviceStartableFromTray, serviceStatusSummary, stopServiceIfInstalledDetailed, uninstallServiceIfInstalled, uninstallServiceDetailed } from "../service";
 import { formatStartupRoutingDetail, startupHealthSummary } from "../codex/autostart-health";
-import { drainAndShutdown, isRecyclingForExit, startServer } from "../server";
 import { injectSystemEnv, reconcileShellHook, revertSystemEnv, uninstallShellHook } from "../server/system-env";
 import { buildDesktop3pRegistry } from "../claude/desktop-3p";
 import { startTokenGuardian } from "../oauth/token-guardian";
@@ -149,7 +149,10 @@ function startArgv(port?: number): string[] {
   return selfLaunchArgv(args);
 }
 
-async function chooseListenPort(requestedPort?: number): Promise<number> {
+async function chooseListenPort(
+  requestedPort?: number,
+  options: { sibling?: boolean } = {},
+): Promise<number> {
   const config = loadConfig();
   const preferred = requestedPort ?? config.port ?? 10100;
   const hardPin = requestedPort !== undefined && requestedPort > 0;
@@ -197,7 +200,7 @@ async function chooseListenPort(requestedPort?: number): Promise<number> {
     if (preferred > 0 && selected !== preferred) {
       console.log(`⚠️  Port ${preferred} is busy; starting opencodex on ${selected}.`);
     }
-    if (shouldPersistSelectedPort(config.port, selected, preferred)) {
+    if (shouldPersistSelectedPort(config.port, selected, preferred, options)) {
       config.port = selected;
       saveConfig(config);
     }
@@ -224,7 +227,12 @@ async function findProxyOwnerBeforeJournalRecovery(
   // The probe established that the snapshotted owner is stale. Compare before
   // deleting so a concurrent start that rewrote the PID file keeps its state.
   removePidIfValueIs(pidSnapshot);
-  if (!currentExternalCodexModelProvider()) reconcileJournal();
+  if (!currentExternalCodexModelProvider()) {
+    const clientState = readClientConnectionState();
+    reconcileJournal(clientState.kind === "connected"
+      ? { activeClientApiKeyId: clientState.value.apiKeyId }
+      : undefined);
+  }
   return { live: null, pidSnapshot };
 }
 
@@ -248,20 +256,52 @@ async function handleStart(options: { block?: boolean } = {}) {
   // shutdown then left no runtime record for discovery at all. `handleEnsure`
   // already passes this; `handleStart` is the path that did not.
   const owner = await findProxyOwnerBeforeJournalRecovery({ probeConfiguredPort: true });
+  let siblingStart = false;
   if (owner.live) {
-    // Service-wrapper context (opencodex-service.cmd `:loop`): a healthy proxy from
-    // ANY source means the requested port is already served. Exit 0 so the wrapper's
-    // `if %ERRORLEVEL% NEQ 0` retry loop terminates instead of respawning every 5s
-    // against a listener it can never claim (observed as an endless
-    // "Proxy already running" service.log loop).
-    // Only the exact "1" sentinel takes this path — the same check syncCleanup
-    // uses — so an env value like "0" or "false" cannot bypass the conflict error.
-    if (process.env.OCX_SERVICE === "1") {
+    // Rationale and the full decision table live on `decideStartWithLiveOwner`.
+    const decision = decideStartWithLiveOwner({
+      livePort: owner.live.port,
+      requestedPort,
+      ocxService: process.env.OCX_SERVICE,
+    });
+    if (decision === "service-stay-out") {
+      // Service-wrapper context (opencodex-service.cmd `:loop`): a healthy proxy from
+      // ANY source means the requested port is already served. Exit 0 so the wrapper's
+      // `if %ERRORLEVEL% NEQ 0` retry loop terminates instead of respawning every 5s
+      // against a listener it can never claim (observed as an endless
+      // "Proxy already running" service.log loop).
       console.log(`Proxy already running (PID ${owner.live.pid ?? owner.pidSnapshot ?? "unknown"}, port ${owner.live.port}); service wrapper staying out of the way.`);
       process.exit(0);
     }
-    console.error(`⚠️  Proxy already running (PID ${owner.live.pid ?? owner.pidSnapshot ?? "unknown"}, port ${owner.live.port}). Use 'ocx stop' first.`);
-    process.exit(1);
+    if (decision === "refuse") {
+      console.error(`⚠️  Proxy already running (PID ${owner.live.pid ?? owner.pidSnapshot ?? "unknown"}, port ${owner.live.port}). Use 'ocx stop' first.`);
+      process.exit(1);
+    }
+    // Sibling path. Honest about the side effects it shares with any start in this home:
+    // the new instance takes over this home's ocx.pid / runtime-port.json while it runs,
+    // and re-points this home's Codex config at the new port when injection applies.
+    // What it must NOT do is persist its port into config.port: the configured-port
+    // proxy is still the owner of this home, and a later `ocx service` reads config.port
+    // to bake the service (observed: a probe on 10198 left the service pinned there).
+    siblingStart = true;
+    console.warn(
+      `Proxy already running on port ${owner.live.port}; starting a second instance on requested port ${requestedPort}. `
+      + `The new instance takes over this home's pid/runtime records and Codex config while it runs.`,
+    );
+  }
+
+  const clientState = readClientConnectionState();
+  if (clientState.kind === "invalid" || clientState.kind === "mismatched") {
+    throw new Error(`client startup refused: ${clientState.reason}`);
+  }
+  const rotationGate = inspectClientRotationRecoveryGate(clientState);
+  if (clientState.kind === "connected") {
+    if (rotationGate.kind === "recovery-required" || rotationGate.kind === "unsafe") {
+      throw new Error(`client startup refused: ${rotationGate.reason}`);
+    }
+    const { startClientRuntime } = await import("../client/runtime");
+    await startClientRuntime({ port: requestedPort, block: options.block });
+    return;
   }
 
   // Interactive-only update prompt. Must run BEFORE we bind a port / write a
@@ -272,7 +312,8 @@ async function handleStart(options: { block?: boolean } = {}) {
   // Port selection is check-then-bind: a concurrent `ocx start`/`ensure` can win the port
   // between the probe and Bun.serve. Soft starts may re-pick; hard-pinned `--port` retries
   // the same port only (never hop — that was the remaining PR #152 gap).
-  let port = await chooseListenPort(requestedPort);
+  let port = await chooseListenPort(requestedPort, { sibling: siblingStart });
+  const { drainAndShutdown, isRecyclingForExit, startServer } = await import("../server");
   // One private readiness gate for this startServer invocation, captured by the
   // listener's closure. handleStart owns it and transitions it after the
   // post-startup sync settles. A second startServer in the same process would
@@ -301,7 +342,7 @@ async function handleStart(options: { block?: boolean } = {}) {
         continue;
       }
       console.log(`⚠️  Port ${port} was taken while starting; picking another...`);
-      port = await chooseListenPort(requestedPort);
+      port = await chooseListenPort(requestedPort, { sibling: siblingStart });
     }
   }
   // A single request's streaming error must never crash the daemon serving every
@@ -737,6 +778,7 @@ async function handleStop() {
   // restart-window wait; launchd, systemd and WinSW are down when they say so.
   let schedulerCanRespawn = false;
   let stoppedService = false;
+  let nativeRestoreHandledByProxy = false;
   // An ownership mismatch means the service manager was never even contacted: the installed
   // service is still live and will respawn the proxy. Tearing down SHARED state in that
   // situation (native Codex config, the Grok fence) removes config out from under a running
@@ -785,17 +827,22 @@ async function handleStop() {
    * guessed one fails closed into manual recovery rather than letting a later probe read
    * "the configured port refuses" as proof that the right proxy is down.
    */
-  const stopWithDeferral = async (pid: number, discovered?: { hostname: string; port: number } | null): Promise<void> => {
+  const stopWithDeferral = async (pid: number, discovered?: { hostname: string; port: number } | null): Promise<boolean> => {
     // Resolve ONCE. Reading the runtime record twice let the receipt name the configured
     // guess while the request went to a runtime endpoint that appeared in between.
     const exact = discovered ?? endpointOf(readRuntimePort(pid));
     claimTeardown(exact ?? configuredEndpoint(), exact ? "exact" : "guessed");
-    await stopProxy(pid, {
+    const graceful = await stopProxy(pid, {
       deferSharedTeardownNonce: teardownNonce,
       // Only an exact endpoint may direct the request; the configured fallback is a guess
       // good enough to record an obligation against, not to POST a stop to.
       runtimeEndpoint: exact ?? undefined,
     });
+    // A valid receipt means the proxy deferred shared teardown to this process. If the
+    // receipt could not be written, the proxy restores it itself and the caller must not
+    // attempt a second restore after a graceful stop. A hard-kill always leaves restore
+    // to this process.
+    return graceful && !teardownNonce;
   };
   try {
     const serviceStop = stopServiceIfInstalledDetailed();
@@ -838,7 +885,7 @@ async function handleStop() {
       // verification below, so a survivor does not get its client config pulled first.
       // The receipt goes down first — the proxy honours the deferral only when it can
       // see one, so an unrecordable claim degrades to the child doing its own teardown.
-      await stopWithDeferral(pid);
+      nativeRestoreHandledByProxy = await stopWithDeferral(pid);
       console.log(`✅ Proxy (PID ${pid}) stopped.`);
       removePid(pid);
       removeRuntimePort(pid);
@@ -868,7 +915,10 @@ async function handleStop() {
       try {
         // The probe already found where it answers, and on this path the runtime record is
         // typically what went missing in the first place.
-        await stopWithDeferral(live.pid, { hostname: live.hostname ?? "127.0.0.1", port: live.port });
+        nativeRestoreHandledByProxy = await stopWithDeferral(
+          live.pid,
+          { hostname: live.hostname ?? "127.0.0.1", port: live.port },
+        );
         console.log(`✅ Proxy (PID ${live.pid}) stopped.`);
       } catch (err) {
         stopFailed = true;
@@ -986,7 +1036,7 @@ async function handleStop() {
       console.error("   The obligation is preserved; retry once the proxy is confirmed stopped.");
     }
   }
-  const restoreBlocked = ownershipBlocked || inheritedBlocks;
+  const restoreBlocked = ownershipBlocked || inheritedBlocks || nativeRestoreHandledByProxy;
   if (!restoreBlocked) {
     if (recoveredNonces.length > 0) {
       // A previous deferred stop died before restoring, and the probe says its endpoint is
@@ -1294,6 +1344,10 @@ async function handleStatus() {
   console.log(`   Runtime: ${status.json.paths.runtime}`);
   console.log(`   Runtime source: ${status.json.runtime.source}${status.json.runtime.overrideEnv ? ` (${status.json.runtime.overrideEnv})` : ""}`);
   console.log(`   Default provider: ${status.json.defaultProvider}`);
+  console.log(`   Remote hub: ${status.json.connection.state}${status.json.connection.serverUrl ? ` (${status.json.connection.serverUrl})` : ""}`);
+  if (status.json.connection.state === "invalid" || status.json.connection.state === "mismatched") {
+    console.log(`   ⚠️  ${status.json.connection.reason}`);
+  }
   console.log(`   Codex autostart: ${status.json.codexAutostart ? "enabled" : "disabled"}`);
   console.log(`   Restart safety: ${startupHealthSummary(status.json.startup)}`);
   console.log(`   ${formatStartupRoutingDetail(status.json.startup)}`);

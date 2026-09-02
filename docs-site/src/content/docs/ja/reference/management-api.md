@@ -240,3 +240,7 @@ account の selector binding は残るため、欠落中の exact route は fail
 ## クライアントの選択
 
 通常の管理では、[ウェブダッシュボード](/guides/web-dashboard/) が最も安全なガイド付きワークフローを提供します。ヘッドレス ホストとオートメーションの場合は、対応する `ocx` コマンドを使用します。これらのコマンドは、これと同じライブ API を呼び出し、プロキシに到達できない場合、または操作が失敗した場合にゼロ以外の結果を返します。ダイレクト HTTP は、上記の正確なエンドポイント コントラクトを必要とする統合に最も役立ちます。
+
+## リモートセッションとデータキー更新
+
+`POST /api/keys/rotate {id}` は10分間の移行を開始し、新しい秘密値を一度だけ返します。`POST /api/keys/rotate/commit {id,rotationId}` で確定し、`DELETE /api/keys/rotate {id,rotationId}` で中止します。管理認証が必須で、データキーからは呼べません。`POST /api/session/logout` には現在の `gui-session`、一致する Origin、CSRF が必要です。管理トークンは 403 となり、同意セッションを作成できません。

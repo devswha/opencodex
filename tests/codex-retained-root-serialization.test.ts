@@ -17,6 +17,7 @@ import {
   resolveEffectiveUserIdentity,
 } from "../src/codex/user-identity";
 import { claimOwnedServiceHome, withOwnedServiceHomePreload } from "./helpers/owned-service-home";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const sandboxes: Sandbox[] = [];
@@ -95,7 +96,11 @@ function sandboxChildEnv(sandbox: Sandbox): Record<string, string> {
   return { ...sandbox.env, ...sandbox.serviceManagerEnv };
 }
 
-async function waitForPath(path: string, timeoutMs = 10_000): Promise<void> {
+// A `bun --eval` child on a loaded windows-latest shard takes 8-11 s just to boot and
+// reach its marker (runs 33590540220 and 33605898170), so a 10 s wait was the coin flip,
+// not the child. Every caller passes a deadline that sits inside its own test budget so
+// the helper's diagnostic, not Bun's timeout, is what reports a slow child.
+async function waitForPath(path: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`);
@@ -144,7 +149,7 @@ async function holdCatalogLock(sandbox: Sandbox): Promise<{
     stdout: "pipe",
     stderr: "pipe",
   });
-  await waitForPath(ready);
+  await waitForPath(ready, 12_000);
   return { release: () => writeFileSync(release, "release"), child };
 }
 
@@ -160,7 +165,7 @@ afterEach(() => {
   for (const sandbox of sandboxes.splice(0)) {
     const database = resolveCodexCatalogSerializationDatabasePath(identity, sandbox.codexHome);
     for (const suffix of ["", "-journal", "-wal", "-shm"]) rmSync(`${database}${suffix}`, { force: true });
-    rmSync(sandbox.root, { recursive: true, force: true });
+    removeTreeWithRetry(sandbox.root);
   }
 });
 
@@ -306,7 +311,7 @@ for (const publisher of ["convergence", "retained"] as const) {
       `], sandbox.preloadPath)], { cwd: repoRoot, env: sandboxChildEnv(sandbox), stdout: "pipe", stderr: "pipe" });
 
       await Promise.race([
-        waitForPath(requested),
+        waitForPath(requested, 16_000),
         sync.exited.then(async exitCode => {
           const stdout = await new Response(sync.stdout).text();
           const stderr = await new Response(sync.stderr).text();
@@ -389,7 +394,7 @@ test("a persisted runtime selection moved by another process during the await bl
   `], sandbox.preloadPath)], { cwd: repoRoot, env: sandboxChildEnv(sandbox), stdout: "pipe", stderr: "pipe" });
 
   await Promise.race([
-    waitForPath(requested),
+    waitForPath(requested, 16_000),
     sync.exited.then(async exitCode => {
       const stdout = await new Response(sync.stdout).text();
       const stderr = await new Response(sync.stderr).text();

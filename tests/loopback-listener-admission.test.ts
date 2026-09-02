@@ -169,6 +169,74 @@ describe("loopback listener configuration", () => {
   });
 });
 
+describe("hub management ingress configuration", () => {
+  const candidate = (overrides: Record<string, unknown> = {}) => ({
+    port: 10100,
+    runtimeRole: "hub",
+    hub: { managementIngress: { enabled: true, port: 10101 } },
+    providers: { openai: { adapter: "openai", baseUrl: "https://chatgpt.com/backend-api/codex" } },
+    defaultProvider: "openai",
+    ...overrides,
+  });
+
+  test("missing and disabled ingress preserve the no-listener default", () => {
+    const missing = validateConfigCandidate(candidate({ hub: {} }));
+    expect(missing.ok).toBe(true);
+    if (missing.ok) expect(missing.config.hub?.managementIngress).toBeUndefined();
+
+    const disabled = validateConfigCandidate(candidate({ hub: { managementIngress: { enabled: false } } }));
+    expect(disabled.ok).toBe(true);
+    if (disabled.ok) expect(disabled.config.hub?.managementIngress).toEqual({ enabled: false });
+  });
+
+  test("enabled ingress requires the hub role", () => {
+    // `client` carries a complete connection block so the ingress rule is what refuses it.
+    // Without one it is refused earlier, by the rule that a client role needs that block,
+    // and asserting the ingress wording would be asserting an ordering these two
+    // independent rules never promise.
+    for (const runtimeRole of [undefined, "standalone", "client"] as const) {
+      const result = validateConfigCandidate(candidate({
+        runtimeRole,
+        ...(runtimeRole === "client" ? {
+          client: {
+            serverUrl: "https://hub.example.test",
+            managementUrl: "https://hub.example.test",
+            managementTransport: "direct",
+            selectedClients: ["codex"],
+            tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
+            apiKeyId: "client-key-1",
+            tokenFingerprint: "a".repeat(64),
+            protocolVersion: 1,
+            connectedAt: "2026-08-28T00:00:00.000Z",
+          },
+        } : {}),
+      }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("requires runtimeRole hub");
+    }
+  });
+
+  test("enabled ingress rejects public and unauthenticated-loopback port collisions", () => {
+    const publicCollision = validateConfigCandidate(candidate({
+      hub: { managementIngress: { enabled: true, port: 10100 } },
+    }));
+    expect(publicCollision.ok).toBe(false);
+    if (!publicCollision.ok) expect(publicCollision.error).toContain("must differ from the proxy port");
+
+    const loopbackCollision = validateConfigCandidate(candidate({
+      unauthenticatedLoopbackListener: { enabled: true, port: 10101 },
+    }));
+    expect(loopbackCollision.ok).toBe(false);
+    if (!loopbackCollision.ok) expect(loopbackCollision.error).toContain("unauthenticatedLoopbackListener.port");
+  });
+
+  test("a valid hub ingress survives strict parsing", () => {
+    const result = validateConfigCandidate(candidate());
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.hub?.managementIngress).toEqual({ enabled: true, port: 10101 });
+  });
+});
+
 describe("injected Codex provider block", () => {
   test("a wildcard bind alone still emits the env auth header", () => {
     expect(shouldInjectApiAuthHeader({ hostname: "0.0.0.0" })).toBe(true);

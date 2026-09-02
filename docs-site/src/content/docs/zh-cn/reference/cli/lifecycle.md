@@ -123,7 +123,7 @@ ocx status --json
 
 通过无需认证的 `GET /readyz` 端点检查同步后的就绪状态。就绪时返回 `200`；状态为 `pending` 或
 终态 `failed` 时返回 `503`，并带有 `Retry-After: 1`。HTTP 仅返回经脱敏的身份字段
-`{service, version, uptime, pid, port, status}`。不支持 `/readyz` 的旧代理会按 `unreachable` 失败关闭；
+`{service, version, uptime, pid, port, status, protocol, minimumClientProtocol, managementUrl}`。`protocol` 是 Hub 当前的远程协议版本，`minimumClientProtocol` 是兼容的最低客户端协议版本，`managementUrl` 是浏览器可见的规范管理 origin。不支持 `/readyz` 的旧代理会按 `unreachable` 失败关闭；
 `/healthz` 是独立的存活检查，不是就绪检查。默认只探测一次；`--wait` 会轮询到就绪或超时，但遇到终态
 `failed` 会立即退出。默认超时为 45 秒；`--timeout <seconds>` 必须与 `--wait` 一起使用，取值范围为 1–300 秒的正整数。CLI JSON
 输出 `{ready, status, pid, port}`，其中 `status` 为 `ready`、`pending`、`failed` 或
@@ -233,3 +233,7 @@ ocx update --tag preview
 ```
 
 当 [Release workflow](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml) 将新版本发布到 npm 时，这些新版本就会变得可用。
+
+## Remote Hub 客户端生命周期
+
+使用 `ocx connect <url> --pairing-code-stdin`、`ocx connect status`、`ocx sync` 和 `ocx connect rotate --pairing-code-stdin`。`ocx disconnect` 可离线恢复本地状态，但不会吊销 hub 密钥。仍连接时，`ocx connect revoke --admin-token-stdin` 会吊销已保存的 `apiKeyId`；断开后请使用 hub 的 **Integrations → API Keys**。密钥只能通过 stdin 传递，不能放入 argv。

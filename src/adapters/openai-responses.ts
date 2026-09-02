@@ -467,7 +467,12 @@ function normalizeConfiguredReasoningSummaryDelivery(
  * namespace, tool_search, web_search, custom) plus extensions (defer_loading,
  * parallel_tool_calls, tool_search_call/output items). Spark's serving path only
  * supports flat function tools and hosted web_search. This function:
- * - Flattens namespace tools → promotes inner functions to top level
+ * - Flattens MCP-style namespace tools → promotes inner functions to top level. The reserved
+ *   `functions` group is kept as a group (#3217): Codex 0.147+ sends every ordinary client tool
+ *   inside it on Responses Lite, the backend accepts the group as-is, and flattening it changes
+ *   what the backend answers with — a `custom_tool_call` carrying `namespace: "exec"`, which
+ *   codex-rs concatenates into the unroutable `execexec`. Traced on a live proxy: with the
+ *   group intact the same backend returns the bare `exec` call and the turn completes.
  * - Drops unsupported tool types (tool_search, custom)
  * - Strips defer_loading from function tools
  * - Strips namespace from input items
@@ -482,12 +487,39 @@ function stripSparkCompatibility(body: unknown): unknown {
   let changed = false;
 
   const SPARK_SAFE_TOOL_TYPES = new Set(["function", "web_search", "web_search_preview"]);
+  // Inside the reserved group Codex sends freeform `custom` tools (code-mode `exec`) and the
+  // backend accepts them there; the top-level "drop custom" rule stays for flattened groups.
+  const SPARK_SAFE_FUNCTIONS_GROUP_CHILD_TYPES = new Set(["function", "custom"]);
+  const filterSparkFunctionsGroup = (group: Record<string, unknown>): Record<string, unknown> | undefined => {
+    if (!Array.isArray(group.tools)) return undefined;
+    let groupChanged = false;
+    const children: unknown[] = [];
+    for (const child of group.tools) {
+      if (!isPlainObject(child) || typeof child.type !== "string" || !SPARK_SAFE_FUNCTIONS_GROUP_CHILD_TYPES.has(child.type)) {
+        groupChanged = true;
+        continue;
+      }
+      if (child.type === "function" && "defer_loading" in child) {
+        const { defer_loading: _, ...rest } = child;
+        groupChanged = true;
+        children.push(rest);
+        continue;
+      }
+      children.push(child);
+    }
+    if (children.length === 0) return undefined;
+    return groupChanged ? { ...group, tools: children } : group;
+  };
 
   let tools = body.tools;
   if (Array.isArray(tools)) {
     const flattened: unknown[] = [];
     for (const t of tools) {
-      if (isPlainObject(t) && t.type === "namespace") {
+      if (isPlainObject(t) && t.type === "namespace" && t.name === SPARK_RESERVED_FUNCTIONS_NAMESPACE) {
+        const kept = filterSparkFunctionsGroup(t);
+        if (kept !== t) changed = true;
+        if (kept) flattened.push(kept);
+      } else if (isPlainObject(t) && t.type === "namespace") {
         changed = true;
         if (Array.isArray(t.tools)) {
           for (const inner of t.tools) flattened.push(inner);
@@ -527,7 +559,11 @@ function stripSparkCompatibility(body: unknown): unknown {
         const innerTools = item.tools as unknown[];
         const filteredInner: unknown[] = [];
         for (const t of innerTools) {
-          if (isPlainObject(t) && t.type === "namespace") {
+          if (isPlainObject(t) && t.type === "namespace" && t.name === SPARK_RESERVED_FUNCTIONS_NAMESPACE) {
+            const kept = filterSparkFunctionsGroup(t);
+            if (kept !== t) changed = true;
+            if (kept) filteredInner.push(kept);
+          } else if (isPlainObject(t) && t.type === "namespace") {
             changed = true;
             if (Array.isArray(t.tools)) {
               for (const fn of t.tools) filteredInner.push(fn);
@@ -573,6 +609,9 @@ function stripSparkCompatibility(body: unknown): unknown {
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
+
+/** Codex's reserved client-tool group on Responses Lite; carries no wire prefix. */
+const SPARK_RESERVED_FUNCTIONS_NAMESPACE = "functions";
 
 /**
  * Apply the routed provider's real effort ladder to an existing Responses reasoning field.
@@ -2286,6 +2325,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       let doneText = "";
       let snapshot = "";
       let usage: OcxUsage | undefined;
+      let compactionEncryptedContent: string | undefined;
       for await (const event of decodeServerSentEvents(response.body, { translatorBudget: budget })) {
         let payload: unknown;
         try { payload = JSON.parse(event.data); } catch { continue; }
@@ -2320,6 +2360,17 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
             return;
           case "response.completed":
             {
+              const responsePayload = isPlainObject(payload.response) ? payload.response : undefined;
+              const output = Array.isArray(responsePayload?.output) ? responsePayload.output : [];
+              const compaction = output.find(item => isPlainObject(item) && item.type === "compaction");
+              if (isPlainObject(compaction) && typeof compaction.encrypted_content === "string") {
+                const nextEncryptedContent = compaction.encrypted_content;
+                const previousBytes = budgetEncoder.encode(compactionEncryptedContent ?? "").byteLength;
+                const reservation = budget.reserveTransient(budgetEncoder.encode(nextEncryptedContent).byteLength, { kind: "retained_collectors" });
+                compactionEncryptedContent = nextEncryptedContent;
+                reservation.commitRetained();
+                budget.releaseRetained(previousBytes, { kind: "retained_collectors" });
+              }
               const next = responsesPayloadText(payload.response);
               const previousBytes = budgetEncoder.encode(snapshot).byteLength;
               const reservation = budget.reserveTransient(budgetEncoder.encode(next).byteLength, { kind: "retained_collectors" });
@@ -2336,7 +2387,11 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       const text = snapshot || doneText || deltas;
       if (text) yield { type: "text_delta", text };
       budget.releaseRetained(budgetEncoder.encode(deltas).byteLength + budgetEncoder.encode(doneText).byteLength + budgetEncoder.encode(snapshot).byteLength, { kind: "retained_collectors" });
-      yield { type: "done", ...(usage ? { usage } : {}) };
+      yield {
+        type: "done",
+        ...(usage ? { usage } : {}),
+        ...(compactionEncryptedContent ? { compactionEncryptedContent } : {}),
+      };
     },
 
     async parseResponse(response: Response, budget: TranslatorBudget): Promise<AdapterEvent[]> {
@@ -2354,14 +2409,23 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (payload.status === "incomplete") {
         return [{ type: "incomplete", reason: responsesErrorMessage(payload) }];
       }
+      const usage = usageFromResponsesPayload(payload);
+      const output = Array.isArray(payload.output) ? payload.output : [];
+      const compaction = output.find(item => isPlainObject(item) && item.type === "compaction");
+      const compactionEncryptedContent = isPlainObject(compaction) && typeof compaction.encrypted_content === "string"
+        ? compaction.encrypted_content
+        : undefined;
       const text = responsesPayloadText(payload);
-      if (!text) {
-        // A completed turn with no usable text cannot become a summary; saying so is
-        // better than installing an empty compaction as replacement history.
+      if (!text && !compactionEncryptedContent) {
+        // A completed turn with neither text nor a native compaction blob cannot become a
+        // replacement-history item. A ciphertext-only native completion is valid, though.
         return [{ type: "error", message: "upstream compaction returned no summary text" }];
       }
-      const usage = usageFromResponsesPayload(payload);
-      return [{ type: "text_delta", text }, { type: "done", ...(usage ? { usage } : {}) }];
+      return [...(text ? [{ type: "text_delta" as const, text }] : []), {
+        type: "done",
+        ...(usage ? { usage } : {}),
+        ...(compactionEncryptedContent ? { compactionEncryptedContent } : {}),
+      }];
     },
   };
 }

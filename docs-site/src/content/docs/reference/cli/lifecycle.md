@@ -161,11 +161,18 @@ command exits 0 only when healthy and 1 otherwise, making it suitable for servic
 
 Check post-sync readiness through the unauthenticated `GET /readyz` endpoint. It returns `200` when
 ready, or `503` with `Retry-After: 1` for `pending` and terminal `failed`. Its sanitized HTTP identity
-is `{service, version, uptime, pid, port, status}`. Old proxies without `/readyz` fail closed as
-`unreachable`; `/healthz` is separate liveness, not readiness. The command performs one probe by
+is `{service, version, uptime, pid, port, status}` plus the remote-hub protocol fields
+`{protocol, minimumClientProtocol, managementUrl}`. `protocol` is the hub protocol this proxy
+speaks and `minimumClientProtocol` the oldest client it still accepts, so a client can refuse an
+incompatible pairing before sending anything else. `managementUrl` is the origin a client should
+use for the management plane: the configured `hub.managementPublicOrigin` when `runtimeRole` is
+`hub`, and otherwise the origin the request itself arrived on. A readiness request with no
+HTTP(S) origin is rejected rather than answered with a guess. Old proxies without `/readyz` fail
+closed as `unreachable`; `/healthz` is separate liveness, not readiness. The command performs one probe by
 default; `--wait` polls until ready or timeout, but exits immediately when it observes the terminal `failed` state. The
 default timeout is 45 seconds; `--timeout <seconds>` requires `--wait` and accepts positive integer seconds from 1–300.
-CLI JSON emits `{ready, status, pid, port}`, where `status` is `ready`, `pending`, `failed`, or
+The CLI's own `--json` output is deliberately narrower than the HTTP body: it emits
+`{ready, status, pid, port}`, where `status` is `ready`, `pending`, `failed`, or
 `unreachable`. Exit codes are 0 for ready; 1 for not-ready, pending, failed, timeout, or
 unreachable; and 64 for invalid arguments.
 
@@ -411,6 +418,32 @@ Use `ocx service` for an always-on background proxy (recommended). Use `ocx code
 lightweight, on-demand startup without a daemon — the proxy starts only when `codex` is launched.
 :::
 
+#### Token injection without the shim
+
+On a non-loopback bind the injected provider carries `env_key = "OPENCODEX_API_AUTH_TOKEN"`. That
+line tells Codex which variable to read; it does not create it. Codex refuses to start a request
+when the variable is missing (`Missing environment variable: OPENCODEX_API_AUTH_TOKEN`), and the
+proxy is never reached. The value lives in `$OPENCODEX_HOME/service-api-token`; only a process that
+exports it into Codex's environment closes the gap.
+
+What does carry the token into a Codex process:
+
+- the shim installed by `ocx codex-shim install` (reads the token file at launch; the supported path
+  for Codex started from shells, Desktop, cron, or another service);
+- exporting `OPENCODEX_API_AUTH_TOKEN` yourself in the process that starts Codex — a shell profile,
+  the cron line, or an `Environment=`/`EnvironmentFile=` on the systemd unit that launches
+  **Codex** (not the proxy). Point it at the existing token file; do not copy the value into
+  `config.toml`.
+
+What does not: an `EnvironmentFile=` or `OCX_API_TOKEN_FILE` on `opencodex-proxy.service`. Those
+configure the proxy process only and never flow into an independently launched `codex exec`.
+
+A Codex upgrade that replaces the launcher removes the shim; the next ordinary `ocx` command restores
+it (see above), but a `codex exec` that runs before that fails. `ocx doctor` reports this exact
+state under "Codex env_key launch readiness" (env_key configured, variable unset, shim missing or
+unhealthy, token file present) with the repair command, and never prints the token. Reading the token
+file directly from Codex is not something Codex supports, so there is no OpenCodex directive for it.
+
 ### `ocx tray <install|start|stop|status|uninstall|remove> [--json] [--no-start]`
 
 Install and control the Windows status tray icon. It starts at Windows login and provides one-click
@@ -450,3 +483,7 @@ ocx update --tag preview
 
 New versions become available when the [Release workflow](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml)
 publishes them to npm.
+
+## Remote Hub client lifecycle
+
+Use `ocx connect <url> --pairing-code-stdin`, `ocx connect status`, `ocx sync`, and `ocx connect rotate --pairing-code-stdin`. `ocx disconnect` restores local state offline and does not revoke the hub key. While connected only, `ocx connect revoke --admin-token-stdin` revokes the persisted `apiKeyId`; after disconnect use the hub's **Integrations → API Keys** page. Secrets are stdin-only and never belong in argv.

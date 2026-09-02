@@ -1,86 +1,113 @@
 import { promptForAdminToken, type AdminTokenVerifier } from "./admin-token-dialog";
 import { createBoundedFetch } from "./bounded-fetch";
+import { standaloneApiTargets, type ApiPlane, type ApiTarget, type ApiTargets } from "./api-targets";
 
-let installed = false;
-/** Shared 401 refresh gate — concurrent waiters join one prompt / token resolution. */
-let resolutionInFlight: Promise<string | null> | null = null;
-/** Unwrapped fetch captured at install time — used for session re-bootstrap so the
- *  bootstrap document request itself never enters the 401 handling path. */
-let rawFetch: typeof fetch | null = null;
-/**
- * After the user cancels (or submits blank) once, suppress further prompts for this page
- * lifetime so a staggered 401 fan-out does not reopen the dialog N times (#647 / Codex).
- * A full reload clears module state and allows prompting again.
- */
-let promptCancelled = false;
+const LEGACY_TOKEN_KEY = "opencodex-api-token";
+const ADMIN_TOKEN_VALIDATION_PATH = "/api/settings";
+const SESSION_REBOOTSTRAP_TIMEOUT_MS = 10_000;
+const RESOLUTION_WATCHDOG_MS = 15_000;
+const MACHINE_SESSION_HEADER = "X-OpenCodex-Machine-Session";
+const MACHINE_GUI_ORIGIN_HEADER = "X-OpenCodex-Machine-GUI-Origin";
+const MACHINE_CSRF_HEADER = "X-OpenCodex-Machine-CSRF-Token";
+
+interface ApiSessionState {
+  token: string | null;
+  csrfToken: string | null;
+  browserOrigin: string | null;
+  serverOrigin: string | null;
+}
+
+interface TargetRuntime {
+  target: ApiTarget;
+  session: ApiSessionState;
+  resolutionInFlight: Promise<string | null> | null;
+  promptCancelled: boolean;
+}
 
 type AdminTokenPrompt = (verifyToken: AdminTokenVerifier) => Promise<string | null>;
+type RebootstrapResult = { kind: "minted"; token: string } | { kind: "unavailable" } | { kind: "failed" };
+
+let installed = false;
+let rawFetch: typeof fetch | null = null;
+let configuredTargets: ApiTargets | null = null;
 let requestAdminToken: AdminTokenPrompt = promptForAdminToken;
-
-/**
- * Document path re-fetched to mint a fresh loopback GUI session (server injects meta tags).
- * Deliberately NOT "/": the Vite dev server owns that route for the app shell, so the dev
- * proxy forwards this dedicated extensionless path to the backend with the original host.
- */
-const SESSION_REBOOTSTRAP_PATH = "/opencodex-session";
-/** Safe authenticated read used to validate a raw admin token before closing the sign-in form. */
-const ADMIN_TOKEN_VALIDATION_PATH = "/api/settings";
-
-/**
- * The silent re-bootstrap must fail fast: every /api/* request queues behind the
- * shared resolution, so an unbounded bootstrap hangs the whole dashboard (H2).
- */
-const SESSION_REBOOTSTRAP_TIMEOUT_MS = 10_000;
 let rebootstrapTimeoutMs = SESSION_REBOOTSTRAP_TIMEOUT_MS;
-
-/**
- * Whole-resolution watchdog. The bootstrap bound covers a well-behaved fetch; this
- * covers everything else — a fetch that never honors the abort, a prompt path that
- * pends without settling, any surprise inside the shared body. Without it one stuck
- * resolution pins every /api/* waiter for the page lifetime, which is the exact
- * failure this module exists to kill.
- *
- * Scope note: the watchdog races the BOOTSTRAP CALL ONLY, never the admin-token
- * prompt. The prompt is user-controlled and unbounded by design; while its body
- * pends, later waves join the same resolution, which is what keeps a single dialog
- * on screen (promptForAdminToken has no singleton guard — a watchdog that fired
- * during the prompt would stack a fresh modal every cycle).
- */
-const RESOLUTION_WATCHDOG_MS = 15_000;
 let resolutionWatchdogMs = RESOLUTION_WATCHDOG_MS;
+const runtimes = new Map<ApiPlane, TargetRuntime>();
 
-function needsApiAuth(input: RequestInfo | URL): boolean {
-  try {
-    const raw = input instanceof Request ? input.url : String(input);
-    const url = new URL(raw, window.location.href);
-    // Absolute cross-origin URLs must never get the local API token or 401 prompt.
-    if (url.origin !== window.location.origin) return false;
-    return url.pathname.startsWith("/api/");
-  } catch {
-    return false;
+function blankSession(): ApiSessionState {
+  return { token: null, csrfToken: null, browserOrigin: null, serverOrigin: null };
+}
+
+function ensureTargets(): ApiTargets {
+  if (!configuredTargets) configureApiTargets(standaloneApiTargets(""));
+  return configuredTargets!;
+}
+
+function sameTarget(left: ApiTarget, right: ApiTarget): boolean {
+  return left.baseUrl === right.baseUrl && left.serverOrigin === right.serverOrigin && left.transport === right.transport;
+}
+
+export function configureApiTargets(targets: ApiTargets): void {
+  configuredTargets = targets;
+  for (const plane of ["machine", "shared"] as const) {
+    const current = runtimes.get(plane);
+    runtimes.set(plane, current && sameTarget(current.target, targets[plane])
+      ? { ...current, target: targets[plane] }
+      : { target: targets[plane], session: blankSession(), resolutionInFlight: null, promptCancelled: false });
   }
 }
 
-/** Legacy sessionStorage key from pre-memory auth — wiped once on install, never read. */
-const LEGACY_TOKEN_KEY = "opencodex-api-token";
-
-/** In-memory only — never write tokens to web storage (XSS can read sessionStorage/localStorage). */
-let memoryToken: string | null = null;
-let memoryCsrfToken: string | null = null;
-let memorySessionOrigin: string | null = null;
-
-function readToken(): string | null {
-  return memoryToken;
+function runtime(plane: ApiPlane): TargetRuntime {
+  ensureTargets();
+  return runtimes.get(plane)!;
 }
 
-function storeToken(token: string): void {
-  memoryToken = token;
+function clearSessionIfCurrent(plane: ApiPlane, expected: string | null): void {
+  const state = runtime(plane);
+  if (expected !== null && state.session.token === expected) state.session = blankSession();
 }
 
-function clearToken(): void {
-  memoryToken = null;
-  memoryCsrfToken = null;
-  memorySessionOrigin = null;
+function storeSession(
+  plane: ApiPlane,
+  token: string | null,
+  csrfToken: string | null,
+  browserOrigin: string | null,
+  serverOrigin: string | null,
+): boolean {
+  const state = runtime(plane);
+  if (!token?.startsWith("ocx_session_") || !csrfToken
+    || browserOrigin !== window.location.origin || serverOrigin !== state.target.serverOrigin) {
+    state.session = blankSession();
+    return false;
+  }
+  state.session = { token, csrfToken, browserOrigin, serverOrigin };
+  state.promptCancelled = false;
+  return true;
+}
+
+export function hasApiSession(plane: ApiPlane): boolean {
+  return Boolean(runtime(plane).session.token?.startsWith("ocx_session_"));
+}
+
+export async function logoutApiSession(plane: ApiPlane): Promise<boolean> {
+  const state = runtime(plane);
+  if (!state.session.token?.startsWith("ocx_session_")) return false;
+  const bounded = createBoundedFetch(SESSION_REBOOTSTRAP_TIMEOUT_MS);
+  try {
+    const response = await window.fetch(`${state.target.baseUrl}/api/session/logout`, {
+      method: "POST",
+      signal: bounded.signal,
+    });
+    if (!response.ok) return false;
+    state.session = blankSession();
+    state.promptCancelled = false;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    bounded.clear();
+  }
 }
 
 function takeMetaContent(name: string): string | null {
@@ -91,173 +118,164 @@ function takeMetaContent(name: string): string | null {
 }
 
 function loadInjectedSession(): void {
-  const token = takeMetaContent("opencodex-session-token");
-  const csrfToken = takeMetaContent("opencodex-session-csrf");
-  const origin = takeMetaContent("opencodex-session-origin");
-  storeSession(token, csrfToken, origin);
+  const values = {
+    token: takeMetaContent("opencodex-session-token"),
+    csrf: takeMetaContent("opencodex-session-csrf"),
+    browser: takeMetaContent("opencodex-session-origin"),
+    server: takeMetaContent("opencodex-session-server-origin"),
+  };
+  for (const plane of ["machine", "shared"] as const) {
+    if (runtime(plane).target.serverOrigin === values.server) {
+      storeSession(plane, values.token, values.csrf, values.browser, values.server);
+    }
+  }
 }
 
-/** Clear memory only when it still holds `expected` (avoid wiping a newer concurrent store). */
-function clearTokenIfCurrent(expected: string | null): void {
-  if (expected != null && readToken() === expected) clearToken();
-}
-
-/** Validate and store a server-minted GUI session; rejects anything bound to another origin. */
-function storeSession(token: string | null, csrfToken: string | null, origin: string | null): boolean {
-  if (!token?.startsWith("ocx_session_") || !csrfToken || origin !== window.location.origin) return false;
-  memoryToken = token;
-  memoryCsrfToken = csrfToken;
-  memorySessionOrigin = origin;
-  return true;
-}
-
-/** Read one named meta tag out of a served HTML document (attribute order varies). */
 function metaContentFromHtml(html: string, name: string): string | null {
   for (const tag of html.match(/<meta\b[^>]*>/gi) ?? []) {
-    const nameMatch = tag.match(/\bname="([^"]+)"/i);
+    const nameMatch = tag.match(/\bname=["']([^"']+)["']/i);
     if (nameMatch?.[1] !== name) continue;
-    const contentMatch = tag.match(/\bcontent="([^"]*)"/i);
+    const contentMatch = tag.match(/\bcontent=["']([^"']*)["']/i);
     return contentMatch?.[1]?.trim() || null;
   }
   return null;
 }
 
-/**
- * Silently renew the GUI session from a freshly served document. Loopback servers mint
- * short-lived sessions into the HTML on every page load, so an expired session (5-minute
- * TTL) or one invalidated by a proxy restart is replaced without ever asking the user for
- * a token.
- *
- * Tri-state by design: only a definitive refusal ("unavailable": 4xx, or an OK
- * document without valid session meta — the non-loopback shape) may fall through to
- * the admin-token prompt. Anything transient — timeout, abort, network error, 5xx
- * from an intermediate proxy — is "failed", which settles this wave as an ordinary
- * request failure and lets the next poll retry. Mapping a transient failure to the
- * prompt would pop a credential modal on a loopback dashboard that needs no token.
- */
-type RebootstrapResult =
-  | { kind: "minted"; token: string }
-  | { kind: "unavailable" }
-  | { kind: "failed" };
-
-async function reBootstrapSessionToken(): Promise<RebootstrapResult> {
-  if (!rawFetch) return { kind: "failed" };
-  const bounded = createBoundedFetch(rebootstrapTimeoutMs);
-  try {
-    const response = await rawFetch(SESSION_REBOOTSTRAP_PATH, { cache: "no-store", signal: bounded.signal });
-    if (!response.ok) {
-      // Only a definitive refusal is "unavailable"; 5xx and everything else is transient.
-      return response.status >= 400 && response.status < 500 ? { kind: "unavailable" } : { kind: "failed" };
-    }
-    const html = await response.text();
-    const stored = storeSession(
-      metaContentFromHtml(html, "opencodex-session-token"),
-      metaContentFromHtml(html, "opencodex-session-csrf"),
-      metaContentFromHtml(html, "opencodex-session-origin"),
-    );
-    const token = readToken();
-    if (stored && token) return { kind: "minted", token };
-    return { kind: "unavailable" };
-  } catch {
-    return { kind: "failed" };
-  } finally {
-    bounded.clear();
-  }
-}
-
-async function verifyAdminToken(token: string): ReturnType<AdminTokenVerifier> {
-  if (!rawFetch) return "unavailable";
-  try {
-    const [input, init] = withToken(ADMIN_TOKEN_VALIDATION_PATH, { cache: "no-store" }, token);
-    const response = await rawFetch(input, init);
-    if (response.status === 401) return "rejected";
-    return response.ok ? "accepted" : "unavailable";
-  } catch {
-    return "unavailable";
-  }
+export function installApiSessionFromHtml(plane: ApiPlane, html: string): boolean {
+  return storeSession(
+    plane,
+    metaContentFromHtml(html, "opencodex-session-token"),
+    metaContentFromHtml(html, "opencodex-session-csrf"),
+    metaContentFromHtml(html, "opencodex-session-origin"),
+    metaContentFromHtml(html, "opencodex-session-server-origin"),
+  );
 }
 
 function clearLegacySessionToken(): void {
-  try {
-    sessionStorage.removeItem(LEGACY_TOKEN_KEY);
-  } catch {
-    /* session storage may be disabled */
-  }
+  try { sessionStorage.removeItem(LEGACY_TOKEN_KEY); } catch { /* storage may be disabled */ }
 }
 
-function withToken(input: RequestInfo | URL, init: RequestInit | undefined, token: string): [RequestInfo | URL, RequestInit | undefined] {
+function targetAbsoluteBase(target: ApiTarget): URL {
+  return new URL(target.baseUrl || "/", window.location.href);
+}
+
+function targetMatchesUrl(target: ApiTarget, url: URL): boolean {
+  const base = targetAbsoluteBase(target);
+  if (url.origin !== base.origin) return false;
+  const prefix = base.pathname.replace(/\/$/, "");
+  return prefix === "" || url.pathname === prefix || url.pathname.startsWith(`${prefix}/`);
+}
+
+function relativeTargetPath(target: ApiTarget, url: URL): string | null {
+  if (!targetMatchesUrl(target, url)) return null;
+  const base = targetAbsoluteBase(target).pathname.replace(/\/$/, "");
+  return url.pathname.slice(base.length) || "/";
+}
+
+function classify(input: RequestInfo | URL): { plane: ApiPlane; bootstrap: boolean } | null {
+  let url: URL;
+  try {
+    url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
+  } catch { return null; }
+  const targets = ensureTargets();
+  if (url.href === new URL(targets.shared.bootstrapPath, window.location.href).href) return { plane: "shared", bootstrap: true };
+  if (targets.shared.transport === "relay" && targetMatchesUrl(targets.shared, url)) return { plane: "shared", bootstrap: false };
+  const machinePath = relativeTargetPath(targets.machine, url);
+  if (machinePath?.startsWith("/api/machine/")) return { plane: "machine", bootstrap: false };
+  const sharedPath = relativeTargetPath(targets.shared, url);
+  if (sharedPath?.startsWith("/api/")) return { plane: "shared", bootstrap: false };
+  if (url.href === new URL(targets.machine.bootstrapPath, window.location.href).href) return { plane: "machine", bootstrap: true };
+  return null;
+}
+
+function sessionHeaders(plane: ApiPlane, input: RequestInfo | URL, init?: RequestInit, overrideToken?: string | null): Headers {
+  const state = runtime(plane);
   const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-  headers.set("X-OpenCodex-API-Key", token);
-  if (memorySessionOrigin && memoryCsrfToken && token.startsWith("ocx_session_")) {
-    headers.set("X-OpenCodex-GUI-Origin", memorySessionOrigin);
-    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
-    if (method !== "GET" && method !== "HEAD") {
-      headers.set("X-OpenCodex-CSRF-Token", memoryCsrfToken);
-    }
+  const token = overrideToken === undefined ? state.session.token : overrideToken;
+  const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  if (token) headers.set("X-OpenCodex-API-Key", token);
+  if (token?.startsWith("ocx_session_") && state.session.browserOrigin && state.session.csrfToken) {
+    headers.set("X-OpenCodex-GUI-Origin", state.session.browserOrigin);
+    if (method !== "GET" && method !== "HEAD") headers.set("X-OpenCodex-CSRF-Token", state.session.csrfToken);
   }
+  if (plane === "shared" && state.target.transport === "relay") {
+    const machine = runtime("machine").session;
+    if (machine.token) headers.set(MACHINE_SESSION_HEADER, machine.token);
+    if (machine.browserOrigin) headers.set(MACHINE_GUI_ORIGIN_HEADER, machine.browserOrigin);
+    if (method !== "GET" && method !== "HEAD" && machine.csrfToken) headers.set(MACHINE_CSRF_HEADER, machine.csrfToken);
+  }
+  return headers;
+}
+
+function withAuth(
+  plane: ApiPlane,
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  overrideToken?: string | null,
+): [RequestInfo | URL, RequestInit | undefined] {
+  const headers = sessionHeaders(plane, input, init, overrideToken);
   if (input instanceof Request) return [new Request(input, { headers }), init ? { ...init, headers } : undefined];
   return [input, { ...init, headers }];
 }
 
-/**
- * Resolve a token after a 401. Concurrent callers share one in-flight resolution so a dashboard
- * fan-out opens at most one credential dialog per /api request wave (#647). Re-reads
- * memoryToken before prompting so waiters that wake after another request already stored a token
- * do not re-prompt.
- */
-async function resolveTokenAfter401(failedToken: string | null, callerSignal?: AbortSignal): Promise<string | null> {
-  if (promptCancelled) return null;
-  if (callerSignal?.aborted) return null;
-  if (!resolutionInFlight) {
-    const body = (async () => {
-      if (promptCancelled) return null;
-      const current = readToken();
-      if (current && current !== failedToken) return current;
+async function reBootstrapSessionToken(plane: ApiPlane): Promise<RebootstrapResult> {
+  if (!rawFetch) return { kind: "failed" };
+  const state = runtime(plane);
+  const bounded = createBoundedFetch(rebootstrapTimeoutMs);
+  try {
+    const [input, init] = withAuth(plane, state.target.bootstrapPath, { cache: "no-store", signal: bounded.signal }, null);
+    const response = await rawFetch(input, init);
+    if (!response.ok) return response.status >= 400 && response.status < 500 ? { kind: "unavailable" } : { kind: "failed" };
+    const html = await response.text();
+    if (!installApiSessionFromHtml(plane, html)) return { kind: "unavailable" };
+    return { kind: "minted", token: runtime(plane).session.token! };
+  } catch { return { kind: "failed" }; }
+  finally { bounded.clear(); }
+}
 
-      // The watchdog races the bootstrap call only — never the prompt below. When
-      // it wins, the wave fails and the conditional clear lets the NEXT 401 start
-      // a fresh resolution instead of joining the zombie.
+async function verifyAdminToken(plane: ApiPlane, token: string): ReturnType<AdminTokenVerifier> {
+  if (!rawFetch) return "unavailable";
+  try {
+    const state = runtime(plane);
+    const [input, init] = withAuth(plane, `${state.target.baseUrl}${ADMIN_TOKEN_VALIDATION_PATH}`, { cache: "no-store" }, token);
+    const response = await rawFetch(input, init);
+    if (response.status === 401) return "rejected";
+    return response.ok ? "accepted" : "unavailable";
+  } catch { return "unavailable"; }
+}
+
+async function resolveTokenAfter401(plane: ApiPlane, failedToken: string | null, callerSignal?: AbortSignal): Promise<string | null> {
+  const state = runtime(plane);
+  if (state.promptCancelled || callerSignal?.aborted) return null;
+  if (!state.resolutionInFlight) {
+    const body = (async () => {
+      const current = state.session.token;
+      if (current && current !== failedToken) return current;
       let watchdog: ReturnType<typeof setTimeout> | undefined;
       const renewed = await Promise.race([
-        reBootstrapSessionToken(),
-        new Promise<RebootstrapResult>((resolve) => {
-          watchdog = setTimeout(() => resolve({ kind: "failed" }), resolutionWatchdogMs);
-        }),
+        reBootstrapSessionToken(plane),
+        new Promise<RebootstrapResult>(resolve => { watchdog = setTimeout(() => resolve({ kind: "failed" }), resolutionWatchdogMs); }),
       ]).finally(() => clearTimeout(watchdog));
       if (renewed.kind === "minted") return renewed.token;
-      // Transient bootstrap failure: this wave fails and the next 401 re-arms a
-      // fresh resolution (the finally clears resolutionInFlight). No prompt.
       if (renewed.kind === "failed") return null;
-
-      // User-controlled and unbounded: later waves join this pending body, which
-      // is what keeps exactly one prompt dialog on screen.
-      const prompted = await requestAdminToken(verifyAdminToken);
+      const prompted = await requestAdminToken(token => verifyAdminToken(plane, token));
       if (prompted) {
-        storeToken(prompted);
+        state.session = { token: prompted, csrfToken: null, browserOrigin: null, serverOrigin: state.target.serverOrigin };
         return prompted;
       }
-      promptCancelled = true;
+      state.promptCancelled = true;
       return null;
     })();
-    const tracked = body.finally(() => {
-      // Only clear if nobody replaced us — a late settle must not wipe a newer
-      // in-flight resolution. (Async callback: tracked is assigned long before
-      // this can run.)
-      if (resolutionInFlight === tracked) resolutionInFlight = null;
-    });
-    resolutionInFlight = tracked;
+    const tracked = body.finally(() => { if (state.resolutionInFlight === tracked) state.resolutionInFlight = null; });
+    state.resolutionInFlight = tracked;
   }
-
-  if (!callerSignal) return resolutionInFlight;
-  // Per-caller race: an abort unwinds THIS caller only — a dead caller must not
-  // cancel the shared resolution other waiters still need. The listener is removed
-  // whether the race resolves by token or by abort, so waiters never accumulate.
+  if (!callerSignal) return state.resolutionInFlight;
   let onAbort: (() => void) | undefined;
-  const aborted = new Promise<null>((resolve) => {
+  const aborted = new Promise<null>(resolve => {
     onAbort = () => resolve(null);
     callerSignal.addEventListener("abort", onAbort, { once: true });
   });
-  return Promise.race([resolutionInFlight, aborted]).finally(() => {
+  return Promise.race([state.resolutionInFlight, aborted]).finally(() => {
     if (onAbort) callerSignal.removeEventListener("abort", onAbort);
   });
 }
@@ -265,61 +283,45 @@ async function resolveTokenAfter401(failedToken: string | null, callerSignal?: A
 export function installApiAuthFetch(): void {
   if (installed) return;
   installed = true;
-  // Drop any leftover XSS-readable token; new tokens stay memory-only (no read/migrate).
   clearLegacySessionToken();
+  ensureTargets();
   loadInjectedSession();
   const originalFetch = window.fetch.bind(window);
   rawFetch = originalFetch;
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (!needsApiAuth(input)) return originalFetch(input, init);
-
-    const callerSignal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
-    const token = readToken();
-    const [firstInput, firstInit] = token ? withToken(input, init, token) : [input, init];
+    const classified = classify(input);
+    if (!classified) return originalFetch(input, init);
+    const state = runtime(classified.plane);
+    const token = state.session.token;
+    const [firstInput, firstInit] = withAuth(classified.plane, input, init);
     const response = await originalFetch(firstInput, firstInit);
-    if (response.status !== 401) return response;
-
-    // Another request may have stored a token while this one was in flight (or while prompt blocked).
-    const refreshed = readToken();
+    if (classified.bootstrap || response.status !== 401) return response;
+    const refreshed = state.session.token;
     if (refreshed && refreshed !== token) {
-      const [retryInput, retryInit] = withToken(input, init, refreshed);
+      const [retryInput, retryInit] = withAuth(classified.plane, input, init);
       const retry = await originalFetch(retryInput, retryInit);
       if (retry.status !== 401) return retry;
-      clearTokenIfCurrent(refreshed);
-    } else {
-      clearTokenIfCurrent(token);
-    }
-
-    const nextToken = await resolveTokenAfter401(token, callerSignal ?? undefined);
+      clearSessionIfCurrent(classified.plane, refreshed);
+    } else clearSessionIfCurrent(classified.plane, token);
+    const callerSignal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    const nextToken = await resolveTokenAfter401(classified.plane, token, callerSignal ?? undefined);
     if (!nextToken) return response;
-
-    const [retryInput, retryInit] = withToken(input, init, nextToken);
+    const [retryInput, retryInit] = withAuth(classified.plane, input, init, nextToken);
     const retry = await originalFetch(retryInput, retryInit);
-    if (retry.status === 401) clearTokenIfCurrent(nextToken);
+    if (retry.status === 401) clearSessionIfCurrent(classified.plane, nextToken);
     return retry;
   };
 }
 
-/** Test-only: allow a fresh `installApiAuthFetch()` in the same module instance. */
 export function resetApiAuthFetchForTests(adminTokenPrompt: AdminTokenPrompt = promptForAdminToken): void {
   installed = false;
-  memoryToken = null;
-  memoryCsrfToken = null;
-  memorySessionOrigin = null;
-  resolutionInFlight = null;
   rawFetch = null;
-  promptCancelled = false;
+  configuredTargets = null;
+  runtimes.clear();
   requestAdminToken = adminTokenPrompt;
   rebootstrapTimeoutMs = SESSION_REBOOTSTRAP_TIMEOUT_MS;
   resolutionWatchdogMs = RESOLUTION_WATCHDOG_MS;
 }
 
-/** Test-only: shrink the re-bootstrap deadline so timeout paths run in milliseconds. */
-export function setRebootstrapTimeoutForTests(ms: number): void {
-  rebootstrapTimeoutMs = ms;
-}
-
-/** Test-only: shrink the whole-resolution watchdog so zombie paths run in milliseconds. */
-export function setResolutionWatchdogForTests(ms: number): void {
-  resolutionWatchdogMs = ms;
-}
+export function setRebootstrapTimeoutForTests(ms: number): void { rebootstrapTimeoutMs = ms; }
+export function setResolutionWatchdogForTests(ms: number): void { resolutionWatchdogMs = ms; }

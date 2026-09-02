@@ -7,6 +7,10 @@ import {
   backfillResponsesFieldsJson,
 } from "./responses-field-backfill";
 import { checkInputAdmission } from "./input-admission";
+import {
+  checkOutboundBodySize,
+  describeOutboundBodyRefusal,
+} from "./outbound-body-guard";
 import { nativeContextLimits } from "../../codex/catalog";
 import { describeUpstreamConnectFailure } from "./upstream-error";
 import {
@@ -54,6 +58,7 @@ import {
 import {
   comboRouteDecisionTrace,
   NoEligiblePolicyCandidateError,
+  routeCompactionModel,
   routeConcreteModel,
   routeModel,
   type RouteResult,
@@ -241,6 +246,10 @@ import {
 } from "../lifecycle";
 import { redactSecretString, sanitizeLogMetadataString } from "../../lib/redact";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
+import {
+  isRateLimitOrQuotaFailureMessage,
+  upstreamErrorMessageFromPayload,
+} from "../../lib/errors";
 import type { AdmissionLease } from "../../lib/admission";
 import { supportedLadderFor } from "../effort-policy";
 import { isThreadSpawnRequest } from "../effort-policy";
@@ -317,6 +326,11 @@ import {
   restoreImageGenCallsInJson,
 } from "../responses-image-gen-repair";
 import { createResponsesModelPayloadRewrite, rewriteResponsesModelJson } from "../responses-model-rewrite";
+import {
+  collectSelfNamedNamespaceScrubAuthorization,
+  createSelfNamedToolCallNamespaceScrubRewrite,
+  scrubSelfNamedToolCallNamespaceInJson,
+} from "../responses-self-named-namespace-scrub";
 import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/catalog";
 
 import { buildToolBridgeMaps, collabSurface, injectDeveloperMessage, multiAgentGuidanceText } from "./collaboration";
@@ -370,6 +384,7 @@ import {
 } from "../responses-undeclared-tool-guard";
 import { createGithubCopilotResponsesBlockRewrite } from "../github-copilot-responses-repair";
 import { responsesJsonToSseStream } from "../responses-json-events";
+import { streamingContextOverflowResponse } from "./context-overflow";
 import { guardTerminalEventStream } from "./terminal-guard";
 import {
   emptyCompletionRetryEnabled,
@@ -904,8 +919,40 @@ async function shouldRetryCodexPoolAccountModel400(
 }
 
 /** Pre-stream quota/billing rejections that warrant one alternate-account attempt (#584). */
-export function shouldRetryCodexPoolAccountQuota(response: Response): boolean {
-  return response.status === 402 || response.status === 429;
+function codexQuotaFailureMessage(body: string): string | undefined {
+  try {
+    const payload = JSON.parse(body) as unknown;
+    const canonical = upstreamErrorMessageFromPayload(payload);
+    if (canonical !== undefined) return canonical;
+    if (typeof payload === "string") return payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+    const record = payload as Record<string, unknown>;
+    if (typeof record.message === "string") return record.message;
+    return typeof record.error === "string" ? record.error : undefined;
+  } catch {
+    // Plain-text gateways remain supported. Valid JSON is inspected only at recognized
+    // message fields so echoed request content elsewhere cannot trigger account cooldown.
+    return body;
+  }
+}
+
+export async function shouldRetryCodexPoolAccountQuota(
+  response: Response,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (response.status === 402 || response.status === 429) return true;
+  if (response.status < 500 || response.status >= 600) return false;
+  try {
+    // Reject malformed UTF-8 instead of matching quota words around replacement characters.
+    const body = await readBoundedResponseBody(response.clone(), { signal, fatalUtf8: true });
+    const message = body.displaySafe && !body.truncated
+      ? codexQuotaFailureMessage(body.text)
+      : undefined;
+    return message !== undefined
+      && isRateLimitOrQuotaFailureMessage(message);
+  } catch {
+    return false;
+  }
 }
 
 interface CodexPoolAccountRetryArgs {
@@ -945,7 +992,7 @@ interface CodexPoolAccountRetryArgs {
   stream: boolean;
   onResponse?: (
     response: Response,
-    authCtx: Extract<CodexAuthContext, { kind: "pool" | "main-pool" }>,
+    authCtx: CodexAuthContext,
     request: Awaited<ReturnType<ReturnType<typeof resolveAdapter>["buildRequest"]>>,
   ) => void;
 }
@@ -953,7 +1000,7 @@ interface CodexPoolAccountRetryArgs {
 type CodexPoolAccountRetryResult =
   | {
     kind: "retried";
-    authCtx: Extract<CodexAuthContext, { kind: "pool" | "main-pool" }>;
+    authCtx: CodexAuthContext;
     request: Awaited<ReturnType<ReturnType<typeof resolveAdapter>["buildRequest"]>>;
     upstreamResponse: Response;
     selectedForwardHeaders: Headers;
@@ -962,7 +1009,7 @@ type CodexPoolAccountRetryResult =
   | {
     kind: "transport";
     error: unknown;
-    authCtx: Extract<CodexAuthContext, { kind: "pool" | "main-pool" }>;
+    authCtx: CodexAuthContext;
   };
 
 /** Keep retry-stage entitlement snapshots inside the native-main selection fence. */
@@ -1129,7 +1176,27 @@ async function retryCodexPoolOnAlternateAccount(
       throw error;
     }
   }
-  if (retryAuthCtx?.kind !== "pool" && retryAuthCtx?.kind !== "main-pool") {
+  // A validated request-owned main bearer is a real alternate when the failed credential was a
+  // stored Pool account. It has no Pool account id to promote or cool, but it can own this one
+  // bounded replay. The resolver already refuses it when main itself is the excluded credential.
+  if (
+    retryAuthCtx?.kind !== "pool"
+    && retryAuthCtx?.kind !== "main-pool"
+    && retryAuthCtx?.kind !== "main"
+  ) {
+    // A body-confirmed quota response may arrive under HTTP 5xx. Without an alternate,
+    // the ordinary terminal recorder sees only that wire status and would misclassify it
+    // as transient, leaving the exhausted account immediately selectable next turn.
+    if (outcomeStatus !== firstResponse.status && (outcomeStatus === 429 || outcomeStatus === 402)) {
+      recordCodexUpstreamOutcome(config, firstAuthCtx.accountId, outcomeStatus, {
+        ...codexQuotaOutcomeMeta(firstResponse),
+        threadId: firstAuthCtx.affinityKey,
+        modelId: route.modelId,
+        probeLeaseId: codexProbeLeaseId(firstAuthCtx),
+        probeQuotaScope: codexProbeQuotaScope(firstAuthCtx),
+        writerGeneration: firstAuthCtx.writerGeneration,
+      });
+    }
     return { kind: "no-alternate" };
   }
 
@@ -1243,6 +1310,9 @@ async function retryCodexPoolOnAlternateAccount(
       retrySendCount += 1;
       args.onResponse?.(upstreamResponse, retryAuthCtx, request);
       if (!retrySameConfirmedAccount || retrySendCount >= maxRetrySends) break;
+      // Caller-owned main is an alternate-account replay and can never enter the bounded
+      // same-stored-account 400 loop above. Keep that invariant explicit for the account-id reads.
+      if (retryAuthCtx.kind === "main") break;
       if (!await shouldRetryCodexPoolAccountModel400(
         upstreamResponse,
         route.modelId,
@@ -1757,6 +1827,9 @@ async function resolveResponsesCodexAuth(
       substituteMainCredential,
     };
   } catch (err) {
+    if (options.abortSignal?.aborted || req.signal.aborted) {
+      return { ok: false, response: clientCancelledResponse() };
+    }
     if (err instanceof CodexAuthContextError) {
       const safeAccountLabel = route.codexAccountNamespace
         ? `${route.providerName}-${route.codexAccountNamespace}`
@@ -1902,6 +1975,9 @@ async function refreshNativeMainForwardAuth(args: {
     });
     return { ok: true, authCtx: refreshedAuthCtx, provider, headers };
   } catch (error) {
+    if (options.abortSignal?.aborted || req.signal.aborted) {
+      return { ok: false, response: clientCancelledResponse() };
+    }
     return { ok: false, response: nativeMainRefreshFailureResponse(error) };
   }
 }
@@ -2102,7 +2178,7 @@ export async function handleComboResponses(
   comboId: string,
   config: OcxConfig,
   logCtx: RequestLogContext,
-  options: HandleResponsesOptions,
+  options: HandleResponsesOptions & { translatorBudget: TranslatorBudget },
 ): Promise<Response> {
   const requestedModel = typeof (rawBody as { model?: unknown } | null)?.model === "string"
     ? (rawBody as { model: string }).model
@@ -2451,6 +2527,12 @@ export async function handleComboResponses(
       code: failure.upstreamCode,
     }) === "stop") {
       adoptFailedChildLog(childLog);
+      if (
+        failure.response.status === 413
+        && (rawBody as { stream?: unknown } | null)?.stream === true
+      ) {
+        return streamingContextOverflowResponse(requestedModel, options.translatorBudget);
+      }
       return lastFailure;
     }
     console.warn(
@@ -2463,6 +2545,12 @@ export async function handleComboResponses(
     });
     if (!nextPick) adoptFailedChildLog(childLog);
     pick = nextPick;
+  }
+  if (
+    lastFailure?.status === 413
+    && (rawBody as { stream?: unknown } | null)?.stream === true
+  ) {
+    return streamingContextOverflowResponse(requestedModel, options.translatorBudget);
   }
   return lastFailure!;
 }
@@ -2750,9 +2838,15 @@ async function handleResponsesInner(
 
   let route: RouteResult;
   try {
+    // A `compaction_trigger` turn may name a bare native model the operator has
+    // no canonical OpenAI route for (#2901). Only the initial compaction route
+    // may fall back to the configured default provider; combo attempts and the
+    // later fallback/recovery re-routes keep the ordinary reservation.
     const resolveRoute = (modelId: string) => options.comboAttempt
       ? routeConcreteModel(config, modelId)
-      : routeModel(config, modelId, evidenceFromBody(parsed._rawBody));
+      : parsed._compactionRequest === true
+        ? routeCompactionModel(config, modelId, evidenceFromBody(parsed._rawBody))
+        : routeModel(config, modelId, evidenceFromBody(parsed._rawBody));
     const _sci = config.shadowCallIntercept;
     let shadowRoute: RouteResult | undefined;
     if (_sci?.enabled && _sci.model && isShadowSourceModel(parsed.modelId, _sci.sourceModels)) {
@@ -3097,6 +3191,12 @@ async function handleResponsesInner(
       // instead of treating the first incompatible candidate as the end of the chain. The
       // distinct code is what lets the fallback layer tell the two apart -- an upstream
       // `context_length_exceeded` still stops, because retrying it elsewhere is guesswork.
+      if (clientRequestedStream && !options.comboAttempt) {
+        return streamingContextOverflowResponse(
+          parsed._responseModelId ?? parsed.modelId,
+          translatorBudget,
+        );
+      }
       return formatErrorResponse(
         413,
         "input_admission_refused",
@@ -3562,6 +3662,11 @@ async function handleResponsesInner(
       parsed._rawBody,
       replayedInputPrefixLength,
     );
+    const selfNamedNamespaceScrubAuthorization = collectSelfNamedNamespaceScrubAuthorization(
+      clientToolAuthorizationBody,
+      toolBridgeMaps.bareCustomToolNames,
+      toolBridgeMaps.bareFunctionToolNames,
+    );
     const clientExplicitWireToolCatalog = hasExplicitWireToolCatalog(clientToolAuthorizationBody);
     const clientDeclaredWireToolNames = collectDeclaredWireToolNames(clientToolAuthorizationBody);
     const clientDeclaredNamelessCallTypes = collectDeclaredNamelessClientCallTypes(
@@ -3819,6 +3924,48 @@ async function handleResponsesInner(
     linkAbortSignal(upstream, options.abortSignal);
     const connectMs = config.connectTimeoutMs ?? 200_000;
     let upstreamResponse: Response;
+    /**
+     * Refuse a built body that exceeds the operator's configured ceiling, before it is sent.
+     *
+     * Unconfigured this measures nothing and returns undefined, so an unset proxy behaves
+     * exactly as it does today. Runs at every point a body is built or rebuilt, because a
+     * rebuild can produce a payload the initial check never saw.
+     */
+    const refuseOversizedOutboundBody = (
+      builtRequest: AdapterRequest,
+      refusalAuthCtx: CodexAuthContext = authCtx,
+    ): Response | undefined => {
+      const result = checkOutboundBodySize(builtRequest.body, config.maxUpstreamBodyBytes);
+      if (result.admitted) return undefined;
+
+      // This returns before the surrounding fetch/finally owns the observation, so release
+      // it here or one refused body holds translator budget for the process lifetime.
+      builtRequest.releaseBodyObservation?.();
+      upstream.abort();
+      releaseUpstreamHostAdmission(hostAdmissionLease);
+      hostAdmissionLease = null;
+      releaseCodexAuthContextProbeLease(refusalAuthCtx);
+      logCtx.errorCode = "outbound_body_too_large";
+      console.warn(
+        `[responses] refused an oversized outbound body: bytes=${result.bytes} limit=${result.limit} `
+        + `input_images=${result.imageCount} image_bytes=${result.imageBytes} `
+        + `model=${JSON.stringify(parsed.modelId)}`,
+      );
+      // A streaming client treats HTTP 413 as a retryable transport error and resends the same
+      // oversized body — the reconnect loop #3177 exists to stop. Terminal overflow is the
+      // honest shape, and it is what the upstream-413 path already returns.
+      if (clientRequestedStream) {
+        return streamingContextOverflowResponse(
+          parsed._responseModelId ?? parsed.modelId,
+          translatorBudget,
+        );
+      }
+      return formatErrorResponse(
+        413,
+        "outbound_body_too_large",
+        describeOutboundBodyRefusal(result),
+      );
+    };
     const transportFailureResponse = (err: unknown): Response => {
       upstream.abort();
       if (options.abortSignal?.aborted) {
@@ -3861,6 +4008,8 @@ async function handleResponsesInner(
         : describeUpstreamConnectFailure(err, connectMs);
       return formatErrorResponse(502, "upstream_error", msg);
     };
+    const initialBodyRefusal = refuseOversizedOutboundBody(request);
+    if (initialBodyRefusal) return initialBodyRefusal;
     try {
       // Transient-5xx pre-stream retry (devlog/_plan/260716_claudecode_hardening/010):
       // the ChatGPT backend emits transient 502/520s that an immediate retry absorbs.
@@ -3935,6 +4084,8 @@ async function handleResponsesInner(
         retryAdapter.name,
         logCtx.accountLogLabel,
       );
+      const rebuiltBodyRefusal = refuseOversizedOutboundBody(request);
+      if (rebuiltBodyRefusal) return { failed: rebuiltBodyRefusal };
       try {
         return await fetchWithTransientRetry(
           innerRecovery => {
@@ -4027,6 +4178,10 @@ async function handleResponsesInner(
         recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
         refreshUndeclaredToolGuard(request);
+        // The 401 replay rebuilds the body before sending, so it needs the same ceiling as
+        // every other build site; a replay is exactly when a grown payload reappears.
+        const replayBodyRefusal = refuseOversizedOutboundBody(request);
+        if (replayBodyRefusal) return replayBodyRefusal;
         noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, "oauth-401");
         upstreamResponse = await fetchWithHeaderTimeout(
           request.url,
@@ -4136,6 +4291,8 @@ async function handleResponsesInner(
         return formatErrorResponse(400, "invalid_request_error", redactSecretString(msg));
       }
       refreshUndeclaredToolGuard(request);
+      const refreshedBodyRefusal = refuseOversizedOutboundBody(request);
+      if (refreshedBodyRefusal) return refreshedBodyRefusal;
       try {
         upstreamResponse = await fetchWithTransientRetry(
           recovery => {
@@ -4255,9 +4412,14 @@ async function handleResponsesInner(
         options.abortSignal,
       )) {
         poolRetryOutcome = 400;
-      } else if (!authCtx.fixedAccount && shouldRetryCodexPoolAccountQuota(upstreamResponse)) {
+      } else if (!authCtx.fixedAccount && await shouldRetryCodexPoolAccountQuota(
+        upstreamResponse,
+        options.abortSignal,
+      )) {
         // Pre-stream only: once SSE has begun, mid-stream quota stays terminal.
-        poolRetryOutcome = upstreamResponse.status;
+        // ChatGPT sometimes wraps quota exhaustion in a generic 5xx. Normalize only
+        // body-confirmed cases to quota evidence so cooldown and rotation both apply.
+        poolRetryOutcome = upstreamResponse.status >= 500 ? 429 : upstreamResponse.status;
       }
 
       if (poolRetryOutcome !== undefined) {
@@ -4285,7 +4447,12 @@ async function handleResponsesInner(
           passthroughEstimate,
           stream: parsed.stream,
           onResponse: (response, retryAuthCtx, retryRequest) => {
-            captureAffinityResponse(response, retryAuthCtx, retryRequest, true);
+            captureAffinityResponse(
+              response,
+              retryAuthCtx,
+              retryRequest,
+              retryAuthCtx.kind !== "main",
+            );
           },
         });
         if (retry.kind === "transport") {
@@ -4432,6 +4599,12 @@ async function handleResponsesInner(
       // The bounded reader owns the original body, deadline, abort settlement, and lock.
       // Unsafe partial data falls back to #452's non-empty status-only JSON.
       const errorText = await readDisplaySafeErrorText(upstreamResponse, upstream.signal, "");
+      if (upstreamResponse.status === 413 && clientRequestedStream) {
+        return streamingContextOverflowResponse(
+          parsed._responseModelId ?? parsed.modelId,
+          translatorBudget,
+        );
+      }
       return formatPassthroughUpstreamError(upstreamResponse.status, errorText, {
         statusText: upstreamResponse.statusText,
         headers,
@@ -4478,6 +4651,8 @@ async function handleResponsesInner(
       // Compose opt-in payload rewrites into one parse/stringify pass (image-gen restore first).
       const payloadRewrites = [
         createImageGenCallRestoreRewrite(imageGenCallAliases),
+        // #3217: a call whose namespace repeats its own name is unroutable in codex-rs.
+        createSelfNamedToolCallNamespaceScrubRewrite(selfNamedNamespaceScrubAuthorization),
         routedNamespaceToolAliases.size > 0
           ? createRoutedNamespaceCallRestoreRewrite(routedNamespaceToolAliases)
           : undefined,
@@ -4710,7 +4885,10 @@ async function handleResponsesInner(
       inspectResponseLogJson(logCtx, text);
       const clientJson = (() => {
         const restoredNamespace = restoreRoutedNamespaceCallsInJson(
-          restoreImageGenCallsInJson(text, imageGenCallAliases),
+          scrubSelfNamedToolCallNamespaceInJson(
+            restoreImageGenCallsInJson(text, imageGenCallAliases),
+            selfNamedNamespaceScrubAuthorization,
+          ),
           routedNamespaceToolAliases,
         );
         const restoredAuthorizedBareNamespace = restoreRoutedNamespaceCallsInJson(
@@ -5985,6 +6163,12 @@ async function handleResponsesInner(
         );
       } finally {
         cleanupUpstreamAbort();
+      }
+      if (upstreamResponse.status === 413 && clientRequestedStream && !options.comboAttempt) {
+        return streamingContextOverflowResponse(
+          parsed._responseModelId ?? parsed.modelId,
+          translatorBudget,
+        );
       }
       if (!isFixedCodexAccount(authCtx)) {
         recordSubagentQuotaFailureForThreadSpawn(

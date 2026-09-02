@@ -308,3 +308,7 @@ olduğunda veya işlem başarısız olduğunda sıfır olmayan bir sonuç dönd�
 Doğrudan HTTP, yukarıdaki tam uç nokta sözleşmelerine ihtiyaç duyan
 entegrasyonlar için en yararlıdır.
 
+## Uzak oturumlar ve veri anahtarı döndürme
+
+`POST /api/keys/rotate {id}` on dakikalık geçişi başlatır ve yeni sırrı yalnızca bir kez döndürür. `POST /api/keys/rotate/commit {id,rotationId}` onaylar, `DELETE /api/keys/rotate {id,rotationId}` iptal eder. Yönetim kimlik doğrulaması gerekir; veri anahtarı bunları çağıramaz. `POST /api/session/logout` mevcut `gui-session`, eşleşen Origin ve CSRF ister. Admin token 403 alır ve onay oturumu oluşturamaz.
+

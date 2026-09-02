@@ -106,7 +106,13 @@ export interface ProviderRequestPacingConfig extends RequestPacingRule {
 }
 
 export interface FastWire {
-  kind: "service-tier" | "anthropic-speed";
+  /**
+   * How the provider expresses Fast on the wire. `service-tier` is OpenAI's
+   * `service_tier` request field; `cursor-variant` is a MODEL-VARIANT switch, because
+   * Cursor has no tier field — its fast product is a different model id
+   * (`claude-opus-5-thinking-high-fast`) or a `{id:"fast"}` request parameter for Grok.
+   */
+  kind: "service-tier" | "anthropic-speed" | "cursor-variant";
   /** Canonical tier name to upstream wire spelling. */
   canonicalToWire: Readonly<Record<string, string>>;
   /** Policy for non-canonical caller-provided tier values. */
@@ -168,6 +174,8 @@ export interface OcxProviderConfig {
   alias?: string;
   /** Native model id -> short, slash-free request alias. */
   modelAliases?: Record<string, string>;
+  /** Display-only labels for exact native model ids discovered under this provider. */
+  modelDisplayNames?: Record<string, string>;
   /** Override the global built-in model-alias switch for this provider. */
   defaultAliases?: boolean;
   adapter: string;
@@ -276,6 +284,18 @@ export interface OcxProviderConfig {
   */
   upstreamHttpVersion?: UpstreamHttpVersion;
   /**
+   * Opt-in upstream Responses WebSocket transport for `openai-responses` requests. When true,
+   * streaming POST turns use the configured Responses path (default `/v1/responses`): forward
+   * providers use `{baseUrl}/responses`, while key-auth providers use `responsesPath` or the
+   * legacy `/v1/responses` fallback. HTTPS providers use wss and are re-encoded to SSE; HTTP
+   * providers continue using SSE, and `openai-chat` requests stay on HTTP. This mirrors the
+   * canonical ChatGPT backend optimization for any OpenAI-compatible gateway that speaks the
+   * Responses WebSocket protocol (for example an aggregator like sub2api whose WS ingress is
+   * measurably faster than its SSE queue). Default false. Canonical ChatGPT backend WS selection
+   * is independent of this flag.
+   */
+  upstreamWebsocket?: boolean;
+  /**
    * Google only. When `false`, the AI Studio (direct) path sends Gemini Flash ids
    * unchanged to the wire instead of applying the `-tiered` suffix (`gemini-3.7-flash`
    * -> `gemini-3.7-flash-tiered`). Set this to `false` when the configured upstream still
@@ -319,6 +339,16 @@ export interface OcxProviderConfig {
    * full set so the user can pick). See devlog issue_052_provider-model-allowlist.
    */
   selectedModels?: string[];
+  /**
+   * Per-provider retention allowlist for authoritative live discovery. When non-empty, any
+   * model id in this list is preserved in the routed catalog even if the live `/models`
+   * endpoint omits it (ad-hoc / private providers whose live discovery drops callable ids).
+   * Mirrors the built-in `kimi`/`xai` compatibility tables — opt-in for every other provider.
+   * Ids listed here need not be repeated in `models`: discovery folds them into the configured
+   * seed, so they exist under `liveModels: false` too. `selectedModels` still narrows what is
+   * visible. Empty/undefined = no opt-in (default behavior). See #1690.
+   */
+  retainModels?: string[];
   /** Override for newly discovered models. Absent/"inherit" uses the install policy. */
   newModelPolicy?: "on" | "off" | "inherit";
   /**
@@ -402,6 +432,13 @@ export interface OcxProviderConfig {
    */
   oauthAccountFailover?: {
     enabled?: boolean;
+    /**
+     * Generic OAuth pool selection strategy (#695). Persisted through the pool-settings
+     * contract; the selector does not consume it yet, so omitted keeps today's behavior.
+     */
+    strategy?: "quota" | "round-robin" | "fill-first";
+    /** 0-100 usage percent at which a proactive switch may be considered (#695); inert today. */
+    autoSwitchThreshold?: number;
   };
   /** Allow an explicitly key/oauth provider to run without a credential (for keyless local proxies). */
   keyOptional?: boolean;
@@ -505,6 +542,14 @@ export interface OcxProviderConfig {
    */
   noStructuredOutputModels?: string[];
   /**
+   * Model ids that accept a reasoning-effort field on an ordinary turn but reject it
+   * once function tools are present. The model keeps its advertised effort ladder;
+   * OpenCodex omits the wire field for tool-bearing requests only and lets the
+   * upstream default apply. Narrower than `noReasoningModels`, which strips reasoning
+   * from every request and costs the model its picker entirely.
+   */
+  omitReasoningEffortWithToolsModels?: string[];
+  /**
    * Allow multiple tool calls per completion. DEFAULT-ON for openai-chat providers (the
    * buffered stream parser assembles interleaved/fragmented multi-call turns safely);
    * set `false` to force `parallel_tool_calls:false` upstream and drop the catalog's
@@ -596,6 +641,14 @@ export interface OcxProviderConfig {
    * thinking separately in `reasoning_content` / `reasoning_details` instead of visible content.
    */
   reasoningSplitModels?: string[];
+  /**
+   * Model ids whose chat endpoint carries thinking as a structured `reasoning_details` array
+   * (MiniMax M-series with `reasoning_split`): stream deltas repeat each detail's `text` as a
+   * cumulative snapshot, so the adapter prefix-diffs instead of appending, and preserved
+   * reasoning replays as a `reasoning_details` array rather than a `reasoning_content` string
+   * (upstream requires the array back verbatim to keep interleaved thinking intact).
+   */
+  reasoningDetailsModels?: string[];
   /**
    * Model ids whose reasoning is a vendor `thinking: {type}` toggle on the
    * chat-completions wire (MiMo v2.x, GLM 5/5.1 style), NOT an OpenAI `reasoning_effort` ladder.

@@ -8,13 +8,14 @@ import {
   resolveDataPlaneAdmissionSecret,
   resolveResponsesApiAuth,
 } from "../src/server/auth-cors";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
 import { startServer } from "../src/server";
 import { buildResponsesWsData } from "../src/server/ws-bridge";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 // The admission path already knew WHICH key matched and threw it away. These
 // tests pin two things at once: the id now survives, and no admission decision
@@ -56,6 +57,19 @@ afterEach(() => {
 });
 
 describe("resolveDataPlaneAdmissionSecret", () => {
+  test("current and unexpired pending secrets resolve to the same stable id", () => {
+    const config = remoteConfig();
+    config.apiKeys![0]!.pendingRotation = {
+      id: "rotation-1",
+      key: "ocx_data_pendingsecret",
+      createdAt: new Date(Date.now() - 1_000).toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    expect(resolveDataPlaneAdmissionSecret("ocx_data_firstsecret", config)).toMatchObject({ keyId: "first-key" });
+    expect(resolveDataPlaneAdmissionSecret("ocx_data_pendingsecret", config)).toMatchObject({ keyId: "first-key" });
+    config.apiKeys![0]!.pendingRotation!.expiresAt = new Date(Date.now() - 1).toISOString();
+    expect(resolveDataPlaneAdmissionSecret("ocx_data_pendingsecret", config)).toBeNull();
+  });
   test("names the configured key that actually matched", () => {
     const config = remoteConfig();
     expect(resolveDataPlaneAdmissionSecret("ocx_data_firstsecret", config)).toEqual({
@@ -216,7 +230,7 @@ describe("the Responses WebSocket handshake", () => {
       else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = previousAdminToken;
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 

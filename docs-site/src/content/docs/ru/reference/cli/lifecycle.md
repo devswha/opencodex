@@ -166,7 +166,7 @@ Identity-check живого прокси. Текстовый вывод сооб
 
 Проверяет готовность после синхронизации через не требующий аутентификации `GET /readyz`. При
 готовности возвращается `200`; для `pending` и терминального `failed` возвращается `503` с
-`Retry-After: 1`. Санитизированные поля HTTP-ответа: `{service, version, uptime, pid, port, status}`.
+`Retry-After: 1`. Санитизированные поля HTTP-ответа: `{service, version, uptime, pid, port, status, protocol, minimumClientProtocol, managementUrl}`. `protocol` — текущая версия удалённого протокола hub, `minimumClientProtocol` — минимальная совместимая версия клиента, а `managementUrl` — канонический origin управления для браузера.
 Старые прокси без `/readyz` fail-closed как `unreachable`; `/healthz` — отдельная проверка liveness,
 а не готовности. По умолчанию команда выполняет одну пробу. `--wait` опрашивает до готовности или
 тайм-аута, но при терминальном `failed` завершается немедленно. Тайм-аут по умолчанию — 45 секунд;
@@ -339,3 +339,7 @@ ocx update --tag preview
 Новые версии становятся доступны, когда
 [Release workflow](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml)
 публикует их в npm.
+
+## Жизненный цикл клиента Remote Hub
+
+Используйте `ocx connect <url> --pairing-code-stdin`, `ocx connect status`, `ocx sync` и `ocx connect rotate --pairing-code-stdin`. `ocx disconnect` офлайн восстанавливает локальное состояние, но не отзывает ключ hub. Пока подключение активно, `ocx connect revoke --admin-token-stdin` отзывает сохранённый `apiKeyId`; после отключения используйте **Integrations → API Keys** на hub. Секреты передаются только через stdin, не argv.

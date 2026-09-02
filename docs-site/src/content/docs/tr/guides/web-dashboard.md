@@ -109,6 +109,10 @@ sonra yeni bir görev oluşturduğunda geçerlidir. Kurallı v1/base/v2 davranı
 için [Alt Ajan Arayüzü](/tr/guides/sub-agent-surface/) sayfasına bakın.
 :::
 
+## Remote Hub oturumları, anahtarları ve kullanımı
+
+Pano yönetim düzlemi doğrudan client→hub model trafiğinden ayrıdır. **Integrations → API Keys** bekleyen döndürmeyi gösterir, yeni sırrı bir kez görüntüler ve açık onay veya iptal ister. Tarayıcı logout yalnızca mevcut oturumu geçersiz kılar. Bağlı kullanım hub üzerinde `apiKeyId` ile filtrelenir; bağlantı kesilince yerel kayıt kullanılır ve yansıtma yapılmaz.
+
 Spawn geçersiz kılma garantisi **yerleşik** v2 rehberlik metni için geçerlidir.
 Özel bir `injectionPrompt` bu metnin yerini tamamen alır ve `{{model}}` ve
 `{{effort}}` yer tutucularını (ve isteğe bağlı olarak `{{roster}}`) içermelidir,
@@ -253,5 +257,4 @@ metin ve vizyon sınıflandırmasını kaydedilen sağlayıcı yapılandırması
 kopyalar, böylece [vizyon sidecar'ı](/tr/guides/sidecars/) manuel sınıflandırma
 olmadan doğru şekilde geçişlenir.
 :::
-
 

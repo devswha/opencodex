@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
@@ -8,6 +8,7 @@ import { AUTH_MATRIX } from "../src/server/auth-cors";
 import { clearApiKeyUsageCacheForTests, rollupApiKeyUsage } from "../src/server/management/api-key-usage";
 import { normalizeUsageEntryForTest, usageLogPath, type PersistedUsageEntry } from "../src/usage/log";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const ADMIN_TOKEN = "admin-secret-for-attribution";
 const previousHome = process.env.OPENCODEX_HOME;
@@ -60,11 +61,42 @@ afterEach(() => {
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousDataToken;
   if (previousAdminToken === undefined) delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
   else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = previousAdminToken;
-  if (testHome) rmSync(testHome, { recursive: true, force: true });
+  if (testHome) removeTreeWithRetry(testHome);
   testHome = "";
 });
 
 describe("attribution reaches usage.jsonl", () => {
+  test("traffic before, during, and after rotation stays in one apiKeyId bucket", async () => {
+    saveConfig(remoteConfig());
+    const server = startServer(0);
+    const send = (token: string) => fetch(new URL("/v1/chat/completions", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-opencodex-api-key": token },
+      body: JSON.stringify({ model: "test/gpt-test", messages: [{ role: "user", content: "hi" }] }),
+    });
+    const manage = async (path: string, method: string, body: unknown) => {
+      const response = await fetch(new URL(path, server.url), {
+        method,
+        headers: { "content-type": "application/json", "x-opencodex-api-key": ADMIN_TOKEN },
+        body: JSON.stringify(body),
+      });
+      return { response, body: await response.json() as Record<string, unknown> };
+    };
+    try {
+      await send("ocx_data_attributionone");
+      const started = await manage("/api/keys/rotate", "POST", { id: "key-one" });
+      const pendingKey = started.body.key as string;
+      const rotationId = started.body.rotationId as string;
+      await send(pendingKey);
+      await manage("/api/keys/rotate/commit", "POST", { id: "key-one", rotationId });
+      await send(pendingKey);
+      expect((await send("ocx_data_attributionone")).status).toBe(401);
+      expect(usageRows().slice(-3).map(row => row.apiKeyId)).toEqual(["key-one", "key-one", "key-one"]);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
   test("an authed request is attributed to the key that opened it, all the way to disk", async () => {
     saveConfig(remoteConfig());
     const server = startServer(0);

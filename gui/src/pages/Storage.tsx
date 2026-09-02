@@ -1444,7 +1444,7 @@ export default function Storage({ apiBase }: { apiBase: string }) {
       ) : (
         <>
           {reportState.showError && <div className="alert alert-err" role="alert">{t("storage.error")}</div>}
-          {empty ? <EmptyState title={t("storage.empty")} /> : data && data.total.fileCount > 0 && <StorageWorkspace report={data} locale={locale} />}
+          {empty ? <EmptyState title={t("storage.empty")} /> : data && data.total.fileCount > 0 && <StorageWorkspace report={data} locale={locale} apiBase={apiBase} />}
         </>
       )}
 

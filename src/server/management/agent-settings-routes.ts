@@ -1041,6 +1041,11 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       ...models.filter(m => !isDisabled(m.provider, m.id)).map(m => `${m.provider}/${m.id}`),
     ];
     const aliases: { id: string; display_name: string }[] = [];
+    // Resolved once, not per model: with the global fast switch on, Claude Code discovers the
+    // fast identity, so the dashboard must list the same id rather than the umbrella one.
+    const cursorFastIdFor = config.fastMode === true
+      ? (await import("../../adapters/cursor/catalog")).cursorFastIdFor
+      : undefined;
     for (const slug of listCatalogNativeSlugs()) {
       // Readable CLI-surface alias with hash fallback (devlog 050 / audit 051 #2) —
       // the same shared helper the /v1/models ?ids=cli path uses.
@@ -1048,7 +1053,8 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     }
     for (const m of models) {
       if (isDisabled(m.provider, m.id)) continue;
-      aliases.push({ id: claudeCodeAlias(m.provider, m.id), display_name: `${m.id} (${m.provider})` });
+      const listedId = (m.provider === "cursor" ? cursorFastIdFor?.(m.id) : undefined) ?? m.id;
+      aliases.push({ id: claudeCodeAlias(m.provider, listedId), display_name: `${listedId} (${m.provider})` });
     }
     const contextWindows = buildClaudeContextWindows([...visibleNativeSlugs(config)], models, nativeContextLimits(config));
     const webSearchOverride = config.claudeCode?.webSearchSidecar;

@@ -175,3 +175,9 @@ routed 重放会把主 ChatGPT 认证注入内部请求。Anthropic 后端使用
 支持的等级受上游提供方能力与所选模型公布的推理阶梯限制。Vision 只会对发送给其提供方 `noVisionModels` 中模型的图像生效。OpenAI 具有与 search 相同的登录/forward 要求；显式选择的 Anthropic 在没有可用凭据时会失败并关闭。成功的 `data:` 描述会使用一个受限缓存，其键由后端、模型、detail、图像字节以及规范化消息上下文组成；OpenAI 的键还会额外包含推理强度（Anthropic 键不含）。命中和同轮重复不会消耗限额。远程 `https:` 图像以及失败或空的描述不会被缓存。
 
 Anthropic OAuth 侧车会复用 opencodex 现有的 Claude Code OAuth 指纹。请对目标账户和负载进行 soak 测试。
+
+## Remote Hub 密钥与默认值
+
+`runtimeRole` 默认为 `standalone`。Hub 使用 `hub.managementPublicOrigin`、仅回环的 `hub.managementIngress`（缺省为 `enabled:false`）和准确的 `remoteGui.allowedTailscaleUsers`（缺省为空）。客户端密钥保存在 `service-api-token` 而不是 `config.json`；轮换期间可能暂时存在 `service-api-token.prev`。使用记录不会镜像。
+
+`remoteGui.allowInsecureHttp` 是已弃用的 no-op，仅为让旧的严格 schema 配置继续加载而保留。请从配置中删除它：pairing grant 只接受 loopback 或已认证的 HTTPS；设为 `true` 也不会重新开放明文 HTTP pairing。

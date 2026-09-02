@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { managementFetch as fetch } from "./helpers/management-auth";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig, writePid, writeRuntimePort } from "../src/config";
@@ -14,6 +14,7 @@ import { startServer } from "../src/server";
 import { createLocalAttestationSecret } from "../src/lib/local-management-attestation";
 import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 /**
  * Regression: CLI OAuth login used to POST the bare OAuth preset into a running proxy.
@@ -54,7 +55,7 @@ afterEach(() => {
   else process.env.OPENCODEX_HOME = previousHome;
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
-  if (testDir) rmSync(testDir, { recursive: true, force: true });
+  if (testDir) removeTreeWithRetry(testDir);
 });
 
 describe("CLI OAuth live-update credential preservation", () => {
