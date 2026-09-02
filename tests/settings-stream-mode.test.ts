@@ -8,7 +8,7 @@
  * codexAutoStart-only PUTs keep working).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigPath, loadConfig, saveConfig } from "../src/config";
@@ -31,6 +31,7 @@ import {
 } from "../src/server/management/usage-summary-cache";
 import { catalogConvergenceFactory } from "./helpers/catalog-convergence";
 import { startupHealthFixture } from "./helpers/startup-health";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 let TEST_DIR = "";
 const previousHome = process.env.OPENCODEX_HOME;
@@ -92,7 +93,7 @@ afterEach(() => {
   else process.env.OPENCODEX_HOME = previousHome;
   if (TEST_DIR && existsSync(TEST_DIR)) {
     try {
-      rmSync(TEST_DIR, { recursive: true, force: true });
+      removeTreeWithRetry(TEST_DIR);
     } catch {
       /* Windows may briefly retain file handles during test cleanup */
     }
@@ -336,6 +337,42 @@ describe("PUT /api/settings", () => {
     });
     expect(convergences).toBe(1);
     expect(config.codexAccountNamespaces).toEqual({ main: "@main" });
+  });
+
+  test("codexDesktopAuthless (#1107): absent reports false, enable persists and converges once, disable deletes the key", async () => {
+    const config = baseConfig();
+    const absent = await (await getSettings(config))!.json() as { codexDesktopAuthless?: boolean };
+    expect(absent.codexDesktopAuthless).toBe(false);
+
+    let convergences = 0;
+    let saved: OcxConfig | undefined;
+    const on = await putSettings(config, { codexDesktopAuthless: true }, {
+      saveConfigPreservingClaudeCode: next => { saved = next; },
+      createManagementConvergeCodex: catalogConvergenceFactory(() => { convergences += 1; }),
+    });
+    expect(on!.status).toBe(200);
+    expect(await on!.json()).toMatchObject({ codexDesktopAuthless: true });
+    expect(saved?.codexDesktopAuthless).toBe(true);
+    expect(convergences).toBe(1);
+
+    const same = await putSettings(config, { codexDesktopAuthless: true }, {
+      saveConfigPreservingClaudeCode: () => {},
+      createManagementConvergeCodex: catalogConvergenceFactory(() => { convergences += 1; }),
+    });
+    expect(same!.status).toBe(200);
+    expect(convergences).toBe(1);
+
+    const off = await putSettings(config, { codexDesktopAuthless: false }, {
+      saveConfigPreservingClaudeCode: next => { saved = next; },
+      createManagementConvergeCodex: catalogConvergenceFactory(() => { convergences += 1; }),
+    });
+    expect(off!.status).toBe(200);
+    expect(await off!.json()).toMatchObject({ codexDesktopAuthless: false });
+    expect(Object.hasOwn(saved!, "codexDesktopAuthless")).toBe(false);
+    expect(convergences).toBe(2);
+
+    const bad = await putSettings(config, { codexDesktopAuthless: "yes" });
+    expect(bad!.status).toBe(400);
   });
 
   test("account-picker disable does not initialize an empty namespace map", async () => {

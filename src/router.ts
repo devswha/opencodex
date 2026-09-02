@@ -9,7 +9,7 @@ import {
 } from "./combos";
 import type { NormalizedComboConfig } from "./combos/types";
 import { hasOwnProvider } from "./config/provider-name";
-import { resolveEnvValue } from "./config";
+import { resolveProviderApiKey } from "./providers/key-store";
 import { assertProviderDestinationAllowed } from "./lib/destination-policy";
 import { redactSecretString, redactUrlForLog } from "./lib/redact";
 import {
@@ -265,8 +265,27 @@ function warnIfBaseUrlDiscarded(providerName: string, userBaseUrl: string, effec
   );
 }
 
+/**
+ * One notice per provider id: the destination is an operator-configured key
+ * (never a caller-supplied string), so the log carries no request content.
+ */
+const compactionFallbackWarnings = new Set<string>();
+function warnCompactionDefaultProviderFallbackOnce(providerName: string): void {
+  if (compactionFallbackWarnings.has(providerName)) return;
+  compactionFallbackWarnings.add(providerName);
+  console.warn(
+    `compaction: no enabled canonical "openai" provider for the native compaction model;`
+    + ` summarizing through default provider "${providerName}" instead (#2901).`,
+  );
+}
+
+/** Test seam: forget which compaction fallbacks have been announced. */
+export function resetCompactionFallbackWarningsForTests(): void {
+  compactionFallbackWarnings.clear();
+}
+
 function usableResolvedApiKey(apiKey: string | undefined): string | undefined {
-  const resolved = resolveEnvValue(apiKey);
+  const resolved = resolveProviderApiKey(apiKey);
   return typeof resolved === "string" && resolved.trim().length > 0 ? resolved : undefined;
 }
 
@@ -328,6 +347,7 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
   const preserveReasoningContentModels = mergeStringArray(registryEntry.preserveReasoningContentModels, provider.preserveReasoningContentModels);
   const requiresReasoningPlaceholderModels = mergeStringArray(registryEntry.requiresReasoningPlaceholderModels, provider.requiresReasoningPlaceholderModels);
   const reasoningSplitModels = mergeStringArray(registryEntry.reasoningSplitModels, provider.reasoningSplitModels);
+  const reasoningDetailsModels = mergeStringArray(registryEntry.reasoningDetailsModels, provider.reasoningDetailsModels);
   const thinkingToggleModels = mergeStringArray(registryEntry.thinkingToggleModels, provider.thinkingToggleModels);
   const thinkingBudgetModels = mergeStringArray(registryEntry.thinkingBudgetModels, provider.thinkingBudgetModels);
   const registryBaseUrlIsTemplate = /\{[^}]*\}/.test(registryEntry.baseUrl);
@@ -451,6 +471,7 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
     ...(preserveReasoningContentModels ? { preserveReasoningContentModels } : {}),
     ...(requiresReasoningPlaceholderModels ? { requiresReasoningPlaceholderModels } : {}),
     ...(reasoningSplitModels ? { reasoningSplitModels } : {}),
+    ...(reasoningDetailsModels ? { reasoningDetailsModels } : {}),
     ...(thinkingToggleModels ? { thinkingToggleModels } : {}),
     ...(thinkingBudgetModels ? { thinkingBudgetModels } : {}),
   };
@@ -576,6 +597,7 @@ function routeModelInternal(
   modelId: string,
   bypassCombos: boolean,
   policyEvidence?: PolicyRequestEvidence,
+  allowCompactionNativeFallback = false,
 ): RouteResult {
   const slash = modelId.indexOf("/");
   // Policy namespace is system-reserved: an explicit `policy/<id>` or a
@@ -701,6 +723,28 @@ function routeModelInternal(
     if (provider && provider.disabled !== true) {
       return routeResult(config, OPENAI_CODEX_PROVIDER_ID, provider, modelId, "native", "native-family");
     }
+    // Codex chooses a bare native model for compaction even when the operator's
+    // ordinary route is a third-party provider. Keep the native reservation
+    // unchanged for ordinary turns; only the explicit compaction surface may
+    // use the configured default as its summarizer destination.
+    if (allowCompactionNativeFallback
+      && config.defaultProvider !== OPENAI_CODEX_PROVIDER_ID
+      && config.defaultProvider !== LEGACY_CHATGPT_PROVIDER_ID
+      && config.defaultProvider !== LEGACY_OPENAI_MULTI_PROVIDER_ID
+      && hasOwnProvider(config.providers, config.defaultProvider)) {
+      const defaultProvider = config.providers[config.defaultProvider];
+      if (defaultProvider.disabled !== true) {
+        warnCompactionDefaultProviderFallbackOnce(config.defaultProvider);
+        return routeResult(
+          config,
+          config.defaultProvider,
+          defaultProvider,
+          modelId,
+          "default-provider",
+          "compaction-default-provider",
+        );
+      }
+    }
     throw new NoEnabledOpenAiProviderError(modelId);
   }
 
@@ -753,12 +797,7 @@ function routeModelInternal(
   throw new Error(`No provider configured for model: ${modelId}`);
 }
 
-export function routeModel(
-  config: OcxConfig,
-  modelId: string,
-  policyEvidence?: PolicyRequestEvidence,
-): RouteResult {
-  const route = routeModelInternal(config, modelId, false, policyEvidence);
+function routeWithDecisionTrace(config: OcxConfig, modelId: string, route: RouteResult): RouteResult {
   // Policy routes carry a full evaluation trace already; never rebuild it.
   if (route.routeDecision) return route;
   const accountRef = route.codexAccountNamespace;
@@ -781,6 +820,31 @@ export function routeModel(
       : undefined,
   });
   return route;
+}
+
+export function routeModel(
+  config: OcxConfig,
+  modelId: string,
+  policyEvidence?: PolicyRequestEvidence,
+): RouteResult {
+  const route = routeModelInternal(config, modelId, false, policyEvidence);
+  return routeWithDecisionTrace(config, modelId, route);
+}
+
+/**
+ * Route a client-selected compaction model. Codex may send a bare native model
+ * even when its ordinary turns are configured for another provider; in that
+ * one case the configured default provider is a safe summarizer destination.
+ * This helper is intentionally separate so ordinary requests retain the
+ * canonical OpenAI reservation and exact account selectors remain fail-closed.
+ */
+export function routeCompactionModel(
+  config: OcxConfig,
+  modelId: string,
+  policyEvidence?: PolicyRequestEvidence,
+): RouteResult {
+  const route = routeModelInternal(config, modelId, false, policyEvidence, true);
+  return routeWithDecisionTrace(config, modelId, route);
 }
 
 /** Resolve a combo-selected provider/model target without consulting public combo aliases again. */

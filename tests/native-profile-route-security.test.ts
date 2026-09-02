@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
 import type { NativeProfileManager } from "../src/codex/native-profile-manager";
 import { startServer } from "../src/server";
 import { initializeManagementAuthState, issueGuiSession, type ManagementAuthState } from "../src/server/management-auth";
+import { consumeGuiPairingGrant, createGuiPairingGrant } from "../src/server/gui-session";
 import type { OcxConfig } from "../src/types";
 import { SERVER_BUDGET_MS } from "./helpers/test-budget";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const previousHome = process.env.HOME;
 const previousOpenCodexHome = process.env.OPENCODEX_HOME;
@@ -88,7 +90,7 @@ afterEach(() => {
   else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = previousAdminToken;
   if (previousDataToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousDataToken;
-  if (testHome) rmSync(testHome, { recursive: true, force: true });
+  if (testHome) removeTreeWithRetry(testHome);
   testHome = "";
 });
 
@@ -160,6 +162,61 @@ describe("native-main profile routes at the management admission boundary", () =
         expect(calls).toEqual([operation.name]);
         calls.length = 0;
       }
+    } finally {
+      await server.stop(true);
+    }
+  }, SERVER_BUDGET_MS);
+
+  test("remote GUI sessions require the bound server, browser origin, and CSRF before native mutation dispatch", async () => {
+    const config: OcxConfig = {
+      ...loopbackConfig(),
+      hostname: "0.0.0.0",
+      runtimeRole: "hub",
+      hub: { managementPublicOrigin: "https://hub.example.test" },
+      remoteGui: {},
+      corsAllowOrigins: ["https://dashboard.example.test"],
+      apiKeys: [{ id: "data", name: "data", key: "data-secret", createdAt: "2026-08-28T00:00:00.000Z" }],
+    };
+    saveConfig(config);
+    const calls: string[] = [];
+    const managementAuth = initializeManagementAuthState(config);
+    if (!managementAuth.available) throw new Error("expected management auth state");
+    const grant = createGuiPairingGrant("https://dashboard.example.test", config, managementAuth);
+    const session = consumeGuiPairingGrant(new Request("https://hub.example.test/opencodex-session", {
+      method: "POST",
+      headers: { Host: "hub.example.test", Origin: "https://dashboard.example.test" },
+    }), { grant: grant.grant }, config, managementAuth);
+    if (!session) throw new Error("expected remote GUI session");
+    const server = startServer(0, {
+      managementAuthState: managementAuth,
+      managementApi: { nativeProfileApi: { manager: testManager(calls) } },
+    });
+    try {
+      const operation = operations.find(candidate => candidate.method === "POST")!;
+      const request = (headers: Record<string, string>) => fetch(new URL(operation.path, server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json", Host: "hub.example.test", ...headers },
+        body: operation.body ? JSON.stringify(operation.body) : undefined,
+      });
+      const base = {
+        Origin: "https://dashboard.example.test",
+        "x-opencodex-api-key": session.token,
+        "x-opencodex-gui-origin": "https://dashboard.example.test",
+        "x-opencodex-csrf-token": session.csrfToken,
+      };
+      const withoutHeader = (name: string): Record<string, string> => Object.fromEntries(
+        Object.entries(base).filter(([header]) => header !== name),
+      );
+      expect((await request({ ...base, "x-opencodex-gui-origin": "https://evil.example.test" })).status).toBe(401);
+      expect((await request({ ...base, Origin: "https://evil.example.test" })).status).toBe(401);
+      expect((await request(withoutHeader("Origin"))).status).toBe(401);
+      expect((await request(withoutHeader("x-opencodex-gui-origin"))).status).toBe(401);
+      expect((await request(withoutHeader("x-opencodex-csrf-token"))).status).toBe(401);
+      expect((await request({ ...base, Host: `127.0.0.1:${server.port}` })).status).toBe(401);
+      expect((await request({ ...base, "x-opencodex-csrf-token": "" })).status).toBe(401);
+      expect(calls).toEqual([]);
+      expect((await request(base)).status).toBe(200);
+      expect(calls).toEqual([operation.name]);
     } finally {
       await server.stop(true);
     }

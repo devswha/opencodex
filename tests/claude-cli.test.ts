@@ -19,13 +19,52 @@ function cfg(extra?: Partial<OcxConfig>): OcxConfig {
  */
 const AUTH_PRESENT = {
   authDetect: {
-    readClaudeJson: () => ({ oauthAccount: { emailAddress: "dev@example.com" } }),
+    readClaudeJson: () => ({ oauthAccount: { emailAddress: "dev-fixture" } }),
     credentialsFileExists: () => true,
     keychainProbe: () => "present" as const,
   },
 };
 
 describe("ocx claude env assembly", () => {
+  test("connected target injects only the hub base and client admission token", () => {
+    const env = buildClaudeEnv(cfg(), {
+      baseUrl: "https://hub.example.test",
+      admissionToken: "ocx_data_connected",
+    }, {}, {}, AUTH_PRESENT);
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://hub.example.test");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("ocx_data_connected");
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBe("1");
+  });
+
+  test("a connected target keeps its admission token even when the local env reads as subscription", () => {
+    // #3148 resolves the auth mode before adding proxy-owned credentials, which is right for
+    // an ordinary launch. A connected launch is different: the caller already named a hub and
+    // supplied the client admission token for it, so a machine whose own environment looks
+    // like a Claude subscription must not strip the credential the launch was built with.
+    const env = buildClaudeEnv(cfg(), {
+      baseUrl: "https://hub.example.test",
+      admissionToken: "ocx_data_connected",
+    }, {}, {}, { mode: "subscription", origin: "explicit" });
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://hub.example.test");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("ocx_data_connected");
+  });
+
+  test("user-owned connected destination wins and cannot receive the hub token", () => {
+    const env = buildClaudeEnv(cfg(), {
+      baseUrl: "https://hub.example.test",
+      admissionToken: "ocx_data_connected",
+    }, {
+      ANTHROPIC_BASE_URL: "https://user-gateway.example.test",
+      ANTHROPIC_AUTH_TOKEN: "ocx_data_connected",
+    }, {}, {
+      ...AUTH_PRESENT,
+      preBunAnthropicSlots: ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"],
+    });
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://user-gateway.example.test");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+  });
+
   test("root skip-permissions bypass requires both the explicit flag and uid 0", () => {
     expect(shouldAllowRootSkipPermissions(["--dangerously-skip-permissions"], () => 0)).toBe(true);
     expect(shouldAllowRootSkipPermissions([], () => 0)).toBe(false);
@@ -81,8 +120,32 @@ describe("ocx claude env assembly", () => {
   test("configured API key becomes the auth token (admission required)", () => {
     const env = buildClaudeEnv(cfg({
       apiKeys: [{ id: "1", name: "main", key: "sk-ocx-123", createdAt: "2026-01-01" }],
+      claudeCode: { authMode: "proxy" },
     }), 10100, {});
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe("sk-ocx-123");
+  });
+
+  test("subscription mode keeps configured proxy keys out of Claude auth", () => {
+    const env = buildClaudeEnv(cfg({
+      apiKeys: [{ id: "1", name: "main", key: "sk-ocx-123", createdAt: "2026-01-01" }],
+      claudeCode: { authMode: "subscription" },
+    }), 10100, {}, {}, AUTH_PRESENT);
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBeUndefined();
+  });
+
+  test("subscription mode removes an inherited proxy admission token", () => {
+    const env = buildClaudeEnv(cfg({
+      apiKeys: [{ id: "1", name: "main", key: "ocx_data_this_proxy_key", createdAt: "2026-01-01" }],
+      claudeCode: { authMode: "subscription" },
+    }), 10100, {
+      ANTHROPIC_AUTH_TOKEN: "ocx_data_this_proxy_key",
+    }, {}, {
+      ...AUTH_PRESENT,
+      preBunAnthropicSlots: ["ANTHROPIC_AUTH_TOKEN"],
+    });
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBeUndefined();
   });
 
   // Host-managed routing guard (devlog 260720_claude_authmode_persist/020):
@@ -99,6 +162,7 @@ describe("ocx claude env assembly", () => {
 
     const admission = buildClaudeEnv(cfg({
       apiKeys: [{ id: "1", name: "main", key: "sk-ocx-123", createdAt: "2026-01-01" }],
+      claudeCode: { authMode: "proxy" },
     }), 10100, {});
     expect(admission.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBe("1");
   });
@@ -290,7 +354,10 @@ describe("ocx claude env assembly", () => {
 
   test("a stale admission token is replaced by THIS proxy's key, never carried over", () => {
     const env = buildClaudeEnv(
-      cfg({ apiKeys: [{ id: "k1", name: "local", key: "ocx_data_this_proxy_key", createdAt: "2026-01-01T00:00:00Z" }] }),
+      cfg({
+        claudeCode: { authMode: "proxy" },
+        apiKeys: [{ id: "k1", name: "local", key: "ocx_data_this_proxy_key", createdAt: "2026-01-01T00:00:00Z" }],
+      }),
       10100,
       {
         ANTHROPIC_BASE_URL: "http://127.0.0.1:19999",

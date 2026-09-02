@@ -139,6 +139,70 @@ export interface InjectCodexOptions {
    * provider discovery so a deterministic config refusal cannot degrade an existing catalog.
    */
   validateOnly?: boolean;
+  /** Explicit remote routing target. Absence preserves byte-compatible standalone output. */
+  routingTarget?: CodexRoutingTarget;
+  journalOwner?: { kind: "process" } | { kind: "client"; apiKeyId: string };
+}
+
+export interface CodexRoutingTarget {
+  baseUrl: string;
+  requiresAdmissionToken: boolean;
+  tokenEnv: "OPENCODEX_API_AUTH_TOKEN";
+  /**
+   * Opt-in authless Codex Desktop mode (#1107): inject the dedicated provider table with
+   * `requires_openai_auth = false` so Desktop skips the ChatGPT login gate. Only ever true for
+   * loopback targets that need no admission token; non-loopback admission is a separate layer
+   * and is never weakened by this flag.
+   */
+  desktopAuthless?: boolean;
+}
+
+function validateCodexRoutingTarget(target: CodexRoutingTarget): CodexRoutingTarget {
+  let parsed: URL;
+  try {
+    parsed = new URL(target.baseUrl);
+  } catch {
+    throw new TypeError("Codex routing target must be an absolute HTTP(S) /v1 URL");
+  }
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    || parsed.username
+    || parsed.password
+    || parsed.pathname !== "/v1"
+    || parsed.search
+    || parsed.hash
+    || target.tokenEnv !== "OPENCODEX_API_AUTH_TOKEN"
+  ) {
+    throw new TypeError("Codex routing target must be a canonical HTTP(S) /v1 URL without credentials, query, or fragment");
+  }
+  return { ...target, baseUrl: `${parsed.origin}/v1` };
+}
+
+/** Provider-table form is used for non-loopback admission and for the authless Desktop opt-in. */
+function usesProviderTable(target: CodexRoutingTarget): boolean {
+  return target.requiresAdmissionToken || target.desktopAuthless === true;
+}
+
+export function standaloneCodexRoutingTarget(
+  port: number,
+  config?: Pick<OcxConfig, "hostname" | "unauthenticatedLoopbackListener" | "codexDesktopAuthless">,
+): CodexRoutingTarget {
+  const loopback = config?.unauthenticatedLoopbackListener;
+  const effectivePort = loopback?.enabled ? loopback.port : port;
+  const hostname = loopback?.enabled ? undefined : config?.hostname;
+  const requiresAdmissionToken = loopback?.enabled ? false : shouldInjectApiAuthHeader(config);
+  return {
+    baseUrl: `http://${providerBaseHost(hostname)}:${effectivePort}/v1`,
+    requiresAdmissionToken,
+    tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
+    ...(config?.codexDesktopAuthless === true && !requiresAdmissionToken
+      ? { desktopAuthless: true }
+      : {}),
+  };
+}
+
+function routingTargetOrigin(target: CodexRoutingTarget): string {
+  return target.baseUrl.slice(0, -3);
 }
 
 function configuredManagedSubagentDefaults(
@@ -213,28 +277,52 @@ export function shouldInjectApiAuthHeader(
 
 export function buildProviderTableBlock(
   port: number,
+  supportsWebsockets?: boolean,
+  includeApiAuthHeader?: boolean,
+  hostname?: string,
+): string;
+export function buildProviderTableBlock(
+  target: CodexRoutingTarget,
+  supportsWebsockets?: boolean,
+): string;
+export function buildProviderTableBlock(
+  portOrTarget: number | CodexRoutingTarget,
   supportsWebsockets = false,
   includeApiAuthHeader = false,
   hostname?: string,
 ): string {
-  const host = providerBaseHost(hostname);
+  const target = typeof portOrTarget === "number"
+    ? validateCodexRoutingTarget({
+        baseUrl: `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`,
+        requiresAdmissionToken: includeApiAuthHeader,
+        tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
+      })
+    : validateCodexRoutingTarget(portOrTarget);
+  return buildProviderTableBlockForTarget(target, supportsWebsockets);
+}
+
+function buildProviderTableBlockForTarget(
+  target: CodexRoutingTarget,
+  supportsWebsockets = false,
+): string {
   const lines = [
     "",
     OCX_SECTION_MARKER,
     "[model_providers.opencodex]",
     'name = "OpenCodex Proxy"',
-    `base_url = "http://${host}:${port}/v1"`,
+    `base_url = ${tomlString(target.baseUrl)}`,
     'wire_api = "responses"',
-    "requires_openai_auth = true",
+    // false only in the authless Desktop opt-in (#1107); true keeps the App/TUI account gate.
+    `requires_openai_auth = ${target.desktopAuthless === true ? "false" : "true"}`,
   ];
-  if (includeApiAuthHeader) {
+  if (target.requiresAdmissionToken) {
     // codex-cli 0.146+ contract (#2073): env_key sends Authorization: Bearer $VAR and
     // hard-errors on a missing/empty variable instead of silently omitting auth. It
     // coexists with requires_openai_auth (env_key wins wire auth; the flag keeps the
     // login/account UX), and the server substitutes stored main auth for our admission
     // bearer (#1686), so the modern form is strictly better than the legacy
     // env_http_headers table this line used to emit.
-    lines.push('env_key = "OPENCODEX_API_AUTH_TOKEN"');
+    lines.push(`env_key = ${tomlString(target.tokenEnv)}`);
   }
   if (supportsWebsockets) lines.push("supports_websockets = true");
   return lines.join("\n") + "\n";
@@ -243,8 +331,19 @@ export function buildProviderTableBlock(
 export function buildOpenaiBaseUrlLine(
   port: number,
   hostname?: string,
+): string;
+export function buildOpenaiBaseUrlLine(target: CodexRoutingTarget): string;
+export function buildOpenaiBaseUrlLine(
+  portOrTarget: number | CodexRoutingTarget,
+  hostname?: string,
 ): string {
-  return `openai_base_url = "http://${providerBaseHost(hostname)}:${port}/v1"`;
+  return typeof portOrTarget === "number"
+    ? `openai_base_url = "http://${providerBaseHost(hostname)}:${portOrTarget}/v1"`
+    : buildOpenaiBaseUrlLineForTarget(validateCodexRoutingTarget(portOrTarget));
+}
+
+function buildOpenaiBaseUrlLineForTarget(target: CodexRoutingTarget): string {
+  return `openai_base_url = ${tomlString(target.baseUrl)}`;
 }
 
 /**
@@ -257,11 +356,23 @@ export function setRootOpenaiBaseUrl(
   content: string,
   port: number,
   hostname?: string,
+): { content: string; keptUserBaseUrl: boolean };
+export function setRootOpenaiBaseUrl(
+  content: string,
+  target: CodexRoutingTarget,
+): { content: string; keptUserBaseUrl: boolean };
+export function setRootOpenaiBaseUrl(
+  content: string,
+  portOrTarget: number | CodexRoutingTarget,
+  hostname?: string,
 ): { content: string; keptUserBaseUrl: boolean } {
+  if (typeof portOrTarget !== "number") {
+    return setRootOpenaiBaseUrlForTarget(content, validateCodexRoutingTarget(portOrTarget));
+  }
   const lines = content.split("\n");
   const firstTable = lines.findIndex((l) => /^\s*\[/.test(l));
   const rootEnd = firstTable === -1 ? lines.length : firstTable;
-  const key = buildOpenaiBaseUrlLine(port, hostname);
+  const key = buildOpenaiBaseUrlLine(portOrTarget, hostname);
 
   for (let i = 0; i < rootEnd; i++) {
     if (!isRootOpenaiBaseUrlLine(lines[i])) continue;
@@ -285,6 +396,33 @@ export function setRootOpenaiBaseUrl(
   }
   let insertAt = firstTable;
   while (insertAt > 0 && lines[insertAt - 1].trim() === "") insertAt--;
+  lines.splice(insertAt, 0, OCX_SECTION_MARKER, key);
+  return { content: lines.join("\n"), keptUserBaseUrl: false };
+}
+
+function setRootOpenaiBaseUrlForTarget(
+  content: string,
+  target: CodexRoutingTarget,
+): { content: string; keptUserBaseUrl: boolean } {
+  const lines = content.split("\n");
+  const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
+  const rootEnd = firstTable === -1 ? lines.length : firstTable;
+  const key = buildOpenaiBaseUrlLineForTarget(target);
+  for (let index = 0; index < rootEnd; index += 1) {
+    if (!isRootOpenaiBaseUrlLine(lines[index])) continue;
+    const markerOwned = index > 0 && lines[index - 1].includes(OCX_SECTION_MARKER);
+    if (!markerOwned) return { content, keptUserBaseUrl: true };
+    lines[index] = key;
+    return { content: lines.join("\n"), keptUserBaseUrl: false };
+  }
+  if (firstTable === -1) {
+    return {
+      content: `${content.replace(/\n+$/, "")}\n${OCX_SECTION_MARKER}\n${key}\n`,
+      keptUserBaseUrl: false,
+    };
+  }
+  let insertAt = firstTable;
+  while (insertAt > 0 && lines[insertAt - 1].trim() === "") insertAt -= 1;
   lines.splice(insertAt, 0, OCX_SECTION_MARKER, key);
   return { content: lines.join("\n"), keptUserBaseUrl: false };
 }
@@ -619,17 +757,48 @@ function stripOpencodexCatalogPath(content: string): string {
     .join("\n");
 }
 
-export function buildProfileFile(port: number, catalogPath?: string | null, supportsWebsockets = false, includeApiAuthHeader = false, hostname?: string, fastMode?: boolean): string {
-  const host = providerBaseHost(hostname);
+export function buildProfileFile(port: number, catalogPath?: string | null, supportsWebsockets?: boolean, includeApiAuthHeader?: boolean, hostname?: string, fastMode?: boolean): string;
+export function buildProfileFile(target: CodexRoutingTarget, catalogPath?: string | null, supportsWebsockets?: boolean, fastMode?: boolean): string;
+export function buildProfileFile(
+  portOrTarget: number | CodexRoutingTarget,
+  catalogPath?: string | null,
+  supportsWebsockets = false,
+  includeApiAuthHeaderOrFastMode?: boolean,
+  hostname?: string,
+  fastMode?: boolean,
+): string {
+  const target = typeof portOrTarget === "number"
+    ? validateCodexRoutingTarget({
+        baseUrl: `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`,
+        requiresAdmissionToken: includeApiAuthHeaderOrFastMode === true,
+        tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
+      })
+    : validateCodexRoutingTarget(portOrTarget);
+  return buildProfileFileForTarget(
+    target,
+    catalogPath,
+    supportsWebsockets,
+    typeof portOrTarget === "number" ? fastMode : includeApiAuthHeaderOrFastMode,
+  );
+}
+
+function buildProfileFileForTarget(
+  target: CodexRoutingTarget,
+  catalogPath?: string | null,
+  supportsWebsockets = false,
+  fastMode?: boolean,
+): string {
+  const origin = routingTargetOrigin(target);
+  const host = new URL(origin).host;
   // Design B (loopback): the reference/fallback file documents the root override form.
   // Non-loopback keeps the legacy provider-table shape (built-in provider cannot carry
-  // the x-opencodex-api-key env header).
-  if (!includeApiAuthHeader) {
+  // the x-opencodex-api-key env header); the authless Desktop opt-in shares that shape.
+  if (!usesProviderTable(target)) {
     const lines = [
       "# OpenCodex proxy fallback config (Design B)",
-      `# Root override that points Codex's built-in openai provider at the proxy on ${host}:${port}.`,
+      `# Root override that points Codex's built-in openai provider at the proxy on ${host}.`,
       "# Merge these root keys into ~/.codex/config.toml manually if auto-injection was removed.",
-      buildOpenaiBaseUrlLine(port, hostname),
+      buildOpenaiBaseUrlLineForTarget(target),
     ];
     if (catalogPath) lines.push(`model_catalog_json = ${tomlString(catalogPath)}`);
     if (fastMode !== undefined) lines.push("", "[features]", `fast_mode = ${fastMode ? "true" : "false"}`, "");
@@ -637,12 +806,12 @@ export function buildProfileFile(port: number, catalogPath?: string | null, supp
   }
   const lines = [
     "# OpenCodex proxy profile — use with: codex --profile opencodex",
-    `# Routes all model requests through the opencodex proxy at ${host}:${port}`,
+    `# Routes all model requests through the opencodex proxy at ${host}`,
     'model_provider = "opencodex"',
   ];
   if (catalogPath) lines.push(`model_catalog_json = ${tomlString(catalogPath)}`);
   if (fastMode !== undefined) lines.push("", "[features]", `fast_mode = ${fastMode ? "true" : "false"}`);
-  lines.push(buildProviderTableBlock(port, supportsWebsockets, includeApiAuthHeader, hostname).trimEnd(), "");
+  lines.push(buildProviderTableBlockForTarget(target, supportsWebsockets).trimEnd(), "");
   return lines.join("\n");
 }
 
@@ -684,8 +853,14 @@ export async function injectCodexConfig(
   //
   // The listener port is fixed in config, never OS-assigned, so this value survives restarts
   // and matches what an already-running app-server read at startup.
-  const loopback = config?.unauthenticatedLoopbackListener;
-  if (loopback?.enabled) port = loopback.port;
+  let routingTarget: CodexRoutingTarget;
+  try {
+    routingTarget = options.routingTarget
+      ? validateCodexRoutingTarget(options.routingTarget)
+      : standaloneCodexRoutingTarget(port, config);
+  } catch (error) {
+    return { success: false, message: error instanceof Error ? error.message : "Invalid Codex routing target" };
+  }
   if (!existsSync(CODEX_CONFIG_PATH)) {
     return {
       success: false,
@@ -712,8 +887,8 @@ export async function injectCodexConfig(
       message:
         `⚠️ Codex routing NOT injected: config.toml selects the external model_provider ${tomlString(activeProvider)}.\n` +
         `  OpenCodex preserves external provider configuration so existing ${tomlString(activeProvider)} session history stays visible.\n` +
-        `  Configure that provider for Responses passthrough at http://${providerBaseHost(config?.hostname)}:${port}/v1` +
-        `${shouldInjectApiAuthHeader(config) ? ` with x-opencodex-api-key from OPENCODEX_API_AUTH_TOKEN` : ""}.\n` +
+        `  Configure that provider for Responses passthrough at ${routingTarget.baseUrl}` +
+        `${routingTarget.requiresAdmissionToken ? ` with x-opencodex-api-key from ${routingTarget.tokenEnv}` : ""}.\n` +
         `  For direct injection, switch to the built-in openai provider, remove any user-owned root openai_base_url, and rerun 'ocx start'.`,
     };
   }
@@ -781,28 +956,26 @@ export async function injectCodexConfig(
     ? setRootModelCatalogPath(content, catalogPath)
     : stripOpencodexCatalogPath(content);
 
-  const legacyMode = shouldInjectApiAuthHeader(config);
+  // Provider-table form: non-loopback admission (legacy) or the authless Desktop opt-in (#1107).
+  const legacyMode = usesProviderTable(routingTarget);
   let keptUserBaseUrl = false;
   if (legacyMode) {
     // Legacy (non-loopback) injection: the built-in openai provider cannot carry the
     // x-opencodex-api-key env header, so keep the opencodex provider table + root re-tag.
+    // The authless opt-in needs the same table because only a dedicated provider can carry
+    // requires_openai_auth = false.
     // 1) Root key BEFORE the first table header (must be a global, not nested under a table).
     content = setRootModelProvider(content);
     // 2) Provider table appended at EOF (position-independent).
     content =
       content.trimEnd() +
       "\n" +
-      buildProviderTableBlock(
-        port,
-        websocketsEnabled(config ?? {}),
-        true,
-        config?.hostname,
-      );
+      buildProviderTableBlockForTarget(routingTarget, websocketsEnabled(config ?? {}));
   } else {
     // Design B (loopback): a single root override; codex keeps its native `openai` provider id
     // so thread history is never remapped. Any legacy form was already stripped above.
     content = stripInjectedOpenaiBaseUrl(content); // normalize before idempotent re-insert
-    const result = setRootOpenaiBaseUrl(content, port, config?.hostname);
+    const result = setRootOpenaiBaseUrlForTarget(content, routingTarget);
     content = result.content;
     keptUserBaseUrl = result.keptUserBaseUrl;
   }
@@ -838,7 +1011,12 @@ export async function injectCodexConfig(
     managedDefaultsMessage = `  ⚠️ ${nativeSubagentDefaultsWarning}\n`;
   }
 
-  const profileContent = buildProfileFile(port, catalogPath, websocketsEnabled(config ?? {}), legacyMode, config?.hostname, config?.fastMode);
+  const profileContent = buildProfileFileForTarget(
+    routingTarget,
+    catalogPath,
+    websocketsEnabled(config ?? {}),
+    config?.fastMode,
+  );
   content = applyEol(content, eol);
 
   /*
@@ -916,6 +1094,7 @@ export async function injectCodexConfig(
     writeJournal({
       currentStateIsNative: !hasInjectedCodexRouting(rawContent),
       configContent: baselineContent,
+      owner: options.journalOwner,
     });
     atomicWriteFile(CODEX_CONFIG_PATH, content);
     atomicWriteFile(CODEX_PROFILE_PATH, profileContent);
@@ -1118,9 +1297,11 @@ export async function injectCodexConfig(
         `  Reference config: ${CODEX_PROFILE_PATH}`,
     };
   }
-  const headline = legacyMode
-    ? `Injected opencodex as default provider into Codex config.\n`
-    : `Pointed Codex's built-in openai provider at the opencodex proxy (openai_base_url).\n`;
+  const headline = routingTarget.desktopAuthless === true
+    ? `Injected opencodex as default provider into Codex config (authless Desktop mode: requires_openai_auth = false).\n`
+    : legacyMode
+      ? `Injected opencodex as default provider into Codex config.\n`
+      : `Pointed Codex's built-in openai provider at the opencodex proxy (openai_base_url).\n`;
   return {
     success: true,
     ...(nativeSubagentDefaultsWarning ? { nativeSubagentDefaultsWarning } : {}),

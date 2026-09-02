@@ -25,6 +25,7 @@ import {
 import { estimateTokens } from "../src/lib/token-estimate";
 import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 import { SERVER_BUDGET_MS } from "./helpers/test-budget";
 import { createTestTranslatorBudget } from "./helpers/translator-budget";
 import {
@@ -64,7 +65,7 @@ afterEach(() => {
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
   globalThis.fetch = originalFetch;
-  if (testDir) rmSync(testDir, { recursive: true, force: true });
+  if (testDir) removeTreeWithRetry(testDir);
 });
 
 function mockChatUpstream() {

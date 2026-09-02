@@ -5,7 +5,7 @@
  * fatals on a compaction turn that came back as an ordinary message.
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleResponses, handleResponsesCompact } from "../src/server/responses";
@@ -19,7 +19,8 @@ import {
   resolveCodexAccountForThread,
 } from "../src/codex/routing";
 import { clearAccountQuota, updateAccountQuota } from "../src/codex/auth-api";
-import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/main-account";
+import { MAIN_CODEX_ACCOUNT_ID, MainAccountTokenRefreshError } from "../src/codex/main-account";
+import { NativeProfileError } from "../src/codex/native-profile-types";
 import { fallbackCodexAccountLogLabel } from "../src/codex/account-label";
 import * as authContextModule from "../src/codex/auth-context";
 import {
@@ -31,6 +32,7 @@ import { supportsNativeResponsesCompactEndpoint } from "../src/providers/openai-
 import type { RequestLogContext } from "../src/server/request-log";
 import { acquireNativeMainProfileDrain, tryAdmitTurn } from "../src/server/lifecycle";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const originalFetch = globalThis.fetch;
 
@@ -212,6 +214,31 @@ describe("Codex auth-context error parity (#2392)", () => {
       regularLog: true,
     },
     {
+      label: "native-main claim contention",
+      createError: () => new authContextModule.CodexAuthContextError(
+        MAIN_CODEX_ACCOUNT_ID,
+        new NativeProfileError(
+          "NATIVE_MAIN_CLAIM_BUSY",
+          "Native-main credentials are in use.",
+          503,
+          true,
+        ),
+      ),
+      status: 503,
+      retryAfter: "1",
+      regularLog: true,
+    },
+    {
+      label: "native-main claim timeout",
+      createError: () => new authContextModule.CodexAuthContextError(
+        MAIN_CODEX_ACCOUNT_ID,
+        new MainAccountTokenRefreshError("transient"),
+      ),
+      status: 503,
+      retryAfter: "1",
+      regularLog: true,
+    },
+    {
       label: "pool authentication failure",
       createError: () => new authContextModule.CodexPoolAuthenticationError("Pool credential is unavailable"),
       status: 401,
@@ -366,7 +393,7 @@ describe("native compact usage reporting", () => {
     } finally {
       globalThis.fetch = originalFetch;
       clearAccountQuota();
-      rmSync(testDir, { recursive: true, force: true });
+      removeTreeWithRetry(testDir);
       if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousOpencodexHome;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -435,7 +462,7 @@ describe("native Codex pool compaction", () => {
     } finally {
       globalThis.fetch = originalFetch;
       clearCodexUpstreamHealth();
-      rmSync(testDir, { recursive: true, force: true });
+      removeTreeWithRetry(testDir);
       if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousOpencodexHome;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -505,7 +532,7 @@ describe("native Codex pool compaction", () => {
       Date.now = originalNow;
       globalThis.fetch = originalFetch;
       clearCodexUpstreamHealth();
-      rmSync(testDir, { recursive: true, force: true });
+      removeTreeWithRetry(testDir);
       if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousOpencodexHome;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -570,7 +597,7 @@ describe("native Codex pool compaction", () => {
       Date.now = originalNow;
       globalThis.fetch = originalFetch;
       clearCodexUpstreamHealth();
-      rmSync(testDir, { recursive: true, force: true });
+      removeTreeWithRetry(testDir);
       if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousOpencodexHome;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -699,6 +726,112 @@ describe("routed compaction for key-mode openai-responses (#422)", () => {
   });
 });
 
+describe("bare native compaction model without canonical openai (#2901)", () => {
+  /** A GitHub-Copilot-style operator: one third-party provider, no `openai` row at all. */
+  function copilotOnlyConfig(): OcxConfig {
+    return {
+      defaultProvider: "gw",
+      providers: {
+        gw: {
+          adapter: "openai-chat",
+          baseUrl: "https://api.githubcopilot.com",
+          authMode: "key",
+          apiKey: "ghu_test",
+          models: ["gpt-5.6-sol"],
+        },
+      },
+    } as unknown as OcxConfig;
+  }
+
+  function chatCompletionPayload(text: string): Record<string, unknown> {
+    return {
+      choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    };
+  }
+
+  test("v2 compaction_trigger turn summarizes through the default provider instead of 404", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return jsonResponse(chatCompletionPayload("handoff summary"));
+    }) as typeof fetch;
+
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const res = await handleResponses(
+      compactionRequest(baseCompactionBody({ model: "gpt-5.6-sol" })),
+      copilotOnlyConfig(),
+      logCtx,
+    );
+
+    expect(res.status).toBe(200);
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.url.startsWith("https://api.githubcopilot.com")).toBe(true);
+    expect(calls[0]!.body.model).toBe("gpt-5.6-sol");
+    // Still the summarizer contract: no private trigger leaks to the third-party gateway.
+    expect(JSON.stringify(calls[0]!.body)).not.toContain("compaction_trigger");
+    expect(JSON.stringify(calls[0]!.body.messages)).toContain("CONTEXT CHECKPOINT COMPACTION");
+    expect(logCtx.provider).toBe("gw");
+    expect(logCtx.routeDecision?.selected).toMatchObject({ provider: "gw", reason: "compaction-default-provider" });
+    const json = await res.json() as { output?: Array<{ type?: string }> };
+    expect((json.output ?? []).filter(item => item.type === "compaction").length).toBe(1);
+  });
+
+  test("v1 /responses/compact takes the same fallback", async () => {
+    let upstreamCalls = 0;
+    globalThis.fetch = (async () => {
+      upstreamCalls += 1;
+      return jsonResponse(chatCompletionPayload("handoff summary"));
+    }) as typeof fetch;
+
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const res = await handleResponsesCompact(
+      compactionRequest(baseCompactionBody({ model: "gpt-5.6-sol" })),
+      copilotOnlyConfig(),
+      logCtx,
+    );
+
+    expect(res.status).toBe(200);
+    expect(upstreamCalls).toBe(1);
+    expect(logCtx.provider).toBe("gw");
+    expect(logCtx.requestedModel).toBe("gpt-5.6-sol");
+  });
+
+  test("ordinary turns on the same config keep the canonical-openai reservation", async () => {
+    let upstreamCalls = 0;
+    globalThis.fetch = (async () => {
+      upstreamCalls += 1;
+      return jsonResponse(chatCompletionPayload("must not be reached"));
+    }) as typeof fetch;
+
+    const body = baseCompactionBody({ model: "gpt-5.6-sol" });
+    body.input = (body.input as Array<Record<string, unknown>>).filter(item => item.type !== "compaction_trigger");
+    const res = await handleResponses(compactionRequest(body), copilotOnlyConfig(), { model: "", provider: "" });
+
+    expect(res.status).toBe(404);
+    expect(upstreamCalls).toBe(0);
+  });
+
+  test("an account-qualified native selector still fails closed on compaction", async () => {
+    let upstreamCalls = 0;
+    globalThis.fetch = (async () => {
+      upstreamCalls += 1;
+      return jsonResponse(chatCompletionPayload("must not be reached"));
+    }) as typeof fetch;
+
+    const config = copilotOnlyConfig();
+    (config as { codexAccountNamespaces?: Record<string, string> }).codexAccountNamespaces = { side: "side-account-id" };
+    const res = await handleResponsesCompact(
+      compactionRequest(baseCompactionBody({ model: "side/gpt-5.6-sol" })),
+      config,
+      { model: "", provider: "" },
+    );
+
+    expect(res.status).toBe(404);
+    expect(upstreamCalls).toBe(0);
+  });
+});
+
 describe("compaction terminal handling (#422)", () => {
   test("an upstream failure does not become an empty compaction", async () => {
     globalThis.fetch = (async () => jsonResponse({
@@ -805,7 +938,7 @@ describe("compact alternate-account attempt (#913)", () => {
       clearCodexUpstreamHealth();
       clearUpstreamHostHealth();
       clearAccountQuota();
-      rmSync(testDir, { recursive: true, force: true });
+      removeTreeWithRetry(testDir);
       if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousOpencodexHome;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;

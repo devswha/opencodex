@@ -1,0 +1,72 @@
+---
+title: Remote Hub 部署
+description: 使用仅回环管理入口、Tailscale Serve 和无头 OAuth 运行 opencodex hub。
+---
+
+Remote Hub 将提供商凭据、模型目录和使用记录保存在一台主机上，经过身份验证的客户端直接访问其数据平面。管理平面相互独立：可选管理监听器只绑定 `127.0.0.1`，仅提供控制台和 `/api/*`。它不提供 `/v1/*`、`/healthz`、`/readyz` 或 WebSocket。不要直接发布 `10101`，也不要使用 Tailscale Funnel。
+
+## 角色与信任边界
+
+`standalone` 在一台机器上运行全部功能；`hub` 保存提供商密钥和使用记录；`client` 只保存连接状态和专属数据密钥。
+
+```bash
+ocx connect https://hub-name.tailnet-name.ts.net --pairing-code-stdin
+ocx connect status
+ocx sync
+```
+
+客户端密钥写入仅所有者可读的 `service-api-token`，绝不会写入 `config.json`。连接期间，使用记录来自 hub 并按稳定的 `apiKeyId` 过滤；断开后显示本地记录。两者不会镜像。
+
+Admin token 只能执行普通管理，永远不能创建用户同意会话。用户同意操作必须使用服务器签发的 `gui-session`、匹配的 Origin 和 CSRF。`Tailscale-User-Login` 只在独立管理入口可信；请在 `remoteGui.allowedTailscaleUsers` 中填写准确登录名。
+
+## systemd/launchd 与 Tailscale Serve
+
+```bash
+ocx config set runtimeRole hub
+ocx config set hostname 100.64.0.10
+ocx config set hub.managementPublicOrigin '"https://hub-name.tailnet-name.ts.net"'
+ocx config set corsAllowOrigins '["http://localhost:10100"]'
+ocx config set hub.managementIngress '{"enabled":true,"port":10101}'
+ocx config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
+export OPENCODEX_API_AUTH_TOKEN="$(openssl rand -hex 32)"
+ocx service install
+```
+
+systemd/launchd 从受保护的 `service-api-token` 读取密钥，plist 和 unit 不包含明文密钥。
+
+```bash
+curl --fail --silent http://100.64.0.10:10100/healthz
+curl --fail --silent http://100.64.0.10:10100/readyz
+tailscale serve --bg --https=443 http://127.0.0.1:10101
+tailscale serve status
+```
+
+`/healthz` 只证明进程存活。还必须验证 `/readyz`、经过身份验证的 `GET /v1/catalog` 和一次真实模型响应。管理端口只能监听 `127.0.0.1`。自建 TLS 代理应使用 `tailscale cert hub-name.tailnet-name.ts.net`，并仅代理到 `127.0.0.1:10101`。不要伪造 `Tailscale-User-*`；没有可信身份时请使用一次性配对。
+
+## OAuth、密钥轮换与断开
+
+```bash
+ocx config set oauthOpenBrowser false
+ocx connect rotate --pairing-code-stdin
+# 仅限 HTTPS：
+ocx connect rotate --admin-token-stdin
+```
+
+通过 `POST /api/oauth/login` 启动 OAuth。如果回调无法到达 hub，将最终 URL 或授权码作为 `{provider,input}` 发送到 `POST /api/oauth/login/code`。不要把 OAuth 码放入 argv 或日志。
+
+轮换期间，旧密钥和新密钥在同一个 `apiKeyId` 下最多同时有效十分钟。旧密钥备份到 `service-api-token.prev`，新密钥以原子方式安装，并通过 `/v1/catalog` 验证后提交。如果提交结果不确定，请使用临时权限重新运行命令；在验证两个候选密钥前不要删除任何文件。
+
+`ocx disconnect` 即使 hub 离线也能恢复本地状态，但不会吊销 hub 密钥。断开后，唯一的吊销入口是 hub 的 **Integrations → API Keys**。`ocx connect revoke --admin-token-stdin` 只能在仍连接时使用。
+
+## Docker、回滚与排障
+
+opencodex 不发布官方 Docker 镜像。请按 digest 固定 Bun 镜像，将 `/home/bun/.opencodex` 挂载为持久卷，并将密钥挂载到 `/run/secrets/ocx_api_token`。只发布 `10100`，不要发布 `10101`。不要把密钥放入 `ARG`、`ENV`、`COPY`、Compose、镜像历史或 argv。healthcheck 后仍需单独验证 readiness、目录和真实请求。
+
+- hub 宕机：可以离线断开，但远程密钥仍待吊销。
+- 目录过期：仅在临时故障时保留已验证的 LKG；认证、架构、大小或协议错误不会回退到本地提供商。
+- `.prev` 恢复：保留两个文件，使用临时权限重新运行轮换。
+- `hub-too-new`/`hub-too-old` 会指出需要升级的一端，并在本地写入前失败。
+- 配对码一次性使用，失败次数会触发 429；丢失后请重新创建。
+- 非回环 HTTP 配对必须显式使用 `--allow-insecure-http`；Admin token 绝不通过 HTTP 发送。
+- 浏览器 logout/expiry 只影响会话，不会吊销数据密钥。
+- `tailscale serve reset` 会删除节点上的所有映射，请先查看 `tailscale serve status`。

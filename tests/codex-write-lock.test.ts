@@ -23,6 +23,7 @@ import {
   withCodexWriteLock,
 } from "../src/codex/codex-write-lock";
 import type { AdmissionSnapshot } from "../src/codex/convergence-types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 let root = "";
 let codexHome = "";
@@ -88,7 +89,7 @@ beforeEach(() => {
 afterEach(() => {
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
-  while (cleanup.length) rmSync(cleanup.pop()!, { recursive: true, force: true });
+  while (cleanup.length) removeTreeWithRetry(cleanup.pop()!);
 });
 
 describe("canonical home identity", () => {
@@ -322,7 +323,7 @@ describe("two real processes contend for one lock", () => {
     const holdMarker = join(root, "held");
     const releaseMarker = join(root, "release");
 
-    const holder = spawnChild({ holdMarker, releaseMarker, timeoutMs: 0 });
+    const holder = spawnChild({ holdMarker, releaseMarker, timeoutMs: 0, holdMs: 20_000 });
     await waitFor(holdMarker);
 
     // The lock is genuinely held by another process right now.
@@ -355,7 +356,7 @@ describe("two real processes contend for one lock", () => {
   test("a contender with a deadline waits for the holder instead of failing immediately", async () => {
     const holdMarker = join(root, "held-2");
     const releaseMarker = join(root, "release-2");
-    const holder = spawnChild({ holdMarker, releaseMarker, timeoutMs: 0 });
+    const holder = spawnChild({ holdMarker, releaseMarker, timeoutMs: 0, holdMs: 20_000 });
     await waitFor(holdMarker);
 
     const waiter = withCodexWriteLock(options({ timeoutMs: 5_000 }), publishing("waited"));
@@ -426,7 +427,10 @@ describe("two real processes contend for one lock", () => {
       const holdMarker = join(root, `held-env-${name.replace(/[^a-z]+/gi, "-")}`);
       const releaseMarker = join(root, `release-env-${name.replace(/[^a-z]+/gi, "-")}`);
 
-      const holder = spawnChildWithEnv({ holdMarker, releaseMarker, timeoutMs: 0 }, { ...a });
+      // holdMs is a ceiling, not a duration: the release marker ends the hold. It only has
+      // to outlast the contender's process boot, which took >4 s on windows-latest in run
+      // 33603770447 and made the default 3 s hold expire first (read as 'acquired').
+      const holder = spawnChildWithEnv({ holdMarker, releaseMarker, timeoutMs: 0, holdMs: 20_000 }, { ...a });
       await waitFor(holdMarker);
 
       // Fail-fast: if the two environments produced different lock files this

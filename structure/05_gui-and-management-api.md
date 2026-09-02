@@ -61,11 +61,25 @@ management token creation, validation, or permission hardening fails, every `/ap
 must be checked explicitly because an `icacls` timeout is a soft failure in the shared secret helper.
 
 Local dashboard page entry requires a loopback binding, a valid parseable loopback `Host`, and an
-exact request origin. A non-loopback dashboard uses the management token flow instead. The server
-issues an in-memory session for five minutes, capped at 128 live sessions. The session is bound to the
-exact protocol, host, and port; state-changing requests additionally require the session CSRF token.
-The dashboard never attaches its management session to `/v1/*` requests, and pages containing a
-session bootstrap are served with `Cache-Control: no-store`.
+exact request origin. A hub may additionally enable `hub.managementIngress`, a second management
+surface bound exactly to `127.0.0.1` for a local Tailscale Serve or operator TLS frontend. That
+listener serves only packaged GUI/SPA routes, `GET`/`POST /opencodex-session`, and `/api/*`; all data,
+health, readiness, WebSocket, and unknown-static routes receive a JSON 404 before dispatch.
+
+Tailscale identity headers authorize session issuance only when the request arrived on that specific
+listener and the exact login appears in `remoteGui.allowedTailscaleUsers`. The public listener and
+the unauthenticated data-loopback listener always pass `trustedTailscaleIngress: false`, regardless
+of `Host`, `Origin`, `Forwarded`, `X-Forwarded-*`, or `Tailscale-User-*` values. A generic TLS proxy
+cannot establish that identity and uses the existing single-use, digest-only, origin-bound pairing
+exchange. Pairing accepts no admin/data credential substitute and consumes a grant only after the
+full origin predicate succeeds.
+
+The server issues a local in-memory session for five minutes or a remote session for twelve hours,
+with 128 live sessions maximum. Every session is bound to the exact server and browser origins;
+state-changing requests additionally require the session CSRF token. A raw admin token remains
+ordinary management authority only and cannot satisfy consent routes. The dashboard never attaches
+its management session to `/v1/*` requests, and pages containing a session bootstrap are served with
+`Cache-Control: no-store`.
 
 Proxy admission credentials must never reach an upstream provider. The forwarding guard rejects the
 `ocx_data_`, `ocx_admin_`, and `ocx_session_` prefixes, historical keys matching
@@ -115,7 +129,7 @@ this document owns is which module holds which area and what invariant that area
 | V2 / Multi-agent mode | `GET/PUT /api/v2` — reports/sets the codex `multi_agent_v2` feature flag, the 3-state `multiAgentMode` override (`v1`/`default`/`v2`), the `keepNativeChatGptOnV1` hybrid pin, and the logical maximum thread count. Selecting `v2` normally enables the native flag; with the hybrid pin it disables that global override so native rows can resolve to v1 while routed rows resolve to v2. Selecting `v1` disables the flag; `default` leaves it unchanged. PUT rejects an explicit enabled flag that conflicts with the selected mode or hybrid pin. Every transition preserves the logical thread limit, is rollback-safe, and resyncs the catalog. |
 | Logs & Debug | One sidebar entry (`/#logs`) with two tabs. Logs tab: request/runtime logs for local diagnosis. Debug tab (`/#logs/debug`; legacy `/#debug` deep links redirect there): provider + usage toggles, refresh/follow log viewer. `GET/PUT /api/debug`; `GET /api/debug/logs` and `GET /api/debug/usage-logs` (monotonic `after` cursor, legacy `since` accepted). CLI: `ocx debug provider|usage …` (both streams via running proxy API). |
 | Usage | `GET /api/usage` aggregate read-only summary derived from `~/.opencodex/usage.jsonl`; measured / reported / unreported / unsupported / estimated counts, daily zero-filled grid, model and provider breakdowns. Never exposes prompts. |
-| System | `POST /api/system/restart` restarts the proxy in place. Local CLI/tray callers first attest the exact runtime PID and port, then send a process-scoped HMAC capability bound to that method, path, PID, and port; the capability authorizes no other management route and is invalid after replacement. The caller observes one absolute deadline and accepts success only after a different runtime PID is healthy on the same port. `GET /api/system/memory` — service-process runtime/memory identity (pid, Bun version/revision, optional `bunRuntimeSource` provenance, platform, RSS/heap/external/ArrayBuffers scalars, observed memory = max(RSS, external, ArrayBuffers), `bun:jsc` heap context, streamMode + eager-relay gate decision, watchdog snapshot sliced to the last 60 samples) plus privacy-safe `appOwnedBytes` retained-store totals/counters under static store ids. Scalar-only payload; dashboard/admin callers use the standard management gate, while `ocx doctor` may use only the exact process-scoped local-read capability. It must never move to unauthenticated `/healthz`. |
+| System | `POST /api/system/restart` restarts the proxy in place. Local CLI/tray callers first attest the exact runtime PID and port, then send a process-scoped HMAC capability bound to that method, path, PID, and port; the capability authorizes no other management route and is invalid after replacement. The caller observes one absolute deadline and accepts success only after a different runtime PID is healthy on the same port. `GET /api/system/health` is the authenticated scalar-only identity used by shared-plane Dashboard status and restart reconnect polling; it does not widen a Remote Hub management ingress to unauthenticated `/healthz`. `GET /api/system/memory` — service-process runtime/memory identity (pid, Bun version/revision, optional `bunRuntimeSource` provenance, platform, RSS/heap/external/ArrayBuffers scalars, observed memory = max(RSS, external, ArrayBuffers), `bun:jsc` heap context, streamMode + eager-relay gate decision, watchdog snapshot sliced to the last 60 samples) plus privacy-safe `appOwnedBytes` retained-store totals/counters under static store ids. Scalar-only payload; dashboard/admin callers use the standard management gate, while `ocx doctor` may use only the exact process-scoped local-read capability. It must never move to unauthenticated `/healthz`. |
 | Stop | `POST /api/stop` — restore native Codex, stop any installed service, and exit the proxy. |
 | Diagnostics/sync | `src/server/management/config-routes.ts` — `GET /api/diagnostics/project-config` reports project-level Codex config that bypasses managed routing; `POST /api/sync` re-runs catalog/config sync. The diagnostic reports the bypass; it does not rewrite the project file. |
 | Sidecar/shadow-call settings | `src/server/management/config-routes.ts` — `GET/PUT /api/sidecar-settings` and `GET/PUT /api/shadow-call-settings`. PUT accepts model and backend (web-search union: openai/anthropic/xai/gemini/exa; xAI is live through stored Grok OAuth, while Gemini/Exa remain inert until their executors ship) plus validated `webSearch.xSearch`, optional `webSearch.exaApiKey` (write/clear only — never echoed by GET or the PUT response; redact.ts strips it from logs), `webSearch.reasoning`, `vision.reasoning`, `vision.enabled`, `vision.maxDescriptionsPerTurn`, and `vision.timeoutMs`; the read and PUT-response payload reports model, backend, reasoning, enabled, the vision per-turn limit, and timeout. `timeoutMs` is validated against the runtime integer bounds in `src/vision/timeout-bounds.ts`. Provider/OAuth credentials live in their stores; `exaApiKey` is the one sidecar-owned secret and follows the write-only contract above. Both shadow-call responses also report the resolved `sourceModels` — the prefixes the runtime actually intercepts (`src/lib/shadow-call.ts`, default `gpt-5.4-mini` + `gpt-5.6-luna`), so no client hard-codes a helper slug that a Codex release can invalidate. |
@@ -366,3 +380,7 @@ the next start (legacy `OCX_DEBUG_FRAMES` still enables the same path). Lines
 use the `[ocx:<adapter>:<event>]` prefix, go to the proxy terminal, and are buffered for
 `ocx debug provider logs` / `ocx debug provider logs -f`. Usage JSONL tails with
 `ocx debug usage logs [-f]`. Separate from provider buffered logs above.
+
+## Remote credentials and bounded sessions
+
+Data keys authorize only the data matrix and authenticated catalog. Admin credentials authorize ordinary management and key rotation but cannot mint, exchange, or refresh a `gui-session`. Pairing grants are digest-only, origin-bound, one-use, capped at 128 live grants, burned after five grant failures, and source-limited after ten failures in ten minutes with at most 1,024 source buckets. `POST /api/session/logout` invalidates only the current origin/CSRF-authorized browser session.

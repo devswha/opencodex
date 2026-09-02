@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync} from "node:fs";
 import { join } from "node:path";
 import {
   cancelLoginFlow,
@@ -18,8 +18,15 @@ import type { OcxConfig } from "../src/types";
 import type { OAuthController } from "../src/oauth/types";
 import { getCredential } from "../src/oauth/store";
 import * as oauthStore from "../src/oauth/store";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
+
+// Server-less OAuth store test: nothing drains hardenConfigDir()'s icacls flight before
+// teardown (run 33612731522 shard 3). Same treatment as oauth-reauth-bind.
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 import { armClaudeCodeBaseline, loadConfig, saveConfig, saveConfigPreservingClaudeCode } from "../src/config";
 import { isApiAuthRequired, requireApiAuth } from "../src/server/auth-cors";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-oauth-public-surface");
 const PUBLIC_OAUTH_ERROR = "OAuth authentication failed. Check the OpenCodex account status and retry.";
@@ -40,17 +47,22 @@ function config(): OcxConfig {
 }
 
 beforeEach(() => {
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   clearLoginState("xai");
-  rmSync(TEST_DIR, { recursive: true, force: true });
+  removeTreeWithRetry(TEST_DIR);
   mkdirSync(TEST_DIR, { recursive: true });
   process.env.OPENCODEX_HOME = TEST_DIR;
 });
 
-afterEach(() => {
+afterEach(async () => {
   clearLoginState("xai");
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
-  rmSync(TEST_DIR, { recursive: true, force: true });
+  removeTreeWithRetry(TEST_DIR);
 });
 
 async function waitForOAuthDone(provider: string): Promise<ReturnType<typeof getLoginStatus>> {

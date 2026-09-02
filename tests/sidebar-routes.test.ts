@@ -19,7 +19,7 @@ async function call(
   method: string,
   pathname: string,
   headers: Record<string, string> = {},
-  principal?: "admin-token" | "gui-session",
+  principal?: "admin-token" | "gui-session" | "gui-pair-capability",
 ): Promise<{ status: number; body: unknown; raw: string; routed: boolean }> {
   // `isAllowedManagementOrigin` derives the expected origin from the Host header and
   // rejects the request outright when it is missing, so Host is required here. Omitting
@@ -218,6 +218,20 @@ describe("route surface", () => {
       expect(status).toBe(403);
       expect((body as Record<string, unknown>).code).toBe("agent_consent_required");
     }));
+    expect(calls).toEqual([]);
+  });
+
+  test("a GUI pairing capability is not a consent-bearing session principal", async () => {
+    const calls: string[][] = [];
+    await withStarDeps({
+      nowMs: () => 0,
+      async runGh(args) { calls.push(args); return { status: 0 }; },
+    }, async () => {
+      invalidateStarStatusCache();
+      const { status, body } = await call("POST", "/api/github/star", {}, "gui-pair-capability");
+      expect(status).toBe(403);
+      expect((body as Record<string, unknown>).code).toBe("agent_consent_required");
+    });
     expect(calls).toEqual([]);
   });
 

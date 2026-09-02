@@ -24,12 +24,14 @@ const USAGE = `Usage:
       [--auth-mode <key|forward|oauth|local|->] [--note <text|->]
       [--api-key-transport <x-api-key|bearer|->]
       [--headers <json>] [--enabled <on|off>] [--live-models <on|off>]
+      [--retain-models <id,id|->]
       [--allow-private-network <on|off>] [--json]
   ocx provider test <name> [--json]
   ocx provider quota [--refresh] [--json]
   ocx provider presets [--json]
   ocx provider account-mode <pool|direct> [--json]
-  ocx provider selected <name> [--set <model,model...>] [--clear] [--json]`;
+  ocx provider selected <name> [--set <model,model...>] [--clear] [--json]
+  ocx provider keychain <name> [status|store|restore] [--json]`;
 
 function cleared(value: string | undefined): string | undefined {
   return value === "-" ? "" : value;
@@ -48,6 +50,7 @@ async function edit(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   const note = cleared(takeOption(args, "--note"));
   const apiKeyTransport = cleared(takeOption(args, "--api-key-transport"));
   const headers = takeOption(args, "--headers");
+  const retainModelsRaw = takeOption(args, "--retain-models");
   const enabled = takeBooleanOption(args, "--enabled");
   const liveModels = takeBooleanOption(args, "--live-models");
   const allowPrivateNetwork = takeBooleanOption(args, "--allow-private-network");
@@ -74,6 +77,10 @@ async function edit(argv: string[], deps: RuntimeApiDeps): Promise<void> {
     }
   }
   if (enabled !== undefined) patch.disabled = !enabled;
+  if (retainModelsRaw !== undefined) {
+    // `-` clears, matching the other `edit` scalars; test before csv() or it becomes ["-"].
+    patch.retainModels = retainModelsRaw.trim() === "-" ? null : csv(retainModelsRaw);
+  }
   if (liveModels !== undefined) patch.liveModels = liveModels;
   if (allowPrivateNetwork !== undefined) patch.allowPrivateNetwork = allowPrivateNetwork;
   if (Object.keys(patch).length === 0) throw new CliUsageError("at least one edit option is required", USAGE);
@@ -175,6 +182,28 @@ async function selected(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   printData(result, wantsJson, [`${name}: ${models.length ? models.join(", ") : "all models"}`]);
 }
 
+async function keychain(argv: string[], deps: RuntimeApiDeps): Promise<void> {
+  const args = [...argv];
+  const name = args.shift()?.trim();
+  const wantsJson = takeFlag(args, "--json");
+  const action = (args.shift() ?? "status").toLowerCase();
+  if (!name) throw new CliUsageError("provider name is required", USAGE);
+  if (!["status", "store", "restore"].includes(action)) throw new CliUsageError(`unknown keychain action ${action}`, USAGE);
+  rejectArgs(args, USAGE);
+  if (action === "status") {
+    const result = await runtimeRequest<Record<string, unknown>>(`/api/providers/keychain?name=${encodeURIComponent(name)}`, {}, deps);
+    printData(result, wantsJson, summaryLines(result));
+    return;
+  }
+  const result = await runtimeRequest<Record<string, unknown>>("/api/providers/keychain", {
+    method: "POST",
+    body: JSON.stringify({ name, action }),
+  }, deps);
+  printData(result, wantsJson, [action === "store"
+    ? `${name}: API key moved to the OS keychain; config.json now holds a keychain: reference.`
+    : `${name}: API key restored to config.json; keychain entries removed.`]);
+}
+
 export async function handleProviderRuntimeCommand(sub: string, argv: string[], deps: RuntimeApiDeps = {}): Promise<number | null> {
   const handlers: Record<string, (args: string[], deps: RuntimeApiDeps) => Promise<void>> = {
     edit,
@@ -184,6 +213,7 @@ export async function handleProviderRuntimeCommand(sub: string, argv: string[], 
     presets,
     "account-mode": accountMode,
     selected,
+    keychain,
   };
   const handler = handlers[sub];
   if (!handler) return null;

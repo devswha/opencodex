@@ -72,14 +72,16 @@ import { handleSidebarRoutes } from "./management/sidebar-routes";
 import { handleCodexPromptRoutes } from "./management/codex-prompt-routes";
 import { handleIntegrationRoutes } from "./management/integration-routes";
 import { handleNativeIntegrationRoutes } from "./management/native-integration-routes";
+import { handleCursorIntegrationRoutes } from "./management/cursor-integration-routes";
 import type { ManagementContext } from "./management/context";
-import type { ManagementPrincipal } from "./management-auth";
+import type { ManagementPrincipal, ManagementSessionControl } from "./management-auth";
 export type { ManagementApiDeps } from "./management/context";
 import { fetchAllModels } from "./management/shared";
 import { CatalogGatherBusyError } from "../codex/catalog/provider-fetch";
 import type { CatalogDisposition, ConvergeCodex } from "../codex/convergence-types";
 import { normalizeCatalogDisposition } from "../codex/catalog-refresh-status";
 import { managementBodyTooLargeResponse } from "./management/body";
+import { handleSessionRoutes } from "./management/session-routes";
 
 // installed npm version instead of a stale hardcode.
 export const VERSION = (() => {
@@ -136,6 +138,7 @@ export async function handleManagementAPI(
   config: OcxConfig,
   deps: ManagementApiDeps = {},
   principal?: ManagementPrincipal,
+  sessionControl?: ManagementSessionControl,
 ): Promise<Response | null> {
   if (!isAllowedManagementOrigin(req, config)) {
     return jsonResponse({ error: "cross-origin request blocked" }, 403, req, config);
@@ -218,10 +221,11 @@ export async function handleManagementAPI(
       }
     } catch { /* best-effort */ }
   }
-  const ctx: ManagementContext = { req, url, config, deps, principal, convergeCodexCatalog, syncClaudeAgentDefsBestEffort };
+  const ctx: ManagementContext = { req, url, config, deps, version: VERSION, principal, sessionControl, convergeCodexCatalog, syncClaudeAgentDefsBestEffort };
   let routed: Response | null;
   try {
-    routed = (await handleConfigRoutes(ctx))
+    routed = handleSessionRoutes(ctx)
+    ??     (await handleConfigRoutes(ctx))
     ??     (await handleStorageLogGuardRoutes(ctx))
     ??     (await handleLogsUsageRoutes(ctx))
     ??     (await handleRequestHistoryRoutes(ctx))
@@ -231,6 +235,7 @@ export async function handleManagementAPI(
     ??     (await handleModelRoutes(ctx))
     ??     (await handleIntegrationRoutes(ctx))
     ??     (await handleNativeIntegrationRoutes(ctx))
+    ??     (await handleCursorIntegrationRoutes(ctx))
     ??     (await handleAgentSettingsRoutes(ctx))
     ??     (await handleCodexPromptRoutes(ctx))
     ??     (await handleOauthAccountRoutes(ctx))

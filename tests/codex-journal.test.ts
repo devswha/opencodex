@@ -10,6 +10,7 @@ import {
   MANAGED_SUBAGENT_DEFAULT_MARKER,
 } from "../src/codex/subagent-defaults";
 import { SPAWN_BUDGET_MS } from "./helpers/test-budget";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
@@ -34,7 +35,7 @@ describe("codex-journal", () => {
   });
 
   afterEach(() => {
-    rmSync(testDir, { recursive: true, force: true });
+    removeTreeWithRetry(testDir);
   });
 
   test("writeJournal creates journal file", () => {
@@ -124,6 +125,39 @@ describe("codex-journal", () => {
     expect(JSON.parse(r.stdout).restored).toBe(false);
     expect(readFileSync(join(testDir, "config.toml"), "utf8")).toBe(modified);
     expect(existsSync(journalPath)).toBe(true);
+  });
+
+  test("client-owned journal survives only the matching committed api key id", () => {
+    const journalPath = join(testDir, "opencodex-journal.json");
+    const original = "# original client baseline\n";
+    const injected = "# connected routing\n";
+    writeFileSync(join(testDir, "config.toml"), injected, "utf8");
+    writeFileSync(journalPath, JSON.stringify({
+      version: 1,
+      originalConfig: Buffer.from(original).toString("base64"),
+      originalProfile: null,
+      owner: { kind: "client", apiKeyId: "client-key-1" },
+      pid: 999999,
+      timestamp: new Date().toISOString(),
+    }), "utf8");
+
+    const preserved = runScript(testDir, `
+      const { reconcileJournal } = require("./src/codex/journal");
+      console.log(JSON.stringify({ restored: reconcileJournal({ activeClientApiKeyId: "client-key-1" }) }));
+    `);
+    expect(preserved.status).toBe(0);
+    expect(JSON.parse(preserved.stdout).restored).toBe(false);
+    expect(readFileSync(join(testDir, "config.toml"), "utf8")).toBe(injected);
+    expect(existsSync(journalPath)).toBe(true);
+
+    const restored = runScript(testDir, `
+      const { reconcileJournal } = require("./src/codex/journal");
+      console.log(JSON.stringify({ restored: reconcileJournal({ activeClientApiKeyId: "different-key" }) }));
+    `);
+    expect(restored.status).toBe(0);
+    expect(JSON.parse(restored.stdout).restored).toBe(true);
+    expect(readFileSync(join(testDir, "config.toml"), "utf8")).toBe(original);
+    expect(existsSync(journalPath)).toBe(false);
   });
 
   test("removeJournal cleans up", () => {
@@ -618,5 +652,29 @@ describe("codex-journal", () => {
     ].join("\n"), "utf8");
     runScript(testDir, `require("./src/codex/journal").writeJournal(); console.log("done");`);
     expect(existsSync(join(testDir, "opencodex-journal.json"))).toBe(false);
+  });
+
+  test("a restore that leaves the profile behind never reports complete (source-level)", () => {
+    // "There was no profile before, so delete the one we generated." When that unlink
+    // fails, reporting success also deletes the journal — the only record that the leftover
+    // profile is ours — and disconnect then tells the user native state was restored.
+    //
+    // Source-level because the failure is not reachable from a test process: making unlink
+    // fail requires denying writes on the Codex home, and that denies the atomic config
+    // write earlier in the same function, so the call throws before the branch runs.
+    // Asserting the shape is honest about what is being checked; asserting a fabricated
+    // runtime failure would not be.
+    const source = readFileSync(join(repoRoot, "src/codex/journal.ts"), "utf8");
+    const restore = source.slice(source.indexOf("export function restoreJournalState"));
+    const body = restore.slice(0, restore.indexOf("\nexport "));
+
+    // The unlink result must decide profileRestored. The pre-fix shape set it
+    // unconditionally after a swallowed try/catch.
+    expect(body).not.toMatch(/catch \{ \/\* ignore \*\/ \}\s*\n\s*\}\s*\n\s*profileRestored = true;/);
+    // ENOENT is the one benign unlink failure: the file is already gone, which is the
+    // outcome the removal wanted.
+    expect(body).toContain('=== "ENOENT"');
+    // And completeness still gates journal deletion.
+    expect(body).toContain("if (complete) removeJournal();");
   });
 });

@@ -51,6 +51,11 @@ const RELEASE_NOTES_URL = "https://github.com/lidge-jun/opencodex/releases/lates
 const UPDATE_JOB_FILENAME = "update-job.json";
 const UPDATE_TIMEOUT_MS = 180_000;
 const RESTART_TIMEOUT_MS = 60_000;
+// A Windows `service repair` can spend up to 45s in its own serving probe after
+// Task Scheduler/ACL work. The generic 60s child ceiling can kill that valid repair
+// and launch a competing foreground proxy. Keep this below the update worker's 180s
+// ceiling while covering the measured probe plus bounded Windows setup work.
+const WINDOWS_SERVICE_REPAIR_TIMEOUT_MS = 150_000;
 const RESTART_HEALTH_TIMEOUT_MS = 30_000;
 const RESTART_STABILITY_WINDOW_MS = 15_000;
 /** Legacy active records did not persist a worker PID, so age is their only safe recovery signal. */
@@ -687,7 +692,12 @@ export function startUpdateJob(
  * and a bounded, structured summary — enough to tell a user which step failed and how, with no
  * free-form vendor text passing through the boundary. Detailed output stays ephemeral.
  */
-function runLoggedCommand(job: UpdateJobState, bin: string, args: string[], timeout: number): { status: number | null; signal: NodeJS.Signals | null } {
+function runLoggedCommand(
+  job: UpdateJobState,
+  bin: string,
+  args: string[],
+  timeout: number,
+): { status: number | null; signal: NodeJS.Signals | null; timedOut: boolean } {
   job = updateJob(job, {}, `$ ${formatCommand(bin, args)}`);
   const result = spawnSync(bin, args, {
     encoding: "utf8",
@@ -698,7 +708,11 @@ function runLoggedCommand(job: UpdateJobState, bin: string, args: string[], time
   const stderr = typeof result.stderr === "string" ? result.stderr.trim() : "";
   const summary = summarizeCommandOutput(stdout, stderr, result.status, result.signal);
   if (summary) updateJob(job, {}, summary);
-  return { status: result.status, signal: result.signal };
+  return {
+    status: result.status,
+    signal: result.signal,
+    timedOut: (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT",
+  };
 }
 
 /**
@@ -987,7 +1001,8 @@ export interface RestartIo {
     job: UpdateJobState,
     bin: string,
     args: string[],
-  ) => { status: number | null; signal?: NodeJS.Signals | null };
+    timeoutMs: number,
+  ) => { status: number | null; signal?: NodeJS.Signals | null; timedOut?: boolean };
   /** Override the explicit restart path (used by finishGuiUpdateRestart tests). */
   restartAfterUpdateFn?: (
     job: UpdateJobState,
@@ -1155,10 +1170,23 @@ async function restartAfterUpdate(
       process.env.OCX_BAKE_PORT = String(Math.trunc(port));
       let serviceOk = false;
       try {
-        const run = io.runService ?? ((j, bin, args) => runLoggedCommand(j, bin, args, RESTART_TIMEOUT_MS));
-        const result = run(job, cmd.bin, cmd.args);
+        const repairTimeoutMs = (io.platform ?? process.platform) === "win32"
+          ? WINDOWS_SERVICE_REPAIR_TIMEOUT_MS
+          : RESTART_TIMEOUT_MS;
+        const run = io.runService ?? ((j, bin, args, timeoutMs) => runLoggedCommand(j, bin, args, timeoutMs));
+        const result = run(job, cmd.bin, cmd.args, repairTimeoutMs);
         serviceOk = result.status === 0;
         if (!serviceOk) {
+          if (result.timedOut) {
+            // UAC and scheduler mutation can outlive a fixed child deadline. Once the
+            // worker kills that child, ownership is ambiguous: launching a foreground
+            // proxy here can race a registration that completes moments later.
+            updateJob(job, {}, "Service repair timed out with Task Scheduler state unknown; refusing a competing direct start.");
+            throw new Error(
+              "Service repair timed out with Task Scheduler state unknown; refusing a competing direct start. "
+              + "Run 'ocx service status', then 'ocx service repair' by hand.",
+            );
+          }
           // The refresh that just failed was `ocx service repair` (serviceReinstallArgs).
           // It normally reuses a healthy registration, but a stale definition may have tried
           // guarded re-registration/elevation. Advising `install` here would unconditionally

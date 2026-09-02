@@ -1,11 +1,40 @@
 import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, rmSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-codex-accounts-test");
-const ACCOUNTS_PATH = join(TEST_DIR, "codex-accounts.json");
+/**
+ * Per-test scratch home. A fixed repo-local directory meant that ONE failed teardown (Windows
+ * EPERM while icacls.exe still held the dir) poisoned every later case in the file: 49 of the
+ * 49 errors in run 33590540220 were before/after hooks failing on the same path.
+ */
+let TEST_DIR = "";
+let ACCOUNTS_PATH = "";
+
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+
+function installScratchHome(): void {
+  // These exercises cover credential-store contention, not Windows ACL behavior. Stub BOTH
+  // runners: hardenConfigDir() uses the async one, so a sync-only stub still spawned icacls.
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-accounts-"));
+  ACCOUNTS_PATH = join(TEST_DIR, "codex-accounts.json");
+  process.env.OPENCODEX_HOME = TEST_DIR;
+}
+
+async function removeScratchHome(): Promise<void> {
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  delete process.env.OPENCODEX_HOME;
+  if (TEST_DIR) removeTreeWithRetry(TEST_DIR);
+  TEST_DIR = "";
+}
 
 function refreshGrantFingerprint(refreshToken: string): string {
   return createHash("sha256").update(`codex-refresh-grant:${refreshToken}`).digest("hex");
@@ -28,21 +57,8 @@ function planJwt(plan: string, accountId = "acct-plan-flight"): string {
 }
 
 describe("codex-account-store CRUD", () => {
-  beforeEach(() => {
-    // These exercises cover credential-store contention, not Windows ACL behavior.
-    // Avoid spawning icacls for every fixture write; its lingering handle makes
-    // the fixed fixture directory flaky under `bun test --isolate` on Windows.
-    setIcaclsRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-  });
-
-  afterEach(() => {
-    setIcaclsRunnerForTests(null);
-    delete process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-  });
+  beforeEach(() => { installScratchHome(); });
+  afterEach(async () => { await removeScratchHome(); });
 
   test("save and load credential round-trip", async () => {
     const { saveCodexAccountCredential, getCodexAccountCredential } = await import("../src/codex/account-store");
@@ -1225,18 +1241,8 @@ describe("codex-account-store CRUD", () => {
 });
 
 describe("shared refresh flight plan reconciliation (#2892 gap 2 follow-up)", () => {
-  beforeEach(() => {
-    setIcaclsRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-  });
-
-  afterEach(() => {
-    setIcaclsRunnerForTests(null);
-    delete process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-  });
+  beforeEach(() => { installScratchHome(); });
+  afterEach(async () => { await removeScratchHome(); });
 
   test("an aborted owner still reconciles the refreshed plan for the shared flight", async () => {
     // The flight deliberately outlives the caller that opened it, so plan reconciliation

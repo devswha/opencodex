@@ -243,3 +243,7 @@ account의 selector binding은 남아 있어 계정이 없을 때 exact route가
 ## 클라이언트 선택
 
 일반적인 관리 작업에는 [Web Dashboard](/guides/web-dashboard/)가 가장 안전한 안내형 워크플로를 제공합니다. 헤드리스 호스트와 자동화에는 대응하는 `ocx` 명령을 사용하십시오. 이 명령들은 동일한 실시간 API를 호출하며, 프록시에 접근할 수 없거나 작업이 실패하면 0이 아닌 결과를 반환합니다. 직접 HTTP는 위의 정확한 엔드포인트 계약이 필요한 통합에 가장 유용합니다.
+
+## 원격 세션과 데이터 키 교체
+
+`POST /api/keys/rotate {id}`는 최대 10분의 전환을 시작하며 새 데이터 키를 한 번만 반환합니다. `POST /api/keys/rotate/commit {id,rotationId}`는 확정하고, `DELETE /api/keys/rotate {id,rotationId}`는 취소합니다. 모두 관리 인증이 필요하며 데이터 키로 호출할 수 없습니다. `POST /api/session/logout`은 현재 `gui-session`, 일치하는 Origin, CSRF가 필요합니다. 관리자 토큰은 403을 받고 동의 세션을 만들거나 교환할 수 없습니다.

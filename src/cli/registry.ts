@@ -87,6 +87,24 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   { name: "ensure", usage: "ocx ensure", summary: "Ensure the proxy is running and Codex config/cache are current." },
   {
+    name: "connect",
+    usage: "ocx connect <url> [--management-url <url>] (--pairing-code-stdin | --admin-token-stdin) [--clients codex,claude] [--management-transport direct|relay] [--no-sync]",
+    summary: "Connect this machine to a remote OpenCodex hub without persisting the one-time authority.",
+    details: [
+      "Status: ocx connect status [--json]",
+      "Rotate or recover: ocx connect rotate (--pairing-code-stdin | --admin-token-stdin) [--json]",
+      "Revoke while connected: ocx connect revoke --admin-token-stdin [--json]",
+      "Machine resources: /api/machine/status, /api/machine/shim, /api/machine/clients, /api/machine/sync, /api/machine/disconnect, and the fixed /api/machine/hub-relay namespace.",
+      "Remote browser self-logout uses /api/session/logout from the GUI; it is distinct from client disconnect and key revocation.",
+      "Credentials are accepted only through stdin; argv and environment credential forms are not supported.",
+    ],
+  },
+  {
+    name: "disconnect",
+    usage: "ocx disconnect [--keep-catalog] [--json]",
+    summary: "Restore local client state offline and clear the remote-hub connection.",
+  },
+  {
     name: "sync",
     usage: "ocx sync [--restart-codex] [--restart-desktop-app]",
     summary: "Fetch provider models and inject them into Codex config.",
@@ -128,7 +146,15 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   { name: "login", usage: "ocx login <provider>", summary: "OAuth or API-key login for a provider." },
   { name: "logout", usage: "ocx logout <provider>", summary: "Remove a stored provider login." },
-  { name: "gui", usage: "ocx gui", summary: "Open the opencodex dashboard." },
+  {
+    name: "gui",
+    usage: "ocx gui [pair --origin <browser-origin> [--json]]",
+    summary: "Open the opencodex dashboard or create a secret single-use remote pairing grant.",
+    details: [
+      "Pairing requires an explicit allowed --origin; there is no localhost or config-derived default.",
+      "The printed grant is secret, single-use, short-lived, and must not be persisted.",
+    ],
+  },
   {
     name: "update",
     usage: "ocx update [--tag latest|preview]",
@@ -240,8 +266,12 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     name: "access",
     usage: "ocx access <key|endpoints|models|test> ...",
     summary: "Manage OpenCodex admission API keys and inspect external endpoints.",
+    details: [
+      "Key rotation start uses POST /api/keys/rotate and returns the replacement secret once.",
+      "Commit uses POST /api/keys/rotate/commit; abort uses DELETE /api/keys/rotate with the returned rotation id.",
+    ],
   },
-  { name: "api-key", usage: "ocx api-key <list|create|remove> ...", summary: "Alias of ocx access key." },
+  { name: "api-key", usage: "ocx api-key <list|create|rotate|remove> ...", summary: "Alias of ocx access key." },
   {
     name: "export",
     usage: "ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside> [--json] [--out <path>] [--force]",

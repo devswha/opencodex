@@ -58,6 +58,7 @@ account を削除しても mapping は保持され、同じ id を再追加す�
 | `baseUrl` | `string` |アップストリーム API のベース URL。ほとんどの組み込み固定エンドポイントは不一致を無視します。衝突安全キー プリセットは、古い同じ名前のカスタム宛先を保持します。 |
 | `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | 上流の使用量、請求、レート制限表示とは別の、クライアント側の送信開始間隔調整です。プロバイダー制限は全モデルに適用され、`models` は上流の正確なモデル ID に一致し、遅延を増やす場合のみ有効です。キュー待機は応答ヘッダーのタイムアウトを消費しません。HTTP、Responses WebSocket、明示的なアダプターの `fetchResponse`/`runTurn` 送信を対象にします。 |
 | `responsesPath?` | `string` |キー認証 `openai-responses` リクエストの相対リソース パス。 `/` で始まり、スキーム、クエリ、またはフラグメントが含まれていない必要があります。 |
+| `upstreamWebsocket?` | `boolean` | `openai-responses` リクエストで使用するアップストリーム Responses WebSocket トランスポート（既定値は無効）。アップストリームがこのプロトコルに対応している場合、ストリーミング POST は設定済みの Responses パス（既定値 `/v1/responses`）へ HTTPS の WSS で接続し、通常の処理向けに SSE へ再エンコードされます。forward プロバイダーは `{baseUrl}/responses`、キー認証プロバイダーは `responsesPath`（未設定時は従来の `/v1/responses`）を使用します。HTTP のベース URL は SSE のままとなり、Responses 以外のパスと `openai-chat` リクエストは HTTP を使用します。 |
 | `supportsServiceTier?` | `boolean` | `service_tier` ケイパビリティの 3 状態です。`true`: fast モードが注入でき、呼び出し元の値も保持されます。`false`: フィールドは削除され、注入もされません (非対応と文書化されたアップストリームには送りません)。未設定: 未分類 — 呼び出し元の値はそのまま保持され、fast モードは注入しません。レジストリは正規 OpenAI (`true`)、DeepSeek、Volcengine Ark (`false`) を分類します。実際にティアをサポートするカスタム ゲートウェイにのみ明示的に設定してください。 |
 | `preserveResponsesReasoningContent?` | `boolean` | リプレイされる Responses reasoning アイテムの平文 reasoning コンテンツを消去せずに保持します (消去は ChatGPT バックエンドのルールです)。DeepSeek のように reasoning リプレイを受け入れるアップストリームで有効にしてください。プロキシ生成の `ocxr1` エンベロープは常に削除されます。 |
 | `disabled?` | `boolean` |プロバイダーをディスク上に保持しますが、ルーティングおよびモデル/カタログのリストからは除外します。 |
@@ -68,6 +69,7 @@ account を削除しても mapping は保持され、同じ id を再追加す�
 | `models?` | `string[]` |シード/フォールバック モデルのリスト。 `liveModels: false` では、発見されたモデルはこれらのみです。 |
 | `liveModels?` | `boolean` |開始/同期時にライブ カタログをフェッチします (デフォルトは `true`)。カスタムプロバイダーは `${baseUrl}/models` を使用します。組み込みはレジストリ URL とフィルターを使用する場合があります。 |
 | `selectedModels?` | `string[]` |検出後のカタログ許可リスト。空でない場合は、それらの ID のみが公開されます。空または省略すると、検出されたすべてのモデルが公開されます。 |
+| `modelDisplayNames?` | `Record<string, string>` | このプロバイダーの正確なネイティブモデル ID をキーにした、永続的な表示専用ラベルです。大文字と小文字は区別されます。ラベルはプロバイダーカタログのメタデータより優先され、認証、アダプター、ルーティング、課金、上流リクエストには影響しません。マップは検出上限と同じ 2,000 件までです。 |
 | `contextWindow?` | `number` | アップストリームのメタデータが無い場合に使うプロバイダー全体のコンテキスト値。メタデータがある場合は上限として働き、より小さいライブ値をそのまま残します。Models ダッシュボードでは `providerContextCaps` とは別に設定します。 |
 | `modelContextWindows?` | `Record<string, number>` | モデルごとのコンテキスト値および上限。`contextWindow` より優先され、ウィンドウが不明なら設定値を使い、より小さいライブメタデータがあればそちらが優先されます。 |
 | `modelInputModalities?` | `Record<string, string[]>` | `["text"]` や `["text", "image"]` などのモデルごとの入力ヒント。 |
@@ -107,6 +109,7 @@ account を削除しても mapping は保持され、同じ id を再追加す�
 | `transientRetryOn5xx?` | `{ enabled?: boolean; attempts?: number }` | キー認証の `openai-chat` プロバイダーのみ。ストリーム開始前に上流から返される一時的なステータス（500、502、503、504、520、521、522）に対するオプトインの再試行です。設定がなければ無効で、オブジェクトを指定すると `enabled: false` でない限り有効になります。最初の Responses リクエスト、ターミナルガード継続、ネイティブの `/v1/chat/completions`、および 429／アカウント回復時の再取得が対象です。`attempts` は最初の送信を含め、1 回のリクエストで許可される上流への送信総数です（1～10、デフォルトは 3）。接続リセット回復と共有するリクエスト単位の単一予算であるため、`3` を指定した場合、プロバイダーに到達する実リクエストは最大 3 回です。待機には 400 ms を基準とする固定式の指数バックオフを使用し、上限は 5 秒で、`Retry-After` に従います。レート制限を扱う `retryOn429` とは別の機能であり、ストリーム開始後の失敗は再送されません。 |
 | `autoToolChoiceOnlyModels?` | `string[]` | `tool_choice` が `auto` または `none` のみを受け入れるモデル。強制的な選択は格下げされます。 |
 | `preserveReasoningContentModels?` | `string[]` |チャット履歴に以前のアシスタント `reasoning_content` が必要なモデル。 |
+| `reasoningDetailsModels?` | `string[]` | thinking を構造化された `reasoning_details` 配列で返すモデル（`reasoning_split` 使用の MiniMax M シリーズ）。ストリーム差分は累積スナップショットとして prefix-diff され、保持された reasoning は `reasoning_content` 文字列ではなく `reasoning_details` 配列としてリプレイされます。 |
 | `requiresReasoningPlaceholderModels?` | `string[]` | `reasoning_content` を欠いた tool_call 継続を上流が拒否するモデル（DeepSeek thinking モード）。リプレイキャッシュが外れた場合に最小プレースホルダーを注入。未設定時は `preserveReasoningContentModels` を引き継ぎ、`[]` で明示的に無効化。 |
 | `thinkingToggleModels?` | `string[]` |エフォート ラダーではなく `thinking.enabled` を使用してモデルをチャットします。 |
 | `thinkingBudgetModels?` | `string[]` |整数 `thinking_budget` を使用したチャット モデル。労力は予算の一部にマッピングされます。 |
@@ -337,6 +340,8 @@ Vercel AI Gateway は、1 つのモデルを複数の基盤となる推論プロ
 `models` のみを公開するように `liveModels: false` を設定します。 `models` が空であるか省略されている場合、プロバイダーはルーティングされたモデルを公開しません。ライブ ディスカバリは、キャッシュする前に 4 MiB または 2,000 を超える生のモデル行を拒否します。組み込みのプリセットは下限を使用し、チャットに適した行にフィルターをかけることができます。サイズが大きすぎる、または形式が正しくない結果は、古い/構成されたフォールバックに続きます。ゼロに適格な有効な結果は引き続き権威を持ち、暗黙的に置き換えられたり切り捨てられたりすることはありません。
 
 検出を実行する必要があるが、選択した ID のみが Codex および `/v1/models` に表示される必要がある場合は、`selectedModels` を使用します。ダッシュボードには、後で許可リストを変更できるように、検出された完全なリストが保持されます。
+
+表示名には `modelDisplayNames` を使用します。優先順位は、運用者が設定した `modelDisplayNames`、プロバイダーカタログのメタデータ、通常の `provider/model` 表示の順です。キーはこのプロバイダー内の正確なネイティブモデル ID です。例えば `xai/grok-4.6` のキーは `grok-4.6` です。ラベルは表示専用で、正確なルーティング ID や上流モデル ID を変更しません。`config.json` の既存プロバイダー設定にこのフィールドだけを追加し、他のすべてのフィールドを残してください。`PUT /api/providers/:provider/model-display-names` に `{ "modelId": "grok-4.6", "displayName": "Grok 4.6" }` を送ると保存され、`displayName: null` を送るとその名前だけがリセットされます。
 
 プレビュー GPT-5.6 フォールバック エントリは同じメカニズムを使用します。 OpenAI API キー プリセットは、ベース ID と Pro ID にコンテキスト `922000` と最大入力 `922000` をシードします。 OpenRouter は、コンテキスト `922000` を持つ `openai/gpt-5.6-sol`、`openai/gpt-5.6-terra`、および `openai/gpt-5.6-luna` をシードします。プール/ダイレクトは `922000` をアドバタイズします。同期されたカタログは、`xhigh` を区別しつつ、`max` をアドバタイズします。
 

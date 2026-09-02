@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { handleManagementAPI } from "../src/server/management-api";
 import { loadConfig, saveConfig } from "../src/config";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
 import { ManagementRequest, managementHeaders } from "./helpers/management-auth";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const TEST_DIR = join(import.meta.dir, `.tmp-api-catalog-route-${process.pid}`);
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
 let isolatedCodexHome: IsolatedCodexHome | null = null;
+const CATALOG_FIXTURE_BYTES = '{"models":[{"slug":"mock/test-model","display_name":"Mock Test","description":"fixture","priority":1,"visibility":"list","base_instructions":"You are a helpful coding assistant.","input_modalities":["text"]}]}';
 
 beforeEach(() => {
   if (previousOpencodexHome === undefined) mkdirSync(TEST_DIR, { recursive: true });
@@ -30,7 +32,7 @@ afterEach(() => {
   isolatedCodexHome = null;
   if (previousOpencodexHome === undefined) {
     delete process.env.OPENCODEX_HOME;
-    rmSync(TEST_DIR, { recursive: true, force: true });
+    removeTreeWithRetry(TEST_DIR);
   } else {
     process.env.OPENCODEX_HOME = previousOpencodexHome;
   }
@@ -39,18 +41,7 @@ afterEach(() => {
 describe("GET /api/catalog route (#709)", () => {
   test("returns the on-disk catalog and omits sync runtime probes for version hint", async () => {
     isolatedCodexHome = installIsolatedCodexHome("ocx-api-catalog-");
-    const catalog = {
-      models: [{
-        slug: "mock/test-model",
-        display_name: "Mock Test",
-        description: "fixture",
-        priority: 1,
-        visibility: "list",
-        base_instructions: "You are a helpful coding assistant.",
-        input_modalities: ["text"],
-      }],
-    };
-    writeFileSync(join(isolatedCodexHome.path, "opencodex-catalog.json"), JSON.stringify(catalog));
+    writeFileSync(join(isolatedCodexHome.path, "opencodex-catalog.json"), CATALOG_FIXTURE_BYTES);
 
     const url = new URL("http://localhost/api/catalog");
     const response = await handleManagementAPI(
@@ -59,12 +50,53 @@ describe("GET /api/catalog route (#709)", () => {
       loadConfig(),
     );
     expect(response?.status).toBe(200);
-    expect(await response!.json()).toEqual(catalog);
+    expect(await response!.text()).toBe(CATALOG_FIXTURE_BYTES);
     expect(response!.headers.get("x-opencodex-codex-version")).toBeNull();
+  });
+
+  test("preserves the persisted Codex version header after serializer extraction", async () => {
+    isolatedCodexHome = installIsolatedCodexHome("ocx-api-catalog-version-");
+    writeFileSync(join(isolatedCodexHome.path, "opencodex-catalog.json"), CATALOG_FIXTURE_BYTES);
+    writeFileSync(join(TEST_DIR, "codex-runtime.json"), JSON.stringify({
+      version: 1,
+      command: "/fixture/codex",
+      source: "configured",
+      selectedVersion: "0.150.0",
+      updatedAt: "2026-08-28T00:00:00.000Z",
+    }));
+
+    const url = new URL("http://localhost/api/catalog");
+    const response = await handleManagementAPI(
+      new ManagementRequest(url, { headers: managementHeaders() }),
+      url,
+      loadConfig(),
+    );
+    expect(response?.status).toBe(200);
+    expect(response!.headers.get("x-opencodex-codex-version")).toBe("0.150.0");
+    expect(await response!.text()).toBe(CATALOG_FIXTURE_BYTES);
   });
 
   test("returns 404 when the catalog file is missing", async () => {
     isolatedCodexHome = installIsolatedCodexHome("ocx-api-catalog-missing-");
+    const url = new URL("http://localhost/api/catalog");
+    const response = await handleManagementAPI(
+      new ManagementRequest(url, { headers: managementHeaders() }),
+      url,
+      loadConfig(),
+    );
+    expect(response?.status).toBe(404);
+    expect(await response!.json()).toEqual({ error: "catalog not found" });
+  });
+
+  test("renders a malformed persisted catalog as absent rather than leaking the parse failure", async () => {
+    // The management route deliberately collapses unreadable, absent, and malformed
+    // into one 404. An earlier revision of this phase threw on malformed JSON and
+    // asserted 500 here, which distinguishes "your catalog file is corrupt" from
+    // "you have no catalog" to any caller that can reach the route. The shared
+    // serializer returns `{ body: null }` for all three so no route can accidentally
+    // reintroduce that distinction.
+    isolatedCodexHome = installIsolatedCodexHome("ocx-api-catalog-malformed-");
+    writeFileSync(join(isolatedCodexHome.path, "opencodex-catalog.json"), '{"models":');
     const url = new URL("http://localhost/api/catalog");
     const response = await handleManagementAPI(
       new ManagementRequest(url, { headers: managementHeaders() }),
@@ -122,9 +154,12 @@ describe("GET|HEAD /v1/catalog least-privilege data-plane route (#809)", () => {
       expect(res.status).toBe(200);
       const body = await res.text();
       expect(JSON.parse(body)).toEqual(catalogFixture);
-      expect(res.headers.get("cache-control")).toBe("private, no-cache");
-      const etag = res.headers.get("etag");
-      expect(etag).toBeTruthy();
+      // No validator on this plane: the body varies by key identity, so a shared strong
+      // ETag would let a store revalidate one credential's representation for another.
+      // `no-cache` did not prevent that — it permits storage and forces revalidation, and
+      // the revalidation is the crossing. See the note in src/server/index.ts.
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("etag")).toBeNull();
 
       // The whole point of the shared serializer: the two planes must not drift.
       const mgmtUrl = new URL("http://localhost/api/catalog");
@@ -136,12 +171,16 @@ describe("GET|HEAD /v1/catalog least-privilege data-plane route (#809)", () => {
       expect(mgmt?.status).toBe(200);
       expect(await mgmt!.text()).toBe(body);
 
-      // Conditional GET re-validates without resending the payload.
+      // A conditional request cannot succeed here, because no validator was ever handed
+      // out to build one from. Even a client that guesses the management route's ETag gets
+      // the full body rather than a 304.
+      const mgmtEtag = mgmt!.headers.get("etag");
+      expect(mgmtEtag).toBeTruthy();
       const revalidated = await fetch(new URL("/v1/catalog", server.url), {
-        headers: { "x-opencodex-api-key": DATA_KEY, "if-none-match": etag! },
+        headers: { "x-opencodex-api-key": DATA_KEY, "if-none-match": mgmtEtag! },
       });
-      expect(revalidated.status).toBe(304);
-      expect(await revalidated.text()).toBe("");
+      expect(revalidated.status).toBe(200);
+      expect(await revalidated.text()).toBe(body);
 
       // HEAD is the same status and headers with no body.
       const head = await fetch(new URL("/v1/catalog", server.url), {
@@ -149,7 +188,8 @@ describe("GET|HEAD /v1/catalog least-privilege data-plane route (#809)", () => {
         headers: { "x-opencodex-api-key": DATA_KEY },
       });
       expect(head.status).toBe(200);
-      expect(head.headers.get("etag")).toBe(etag);
+      expect(head.headers.get("etag")).toBeNull();
+      expect(head.headers.get("cache-control")).toBe("no-store");
       expect(await head.text()).toBe("");
     } finally {
       await server.stop(true);

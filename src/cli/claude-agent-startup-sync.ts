@@ -54,6 +54,9 @@ export async function syncClaudeAgentDefsAtProxyStartup(
   const warn = deps.warn ?? (message => console.warn(message));
 
   try {
+    // Hub role: never rewrite this host's ~/.claude roster on startup (same rule as
+    // shouldSyncCodexOnStart / shouldSyncGrokOnStart — the hub serves other machines).
+    if (config.runtimeRole === "hub") return null;
     if (config.claudeCode?.enabled === false || config.claudeCode?.injectAgents === false) {
       return inject(config, {});
     }

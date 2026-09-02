@@ -200,3 +200,20 @@
     min-height: auto;
   }
 }
+.usage-source-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 14px;
+  color: var(--text-secondary);
+}
+
+.usage-scope-control {
+  display: inline-flex;
+  gap: 6px;
+}
+
+@media (max-width: 640px) {
+  .usage-source-row { align-items: flex-start; flex-direction: column; }
+}

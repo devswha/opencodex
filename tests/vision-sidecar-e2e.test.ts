@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
@@ -9,6 +9,7 @@ import type { OcxConfig } from "../src/types";
 import { parseRequest } from "../src/responses/parser";
 import { resetVisionDescriptionCache, stripImagesInPlace } from "../src/vision";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 import { fakeChatGptJwt } from "./helpers/fake-chatgpt-jwt";
 
 // Issue #88: text-only input models (DeepSeek, ...) get "eyes" — the vision sidecar describes
@@ -42,7 +43,7 @@ afterEach(() => {
   else process.env.OPENCODEX_HOME = previousHome;
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
-  if (testDir) rmSync(testDir, { recursive: true, force: true });
+  if (testDir) removeTreeWithRetry(testDir);
 });
 
 const PNG_DATA_URL = "data:image/png;base64,aGVsbG8taW1hZ2UtYnl0ZXM=";

@@ -219,6 +219,14 @@ export interface OcxApiKeyEntry {
   name: string;
   key: string;
   createdAt: string;
+  pendingRotation?: OcxPendingApiKeyRotation;
+}
+
+export interface OcxPendingApiKeyRotation {
+  id: string;
+  key: string;
+  createdAt: string;
+  expiresAt: string;
 }
 
 /**
@@ -244,8 +252,87 @@ export interface OcxConfigRebaseProvenance {
   deletedTopLevelKeys: string[];
 }
 
+export type OcxRuntimeRole = "standalone" | "hub" | "client";
+
+export interface OcxHubConfig {
+  /** Canonical browser-reachable management origin advertised by a hub. */
+  managementPublicOrigin?: string;
+  /**
+   * Optional management-only listener for a local HTTPS frontend such as Tailscale Serve.
+   * The hostname is deliberately not configurable: when enabled the socket is always bound
+   * to 127.0.0.1, and only GUI, session-bootstrap, and management API routes are admitted.
+   */
+  managementIngress?:
+    | { enabled: false }
+    | { enabled: true; port: number };
+}
+
+export interface OcxRemoteGuiConfig {
+  /** Exact Tailscale login identities permitted to receive an automatic remote GUI session. */
+  allowedTailscaleUsers?: string[];
+  /**
+   * Retired. Once permitted a one-time pairing exchange over non-loopback plaintext HTTP.
+   *
+   * Still parsed so an existing config file keeps loading, but it grants nothing: a pairing
+   * grant now crosses loopback or authenticated HTTPS only. A persisted `true` is reported
+   * once and otherwise ignored. Kept in the type rather than deleted because the schema is
+   * strict — dropping the key outright would make an older config fail to load entirely,
+   * which is a worse outcome than ignoring one retired field.
+   *
+   * @deprecated has no effect; remove it from your config.
+   */
+  allowInsecureHttp?: boolean;
+}
+
+export type OcxConnectedClientId = "codex" | "claude";
+
+export interface OcxClientConnectionConfig {
+  serverUrl: string;
+  managementUrl: string;
+  managementTransport: "direct" | "relay";
+  selectedClients: OcxConnectedClientId[];
+  tokenEnv: "OPENCODEX_API_AUTH_TOKEN";
+  apiKeyId: string;
+  tokenFingerprint: string;
+  protocolVersion: 1;
+  connectedAt: string;
+  /**
+   * sha256/base64url of the catalog bytes this connection wrote, used to tell "still ours"
+   * from "edited or replaced" before removing the file on disconnect.
+   *
+   * Our own hash rather than the hub's ETag: /v1/catalog emits no validator, and this was
+   * always an ownership check on local bytes rather than a cache concern.
+   */
+  catalogFingerprint?: string;
+  /**
+   * The catalog that was on disk before connect overwrote it, base64-encoded, or the
+   * empty string when there was none.
+   *
+   * Durable because disconnect runs in a different process than connect: an in-memory
+   * snapshot only covers a connect that fails and rolls back on the spot. Without this,
+   * disconnect deletes the remote catalog and reports a restored native state while the
+   * user's own catalog is simply gone.
+   */
+  priorCatalog?: string;
+  catalogSyncedAt?: string;
+  pendingOperation?: {
+    kind: "rotate";
+    rotationId: string;
+    newKeyIssuedAt: string;
+    oldKeyBackupPath: string;
+  };
+}
+
 export interface OcxConfig {
   port: number;
+  /** Runtime topology role. Absence preserves the historical standalone behavior. */
+  runtimeRole?: OcxRuntimeRole;
+  /** Hub-only public management metadata. Presence is inert outside the hub role. */
+  hub?: OcxHubConfig;
+  /** Opt-in remote dashboard issuance policy. Presence is inert outside the hub role. */
+  remoteGui?: OcxRemoteGuiConfig;
+  /** Remote-hub client state. The admission secret is stored only in service-api-token. */
+  client?: OcxClientConnectionConfig;
   /** Opt in to one identical-turn retry when a Responses completion has no text or tool call. */
   emptyCompletionRetry?: boolean;
   /**
@@ -511,6 +598,10 @@ export interface OcxConfig {
    * Outbound HTTP(S) proxy URL for provider requests (e.g. "http://user:pass@proxy:8080", or
    * "${HTTPS_PROXY}"-style env reference). Mirrored into HTTP_PROXY/HTTPS_PROXY at startup when
    * those are unset — Bun's fetch honors them for all outbound calls; localhost is excluded.
+   * The literal `"auto"` reads the Windows WinINET static proxy (`ProxyEnable`/`ProxyServer`)
+   * once at process start; on other platforms, or when the system proxy is off, SOCKS-only,
+   * or unreadable, it degrades to direct egress with one log line (#1525). PAC/WPAD and live
+   * changes are not followed.
    */
   proxy?: string;
   /**
@@ -543,6 +634,13 @@ export interface OcxConfig {
   codexAutoStart?: boolean;
   /** Restore an installed shim after a stable external Codex update replaces it. Default true. */
   codexShimAutoRestore?: boolean;
+  /**
+   * Opt-in authless Codex Desktop routing (#1107). On a loopback bind, inject the dedicated
+   * `[model_providers.opencodex]` table with `requires_openai_auth = false` instead of the root
+   * `openai_base_url` override, so Desktop opens without a ChatGPT login. Default off; ignored on
+   * non-loopback binds, whose admission token contract is unchanged.
+   */
+  codexDesktopAuthless?: boolean;
   /**
    * Compatibility mode: temporarily rewrite Codex resume-history metadata while the proxy is active
    * so Codex App can show old OpenAI chats and opencodex-created exec chats under its default
@@ -600,6 +698,14 @@ export interface OcxConfig {
    * whole config.
    */
   showCodexSparkQuota?: boolean;
+  /**
+   * Opt-in auto-redemption of a main-account Codex reset credit shortly before it expires
+   * (#822). Default off. `leadTimeMinutes` (1–60, default 10) is how long before
+   * `expires_at` the redeem is attempted; the credit list is re-read upstream right before
+   * every dispatch and the request id is journaled first, so a manual redeem or a crash never
+   * spends a second credit. A malformed value reads as off.
+   */
+  resetCreditAutoRedeem?: { enabled?: boolean; leadTimeMinutes?: number };
   /** Active pool account id for next session. undefined = main (passthrough as-is). */
   activeCodexAccountId?: string;
   /** Auto-switch threshold (0-100). Default 80. 0 = disabled. */
@@ -615,6 +721,17 @@ export interface OcxConfig {
    * Default 0 (disabled); range 0..20. The circuit never counts timeouts or HTTP responses.
    */
   upstreamHostCircuitThreshold?: number;
+  /**
+   * Opt-in ceiling, in bytes, for a serialized native Responses **passthrough** body. When the
+   * built body exceeds it OpenCodex refuses locally instead of sending, naming the size and any
+   * embedded image payload. Translated adapter paths are not covered.
+   *
+   * Omitted or 0 = disabled, which is the default: no implicit ceiling is inferred for any
+   * destination. The only measured limit in this codebase is the WebSocket create-frame size,
+   * and the same body still succeeds over HTTP SSE, so a default here would refuse requests
+   * that work today — on Azure and custom Responses gateways as well, whose limits are unknown.
+   */
+  maxUpstreamBodyBytes?: number;
   /**
    * Opt-in Anthropic OAuth account pool (#294). Default OFF.
    * Failover on 429 + sticky affinity; new sessions may pick lowest known 5h usage.
@@ -669,6 +786,18 @@ export type OcxAccountPoolQuotaWindow = "five-hour" | "weekly" | "max-utilizatio
 export type OcxComboStrategy = "failover" | "round-robin" | "random" | "least-used" | "reset-window";
 export type OcxComboDefaultEffort = "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
+/**
+ * How a combo derives the reasoning ladder it publishes to the picker.
+ *
+ * `strict` (default) intersects every advertised ladder, so a target that explicitly
+ * advertises no effort control (`reasoningEfforts: []`) empties the combo's picker.
+ * `adaptive` excludes those empty ladders from the published intersection, keeping the
+ * control usable for a mixed-capability group. Unknown (`undefined`) ladders stay
+ * wildcards in both modes. Dispatch is unchanged: each concrete target still resolves
+ * its own effort at request time.
+ */
+export type OcxComboReasoningEffortMode = "strict" | "adaptive";
+
 export interface OcxComboTarget {
   provider: string;
   model: string;
@@ -684,6 +813,11 @@ export interface OcxComboConfig {
   stickyLimit?: number;
   /** Used when the client omits reasoning.effort. null/omitted leaves the target default unchanged. */
   defaultEffort?: OcxComboDefaultEffort | null;
+  /**
+   * Picker-ladder derivation policy. Omitted / `"strict"` keeps the legacy rule where an
+   * explicitly empty target ladder suppresses the whole combo's effort control.
+   */
+  reasoningEffortMode?: OcxComboReasoningEffortMode;
   /**
    * Disable image input even when every target supports it.
    * Omitted / `"auto"` keeps automatic capability derivation (default: enabled when

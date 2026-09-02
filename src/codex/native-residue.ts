@@ -133,6 +133,13 @@ function resolveRegularFile(path: string): PathResult {
 function readRegularFile(path: string): ReadResult {
   const resolved = resolveRegularFile(path);
   if (resolved.kind !== "path") return resolved;
+  // Root can read a chmod(000) file on Linux, which made the residue verdict
+  // depend on who ran the suite. No read bit means the configured surface is
+  // operationally unreadable to an ordinary Codex process and must remain
+  // indeterminate even when the inspector itself has elevated privileges.
+  if (process.platform !== "win32" && (resolved.stat.mode & 0o444) === 0) {
+    return { kind: "indeterminate", reason: "EACCES: surface has no read permission bits" };
+  }
   try {
     const content = readFileSync(resolved.path, "utf8");
     const after = statSync(resolved.path);

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -47,6 +47,7 @@ import {
   handleCodexAuthAPI,
   isAccountNeedsReauth,
   markAccountNeedsReauth,
+  setAccountQuotaFromParsed,
 } from "../src/codex/auth-api";
 import { __resetGuardianState, guardianSweep } from "../src/oauth/token-guardian";
 import {
@@ -72,6 +73,7 @@ import {
 } from "../src/server/lifecycle";
 import type { CodexModelEntitlementSnapshot } from "../src/codex/model-entitlements";
 import { hasForwardableCodexBearer } from "../src/server/auth-cors";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 let testDir: string;
 let previousOpencodexHome: string | undefined;
@@ -100,7 +102,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setIcaclsRunnerForTests(null);
-  rmSync(testDir, { recursive: true, force: true });
+  removeTreeWithRetry(testDir);
   clearThreadAccountMap();
   clearCodexUpstreamHealth();
   clearAccountQuota();
@@ -633,6 +635,50 @@ describe("Codex auth context", () => {
     });
   });
 
+  test("account-gated routing distinguishes an unavailable grant from no grant", async () => {
+    const cfg = config();
+    saveCodexAccountCredential("pool-a", {
+      accessToken: "pool-token",
+      refreshToken: "pool-refresh",
+      expiresAt: Date.now() + 5 * 60_000,
+      chatgptAccountId: "pool-account",
+    });
+    const snapshot = (models: string[]): CodexModelEntitlementSnapshot => ({
+      modelsByAccount: new Map([["pool-a", new Set(models)]]),
+      confirmedAccountIds: new Set(["pool-a"]),
+      credentialIdentities: new Map(),
+    });
+    const resolve = (models: string[]) => resolveCodexAuthContext(new Headers(), cfg, "pool", {
+      excludeAccountId: "pool-a",
+      modelId: "gpt-daybreak-blue-latest",
+      resolveCodexModelEntitlements: async () => snapshot(models),
+    });
+
+    await expect(resolve(["gpt-daybreak-blue-latest"]))
+      .rejects.toThrow("Codex accounts that support this model are currently unavailable");
+    await expect(resolve(["gpt-5.6-sol"]))
+      .rejects.toThrow("No eligible Codex account supports this model");
+
+    const mainExcludedSnapshot: CodexModelEntitlementSnapshot = {
+      modelsByAccount: new Map(),
+      confirmedAccountIds: new Set(),
+      credentialIdentities: new Map(),
+    };
+    await expect(resolveCodexAuthContext(new Headers(), cfg, "pool", {
+      excludeAccountId: "pool-a",
+      modelId: "gpt-daybreak-blue-latest",
+      beginCodexAccountSelection: () => ({
+        mainProfileDraining: true,
+        claimMainProfile: () => false,
+        release: () => {},
+      }),
+      resolveCodexModelEntitlements: async (_config, options) => {
+        expect(options?.excludeAccountIds?.has(MAIN_CODEX_ACCOUNT_ID)).toBeTrue();
+        return mainExcludedSnapshot;
+      },
+    })).rejects.toThrow("Codex accounts that support this model are currently unavailable");
+  });
+
   test("auth resolution preserves per-model detours without replacing ordinary affinity", async () => {
     const cfg = config();
     cfg.accountPoolStrategy = "round-robin";
@@ -1088,6 +1134,130 @@ describe("Codex auth context", () => {
       clearAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
     }
   });
+
+  async function resolveRequestOwnedMainPinCase(options: {
+    mainWeeklyPercent: number;
+    poolWeeklyPercent: number;
+    callerEntitled: boolean;
+  }): Promise<{
+    cfg: OcxConfig;
+    context: Awaited<ReturnType<typeof resolveCodexAuthContext>>;
+    directEntitlementChecks: number;
+  }> {
+    const cfg = config();
+    cfg.accountPoolStrategy = "quota";
+    cfg.autoSwitchThreshold = 90;
+    cfg.activeCodexAccountId = MAIN_CODEX_ACCOUNT_ID;
+    cfg.activeCodexAccountPinned = MAIN_CODEX_ACCOUNT_ID;
+    cfg.codexAccountPriorities = {
+      [MAIN_CODEX_ACCOUNT_ID]: 0,
+      "pool-a": 0,
+    };
+    resetCodexRoutingForManualSelection(MAIN_CODEX_ACCOUNT_ID);
+    saveCodexAccountCredential("pool-a", {
+      accessToken: "pool-token",
+      refreshToken: "pool-refresh",
+      expiresAt: Date.now() + 5 * 60_000,
+      chatgptAccountId: "pool-account",
+    });
+    setAccountQuotaFromParsed(MAIN_CODEX_ACCOUNT_ID, { weeklyPercent: options.mainWeeklyPercent });
+    setAccountQuotaFromParsed("pool-a", { weeklyPercent: options.poolWeeklyPercent });
+    let directEntitlementChecks = 0;
+    const context = await resolveCodexAuthContext(new Headers({
+      authorization: "Bearer caller-keyring-token",
+      "chatgpt-account-id": "caller-keyring-account",
+    }), cfg, "pool", {
+      requestScopedMainCredential: true,
+      modelId: "gpt-5.6-sol",
+      isDirectCallerEntitledToCodexModel: async () => {
+        directEntitlementChecks += 1;
+        return options.callerEntitled;
+      },
+      resolveCodexModelEntitlements: async () => ({
+        modelsByAccount: new Map([["pool-a", new Set(["gpt-5.6-sol"])]]),
+        clientVersionByAccount: new Map([["pool-a", "0.150.1"]]),
+        confirmedAccountIds: new Set(["pool-a"]),
+        credentialIdentities: new Map([["pool-a", "pool:1:pool-account"]]),
+      }),
+    });
+    return { cfg, context, directEntitlementChecks };
+  }
+
+  test("a healthy manual main pin keeps the validated caller bearer ahead of an exhausted pool account (#3157)", async () => {
+    const { cfg, context, directEntitlementChecks } = await resolveRequestOwnedMainPinCase({
+      mainWeeklyPercent: 16,
+      poolWeeklyPercent: 100,
+      callerEntitled: true,
+    });
+    expect(context).toMatchObject({ kind: "main", accountId: null });
+    expect(directEntitlementChecks).toBe(1);
+    expect(cfg.activeCodexAccountId).toBe(MAIN_CODEX_ACCOUNT_ID);
+    expect(cfg.activeCodexAccountPinned).toBe(MAIN_CODEX_ACCOUNT_ID);
+  });
+
+  test("an exhausted request-owned main pin still yields to the healthy Pool account (#3157)", async () => {
+    const { cfg, context, directEntitlementChecks } = await resolveRequestOwnedMainPinCase({
+      mainWeeklyPercent: 100,
+      poolWeeklyPercent: 16,
+      callerEntitled: true,
+    });
+    expect(context).toMatchObject({ kind: "pool", accountId: "pool-a" });
+    expect(directEntitlementChecks).toBe(0);
+    expect(cfg.activeCodexAccountId).toBe("pool-a");
+    expect(cfg.activeCodexAccountPinned).toBeUndefined();
+  });
+
+  test("a caller entitlement miss uses a Pool model detour without clearing the healthy main pin (#3157)", async () => {
+    const { cfg, context, directEntitlementChecks } = await resolveRequestOwnedMainPinCase({
+      mainWeeklyPercent: 16,
+      poolWeeklyPercent: 20,
+      callerEntitled: false,
+    });
+    expect(context).toMatchObject({ kind: "pool", accountId: "pool-a" });
+    expect(directEntitlementChecks).toBe(1);
+    expect(cfg.activeCodexAccountId).toBe(MAIN_CODEX_ACCOUNT_ID);
+    expect(cfg.activeCodexAccountPinned).toBe(MAIN_CODEX_ACCOUNT_ID);
+  });
+
+  test("a failed Pool account may fall back once to the validated caller-owned main credential", async () => {
+    const cfg = config();
+    cfg.codexAccounts = [
+      { id: "pool-a", email: "pool-a@example.test", isMain: false, chatgptAccountId: "pool-account" },
+    ];
+    const inbound = new Headers({
+      authorization: "Bearer caller-keyring-token",
+      "chatgpt-account-id": "caller-keyring-account",
+    });
+    const emptyEntitlements: CodexModelEntitlementSnapshot = {
+      modelsByAccount: new Map(),
+      confirmedAccountIds: new Set(),
+      credentialIdentities: new Map(),
+    };
+    let directEntitlementChecks = 0;
+    const options = {
+      requestScopedMainCredential: true,
+      modelId: "gpt-daybreak-blue-latest",
+      resolveCodexModelEntitlements: async () => emptyEntitlements,
+      isDirectCallerEntitledToCodexModel: async () => {
+        directEntitlementChecks += 1;
+        return true;
+      },
+    };
+
+    await expect(resolveCodexAuthContext(inbound, cfg, "pool", {
+      ...options,
+      excludeAccountId: "pool-a",
+    })).resolves.toMatchObject({ kind: "main", accountId: null });
+    expect(directEntitlementChecks).toBe(1);
+
+    // If main itself was the failed credential, the retry must not loop back to it.
+    await expect(resolveCodexAuthContext(inbound, { ...cfg, codexAccounts: [] }, "pool", {
+      ...options,
+      excludeAccountId: MAIN_CODEX_ACCOUNT_ID,
+    })).rejects.toThrow("Codex accounts that support this model are currently unavailable");
+    expect(directEntitlementChecks).toBe(1);
+  });
+
   test("selects pool auth independently of the routed provider", async () => {
     saveCodexAccountCredential("pool-a", {
       accessToken: "pool_token",

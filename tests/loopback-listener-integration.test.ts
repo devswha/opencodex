@@ -8,7 +8,7 @@
  * to them, so those regressions have somewhere to fail.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { connect } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
@@ -23,8 +23,10 @@ import {
 } from "../src/server/ports";
 import type { OcxConfig } from "../src/types";
 import { SERVER_BUDGET_MS } from "./helpers/test-budget";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const previousApiToken = process.env.OPENCODEX_API_AUTH_TOKEN;
+const previousAdminToken = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
 const previousHome = process.env.OPENCODEX_HOME;
 let testDir = "";
 
@@ -44,6 +46,18 @@ function baseConfig(loopbackPort: number | null): OcxConfig {
       ? {}
       : { unauthenticatedLoopbackListener: { enabled: true, port: loopbackPort } }),
   } as unknown as OcxConfig;
+}
+
+function hubIngressConfig(managementPort: number, loopbackPort: number | null = null): OcxConfig {
+  return {
+    ...baseConfig(loopbackPort),
+    runtimeRole: "hub",
+    hub: {
+      managementPublicOrigin: "https://hub.example.test",
+      managementIngress: { enabled: true, port: managementPort },
+    },
+    remoteGui: { allowedTailscaleUsers: ["alice@example.test"] },
+  };
 }
 
 /** A free port to hand the loopback listener, chosen the same way production would not reuse. */
@@ -83,15 +97,116 @@ beforeEach(() => {
   testDir = mkdtempSync(join(tmpdir(), "ocx-loopback-listener-"));
   process.env.OPENCODEX_HOME = testDir;
   process.env.OPENCODEX_API_AUTH_TOKEN = "public-secret";
+  process.env.OPENCODEX_ADMIN_AUTH_TOKEN = "admin-secret";
 });
 
 afterEach(() => {
   if (previousApiToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousApiToken;
+  if (previousAdminToken === undefined) delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+  else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = previousAdminToken;
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
-  if (testDir && existsSync(testDir)) rmSync(testDir, { recursive: true, force: true });
+  if (testDir && existsSync(testDir)) removeTreeWithRetry(testDir);
   testDir = "";
+});
+
+describe("hub management ingress", () => {
+  test("binds only loopback and serves GUI plus authenticated management routes", async () => {
+    const managementPort = await freePort();
+    const publicPort = await findAvailablePort(0, "127.0.0.1", { reservedPort: managementPort });
+    saveConfig(hubIngressConfig(managementPort));
+    const server = startServer(publicPort);
+    try {
+      const page = await fetch(`http://127.0.0.1:${managementPort}/`, {
+        headers: { Host: "hub.example.test", "Tailscale-User-Login": "alice@example.test" },
+      });
+      expect(page.status).not.toBe(404);
+
+      const management = await fetch(`http://127.0.0.1:${managementPort}/api/config`, {
+        headers: {
+          Host: "hub.example.test",
+          Origin: "https://hub.example.test",
+          "x-opencodex-api-key": "admin-secret",
+        },
+      });
+      expect(management.status).toBe(200);
+
+      const address = firstNonLoopbackIPv4();
+      if (address) {
+        const refused = await new Promise<boolean>(resolve => {
+          const socket = connect({ host: address, port: managementPort });
+          const settle = (value: boolean) => { socket.destroy(); resolve(value); };
+          socket.setTimeout(2_000);
+          socket.once("connect", () => settle(false));
+          socket.once("error", () => settle(true));
+          socket.once("timeout", () => settle(true));
+        });
+        expect(refused).toBe(true);
+      }
+    } finally {
+      await server.stop(true);
+    }
+  }, SERVER_BUDGET_MS);
+
+  test("default-denies every data, health, readiness, WebSocket, and unknown-static route", async () => {
+    const managementPort = await freePort();
+    const publicPort = await findAvailablePort(0, "127.0.0.1", { reservedPort: managementPort });
+    saveConfig(hubIngressConfig(managementPort));
+    const server = startServer(publicPort);
+    const base = `http://127.0.0.1:${managementPort}`;
+    try {
+      const denied: Array<{ path: string; headers?: Record<string, string> }> = [
+        { path: "/v1/catalog" },
+        { path: "/v1%2Fcatalog" },
+        { path: "/healthz" },
+        { path: "/readyz" },
+        { path: "/v1/responses", headers: { Connection: "Upgrade", Upgrade: "websocket" } },
+        { path: "/missing-static.js" },
+      ];
+      for (const entry of denied) {
+        const response = await fetch(`${base}${entry.path}`, { headers: entry.headers });
+        expect({ path: entry.path, status: response.status }).toEqual({ path: entry.path, status: 404 });
+        expect(response.headers.get("content-type")).toContain("application/json");
+      }
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("a failed management bind rolls back both earlier listeners", async () => {
+    const managementPort = await freePort();
+    const loopbackPort = await findAvailablePort(0, "127.0.0.1", { reservedPort: managementPort });
+    const publicPort = await findAvailablePort(0, "127.0.0.1", { reservedPort: loopbackPort });
+    const squatter = Bun.serve({
+      port: managementPort,
+      hostname: "127.0.0.1",
+      fetch: () => new Response("occupied"),
+    });
+    saveConfig(hubIngressConfig(managementPort, loopbackPort));
+    try {
+      expect(() => startServer(publicPort)).toThrow();
+      for (const port of [publicPort, loopbackPort]) {
+        const rebound = Bun.serve({ port, hostname: "127.0.0.1", fetch: () => new Response("ok") });
+        await rebound.stop(true);
+      }
+    } finally {
+      await squatter.stop(true);
+    }
+  });
+
+  test("normal shutdown closes public, data-loopback, and management listeners", async () => {
+    const managementPort = await freePort();
+    const loopbackPort = await findAvailablePort(0, "127.0.0.1", { reservedPort: managementPort });
+    const publicPort = await findAvailablePort(0, "127.0.0.1", { reservedPort: loopbackPort });
+    saveConfig(hubIngressConfig(managementPort, loopbackPort));
+    const server = startServer(publicPort);
+    await server.stop(true);
+    for (const port of [publicPort, loopbackPort, managementPort]) {
+      const rebound = Bun.serve({ port, hostname: "127.0.0.1", fetch: () => new Response("ok") });
+      await rebound.stop(true);
+    }
+  });
 });
 
 describe("unauthenticated loopback listener", () => {
@@ -154,7 +269,7 @@ describe("unauthenticated loopback listener", () => {
     // 5s default on a loaded Windows box, where the test measured 5.04s.
   }, SERVER_BUDGET_MS);
 
-  test("serves only the four allowlisted routes, using each route's real method", async () => {
+  test("serves only the allowlisted routes, using each route's real method", async () => {
     const loopbackPort = await freePort();
     saveConfig(baseConfig(loopbackPort));
     const server = startServer(0);
@@ -171,13 +286,13 @@ describe("unauthenticated loopback listener", () => {
         { method: "POST", path: "/v1/chat/completions", body: '{"model":"x","messages":[]}' },
         { method: "POST", path: "/v1/messages", body: '{"model":"x","messages":[]}' },
         { method: "POST", path: "/v1/images/generations", body: '{"prompt":"x"}' },
-        { method: "POST", path: "/v1/alpha/search", body: '{"query":"x"}' },
         { method: "GET", path: "/v1/opencodex/artifacts/x" },
         { method: "POST", path: "/v1/live", body: "{}" },
         { method: "POST", path: "/v1/realtime/calls", body: "{}" },
         // Allowlisted paths still reject the methods they do not serve.
         { method: "DELETE", path: "/v1/responses" },
         { method: "POST", path: "/v1/models" },
+        { method: "GET", path: "/v1/alpha/search" },
       ];
       for (const { method, path, body } of denied) {
         const res = await fetch(`${base}${path}`, {
@@ -190,6 +305,41 @@ describe("unauthenticated loopback listener", () => {
       // And an allowlisted route is genuinely reachable, so the rejections above are not
       // passing merely because nothing works on this listener.
       expect((await fetch(`${base}/v1/models`)).status).toBe(200);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("admits POST /v1/alpha/search so native web search reaches the relay (#3192)", async () => {
+    const loopbackPort = await freePort();
+    saveConfig(baseConfig(loopbackPort));
+    const server = startServer(0);
+    const body = '{"query":"x"}';
+    const headers = { "content-type": "application/json" };
+    try {
+      // Codex sends its native web-search call to the same base URL as /v1/responses. Before
+      // the allowlist admitted it, the direct-spawn host answered 404 for every search. What
+      // proves the gate is open is that the answer comes from BEHIND it: the admitted-turn
+      // path (503 while native-main maintenance holds, otherwise the relay's own 401 for a
+      // missing ChatGPT credential), never the listener's 404 and never the public
+      // listener's "opencodex API key required".
+      const viaLoopback = await fetch(`http://127.0.0.1:${loopbackPort}/v1/alpha/search`, {
+        method: "POST", body, headers,
+      });
+      const loopbackBody = await viaLoopback.json() as { error?: { message?: string } };
+      expect(viaLoopback.status).not.toBe(404);
+      expect([401, 503]).toContain(viaLoopback.status);
+      expect(loopbackBody.error?.message).toBeDefined();
+      expect(loopbackBody.error?.message).not.toBe("opencodex API key required");
+
+      // The public listener is unchanged: the same request without a key is still refused
+      // at admission, so widening the loopback allowlist did not widen the public surface.
+      const viaPublic = await fetch(`http://127.0.0.1:${server.port}/v1/alpha/search`, {
+        method: "POST", body, headers,
+      });
+      expect(viaPublic.status).toBe(401);
+      const publicBody = await viaPublic.json() as { error?: { message?: string } };
+      expect(publicBody.error?.message).toBe("opencodex API key required");
     } finally {
       await server.stop(true);
     }
@@ -535,6 +685,10 @@ describe("seams the runtime cannot defend", () => {
     // holds everywhere.
     expect(serverSource).toMatch(/port: loopbackListenerPort,\s*\n\s*hostname: "127\.0\.0\.1",/);
   });
+
+  test("the hub management ingress binds 127.0.0.1 explicitly", () => {
+    expect(serverSource).toMatch(/port: managementIngressPort,\s*\n\s*hostname: "127\.0\.0\.1",/);
+  });
 });
 
 describe("public port selection avoids the loopback port", () => {
@@ -617,7 +771,7 @@ describe("Codex injection targets the loopback listener", () => {
       expect(written).not.toContain("env_http_headers");
       expect(written).not.toContain("env_key");
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTreeWithRetry(root);
     }
   });
 });

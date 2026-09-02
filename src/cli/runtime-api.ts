@@ -182,7 +182,16 @@ export function csv(value: string | undefined): string[] | undefined {
  * `--code=https://…?code=SECRET` that writes the authorization code to stderr,
  * which is the exact exposure the stdin path exists to avoid.
  */
-const SECRET_OPTIONS = ["--code", "--headers"];
+const SECRET_OPTIONS = [
+  "--code",
+  "--headers",
+  "--token",
+  "--admin-token",
+  "--pairing-code",
+  "--credential-env",
+  "--admin-token-env",
+  "--pairing-code-env",
+];
 
 /**
  * Replace credential values before they are reported back.

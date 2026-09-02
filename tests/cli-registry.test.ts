@@ -104,6 +104,23 @@ describe("CLI command registry parity", () => {
     expect(details).toContain("ocx system codex-cli-update check [--json]");
     expect(details.some(line => line.includes("dry-run"))).toBe(false);
   });
+
+  test("GUI registry usage documents explicit-origin single-use pairing", () => {
+    const gui = findCommand("gui");
+    expect(gui?.usage).toBe("ocx gui [pair --origin <browser-origin> [--json]]");
+    expect(gui?.details?.join(" ")).toContain("single-use");
+    expect(gui?.details?.join(" ")).toContain("no localhost or config-derived default");
+  });
+
+  test("connect and disconnect are registry-owned without credential argv forms", () => {
+    const connect = findCommand("connect");
+    expect(connect?.usage).toContain("--pairing-code-stdin");
+    expect(connect?.usage).toContain("--admin-token-stdin");
+    expect(connect?.usage).not.toContain("--token <");
+    expect(connect?.usage).not.toContain("--admin-token <");
+    expect(connect?.details?.join(" ")).toContain("not supported");
+    expect(findCommand("disconnect")?.usage).toBe("ocx disconnect [--keep-catalog] [--json]");
+  });
 });
 
 describe("help banner command coverage", () => {

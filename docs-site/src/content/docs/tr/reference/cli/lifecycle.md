@@ -177,7 +177,7 @@ takdirde 1 ile çıkar, bu da onu servis probları için uygun hale getirir.
 Kimliği doğrulanmamış `GET /readyz` uç noktası aracılığıyla senkronizasyon
 sonrası hazırlığı kontrol edin. Hazır olduğunda `200` veya `pending` ve terminal
 `failed` için `Retry-After: 1` ile `503` döndürür. Temizlenmiş HTTP kimliği
-`{service, version, uptime, pid, port, status}` şeklindedir. `/readyz` içermeyen
+`{service, version, uptime, pid, port, status, protocol, minimumClientProtocol, managementUrl}` şeklindedir. `protocol` hub'ın güncel uzak protokolünü, `minimumClientProtocol` uyumlu en düşük istemci protokolünü ve `managementUrl` tarayıcıya görünen kanonik yönetim origin'ini belirtir. `/readyz` içermeyen
 eski proxy'ler `unreachable` olarak kapalı başarısız olur; `/healthz` hazırlık
 değil, ayrı bir canlılıktır. Komut varsayılan olarak bir prob gerçekleştirir;
 `--wait`, hazır olana veya zaman aşımına kadar yoklar, ancak terminal `failed`
@@ -446,3 +446,7 @@ ocx update --tag preview
 Yeni sürümler, [Sürüm iş
 akışı](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml)
 bunları npm'de yayınladığında kullanılabilir hale gelir.
+
+## Remote Hub istemci yaşam döngüsü
+
+`ocx connect <url> --pairing-code-stdin`, `ocx connect status`, `ocx sync` ve `ocx connect rotate --pairing-code-stdin` kullanın. `ocx disconnect` yerel durumu çevrimdışı geri yükler ancak hub anahtarını iptal etmez. Bağlıyken `ocx connect revoke --admin-token-stdin` kayıtlı `apiKeyId` değerini iptal eder; bağlantıdan sonra hub üzerindeki **Integrations → API Keys** kullanılmalıdır. Sırlar yalnızca stdin üzerinden geçer, argv'ye yazılmaz.

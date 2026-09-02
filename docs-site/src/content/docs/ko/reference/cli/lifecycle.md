@@ -156,7 +156,7 @@ ocx status --json
 
 인증이 필요 없는 `GET /readyz` 엔드포인트로 동기화 후 준비 상태를 확인합니다. 준비되면 `200`,
 `pending` 또는 종단 상태인 `failed`이면 `Retry-After: 1`과 함께 `503`을 반환합니다. HTTP의 정제된
-식별 필드는 `{service, version, uptime, pid, port, status}`입니다. `/readyz`가 없는 이전 프록시는
+식별 필드는 `{service, version, uptime, pid, port, status, protocol, minimumClientProtocol, managementUrl}`입니다. `protocol`은 허브의 현재 원격 프로토콜, `minimumClientProtocol`은 호환되는 최소 클라이언트 프로토콜, `managementUrl`은 브라우저에서 보이는 표준 관리 origin입니다. `/readyz`가 없는 이전 프록시는
 `unreachable`로 fail-closed하며, `/healthz`는 준비 상태가 아닌 별도의 liveness 확인입니다. 기본값은 한 번의
 probe이며, `--wait`는 준비 또는 timeout까지 polling하지만 종단 `failed`를 확인하면 즉시 종료합니다.
 기본 timeout은 45초이며, `--timeout <seconds>`는 `--wait`와 함께 써야 하고 양의 정수인 1~300초 범위를 받습니다. CLI JSON은
@@ -315,3 +315,7 @@ ocx update --tag preview
 
 새 버전은 [Release workflow](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml)가
 npm에 게시하면 사용할 수 있게 됩니다.
+
+## Remote Hub 클라이언트 라이프사이클
+
+`ocx connect <url> --pairing-code-stdin`, `ocx connect status`, `ocx sync`, `ocx connect rotate --pairing-code-stdin`을 사용합니다. `ocx disconnect`는 오프라인에서도 로컬 상태를 복원하지만 허브 키는 폐기하지 않습니다. 연결 중에는 `ocx connect revoke --admin-token-stdin`으로 저장된 `apiKeyId`를 폐기할 수 있고, 연결을 끊은 뒤에는 허브의 **Integrations → API Keys**를 사용해야 합니다. 비밀값은 stdin으로만 전달하고 argv에 넣지 마세요.

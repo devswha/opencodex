@@ -92,6 +92,10 @@ they have been synchronized. See
 [Sub-agent Surface](/guides/sub-agent-surface/) for the canonical v1/base/v2 behavior.
 :::
 
+## Remote Hub sessions, keys, and usage
+
+The dashboard's management plane is separate from direct client→hub model traffic. **Integrations → API Keys** shows pending rotations, displays a replacement secret only once, and requires explicit commit or abort. Browser logout invalidates only the current remote session. Connected usage is the hub store filtered by the client's `apiKeyId`; disconnected usage is local, with no mirroring.
+
 The spawn override guarantee applies to the **built-in** v2 guidance text. A custom
 `injectionPrompt` replaces that text entirely and must include `{{model}}` and `{{effort}}`
 placeholders (and optionally `{{roster}}`) or those values will not appear in the injected

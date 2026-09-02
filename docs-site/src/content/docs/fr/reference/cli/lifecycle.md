@@ -122,7 +122,7 @@ Vérifie l’identité du proxy actif. La sortie destinée aux utilisateurs indi
 
 ### `ocx ready [--json] [--wait [--timeout <seconds>]]`
 
-Vérifie l’état de préparation après synchronisation au moyen du point de terminaison non authentifié `GET /readyz`. Il renvoie `200` lorsque le service est prêt, ou `503` avec `Retry-After: 1` pour les états `pending` et terminal `failed`. Son identité HTTP expurgée est `{service, version, uptime, pid, port, status}`. Les anciens proxys dépourvus de `/readyz` échouent de manière sûre avec l’état `unreachable` ; `/healthz` mesure la disponibilité du processus, et non son état de préparation.
+Vérifie l’état de préparation après synchronisation au moyen du point de terminaison non authentifié `GET /readyz`. Il renvoie `200` lorsque le service est prêt, ou `503` avec `Retry-After: 1` pour les états `pending` et terminal `failed`. Son identité HTTP expurgée est `{service, version, uptime, pid, port, status, protocol, minimumClientProtocol, managementUrl}`. `protocol` est la version courante du protocole distant du hub, `minimumClientProtocol` la plus ancienne version cliente compatible et `managementUrl` l’origine canonique de gestion visible par le navigateur. Les anciens proxys dépourvus de `/readyz` échouent de manière sûre avec l’état `unreachable` ; `/healthz` mesure la disponibilité du processus, et non son état de préparation.
 
 Par défaut, la commande effectue une seule sonde. Avec `--wait`, elle interroge le service jusqu’à ce qu’il soit prêt ou jusqu’à l’expiration du délai, mais s’arrête immédiatement si elle observe l’état terminal `failed`. Le délai par défaut est de 45 secondes. `--timeout <seconds>` exige `--wait` et accepte un entier positif compris entre 1 et 300. La sortie JSON de la CLI est `{ready, status, pid, port}`, où `status` vaut `ready`, `pending`, `failed` ou `unreachable`. Les codes de sortie sont 0 si le service est prêt ; 1 s’il n’est pas prêt, reste en attente, échoue, dépasse le délai ou est inaccessible ; et 64 si les arguments sont invalides.
 
@@ -278,3 +278,7 @@ ocx update --tag preview
 ```
 
 Les nouvelles versions deviennent disponibles lorsque le [workflow de publication](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml) les publie sur npm.
+
+## Cycle de vie du client Remote Hub
+
+Utilisez `ocx connect <url> --pairing-code-stdin`, `ocx connect status`, `ocx sync` et `ocx connect rotate --pairing-code-stdin`. `ocx disconnect` restaure l'état local hors ligne sans révoquer la clé du hub. Tant que le client est connecté, `ocx connect revoke --admin-token-stdin` révoque l'`apiKeyId` enregistré; après déconnexion, utilisez **Integrations → API Keys** sur le hub. Les secrets passent uniquement par stdin, jamais par argv.

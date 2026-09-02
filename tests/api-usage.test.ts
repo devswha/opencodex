@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { managementFetch as fetch } from "./helpers/management-auth";
-import { appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
@@ -9,6 +9,7 @@ import type { OcxConfig } from "../src/types";
 import { refreshUserCostOverlays, resetPreservedDiskOnlyProvidersForTests, userCostOverlayVersion } from "../src/usage/user-cost-overlays";
 import { stopUserCostOverlayReconciler } from "../src/usage/user-cost-overlay-reconciler";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 import { resetUsageReadCacheForTests, setManagementUsageMaxEntriesForTests, usageReadCacheStatsForTests } from "../src/usage/log";
 import * as usageLogModule from "../src/usage/log";
 import { getUsageSummaryCacheEntry, resetUsageSummaryCacheForTests } from "../src/server/management/usage-summary-cache";
@@ -100,7 +101,7 @@ afterEach(() => {
   else process.env.OPENCODEX_HOME = previousHome;
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
-  if (testDir) rmSync(testDir, { recursive: true, force: true });
+  if (testDir) removeTreeWithRetry(testDir);
 });
 
 describe("GET /api/usage", () => {
@@ -587,6 +588,40 @@ describe("GET /api/usage", () => {
       expect(unfiltered.summary.requests).toBeGreaterThan(0);
       expect(unfiltered.models.length).toBeGreaterThan(0);
       expect(unfiltered.accounts.length).toBeGreaterThan(0);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("apiKeyId is an exact projection and composes with provider and model filters", async () => {
+    const now = Date.now();
+    const rows = [
+      { requestId: "a-openai", timestamp: now, apiKeyId: "Key-A", provider: "openai", model: "gpt-5.5", status: 200, durationMs: 1, usageStatus: "reported", usage: { inputTokens: 10, outputTokens: 2 }, totalTokens: 12 },
+      { requestId: "a-anthropic", timestamp: now, apiKeyId: "Key-A", provider: "anthropic", model: "claude-x", status: 200, durationMs: 1, usageStatus: "reported", usage: { inputTokens: 20, outputTokens: 3 }, totalTokens: 23 },
+      { requestId: "b", timestamp: now, apiKeyId: "key-a", provider: "openai", model: "gpt-5.5", status: 200, durationMs: 1, usageStatus: "reported", usage: { inputTokens: 30, outputTokens: 4 }, totalTokens: 34 },
+      { requestId: "legacy", timestamp: now, provider: "openai", model: "gpt-5.5", status: 200, durationMs: 1, usageStatus: "reported", usage: { inputTokens: 40, outputTokens: 5 }, totalTokens: 45 },
+    ];
+    writeFileSync(join(testDir, "usage.jsonl"), `${rows.map(row => JSON.stringify(row)).join("\n")}\n`);
+    const server = startServer(0);
+    try {
+      const own = await fetch(new URL("/api/usage?range=all&apiKeyId=Key-A", server.url)).then(res => res.json());
+      expect(own.filter).toMatchObject({ apiKeyId: "Key-A", provider: null, model: null, matched: true });
+      expect(own.summary.requests).toBe(2);
+
+      const combined = await fetch(new URL("/api/usage?range=all&apiKeyId=Key-A&provider=openai&model=gpt-5.5", server.url)).then(res => res.json());
+      expect(combined.summary.requests).toBe(1);
+      expect(combined.models).toHaveLength(1);
+
+      const exactCase = await fetch(new URL("/api/usage?range=all&apiKeyId=key-a", server.url)).then(res => res.json());
+      expect(exactCase.summary.requests).toBe(1);
+
+      const missing = await fetch(new URL("/api/usage?range=all&apiKeyId=missing", server.url)).then(res => res.json());
+      expect(missing.filter).toMatchObject({ apiKeyId: "missing", matched: false });
+      expect(missing.summary.requests).toBe(0);
+
+      const unfiltered = await fetch(new URL("/api/usage?range=all", server.url)).then(res => res.json());
+      expect(unfiltered.filter).toBeUndefined();
+      expect(unfiltered.summary.requests).toBe(4);
     } finally {
       await server.stop(true);
     }

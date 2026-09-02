@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -39,35 +39,41 @@ import {
   parseExpectedLocalProviderReloadPid,
   verifyLocalProviderReloadCapability,
 } from "../lib/local-provider-reload-contract";
+import {
+  GUI_PAIR_BROWSER_ORIGIN_HEADER,
+  GUI_PAIR_CAPABILITY_HEADER,
+  GUI_PAIR_EXPECTED_PID_HEADER,
+  GUI_PAIR_EXPIRES_AT_HEADER,
+  GUI_PAIR_NONCE_HEADER,
+  GUI_PAIR_PATH,
+  parseExpectedGuiPairPid,
+  verifyGuiPairCapability,
+} from "../lib/gui-pair-capability";
 import { forgetEphemeralSecretPath, forgetHardenedSecretPath, hardenSecretDir, hardenSecretPath } from "../lib/windows-secret-acl";
 import type { OcxConfig } from "../types";
 import {
-  isAllowedManagementOrigin,
-  isApiAuthRequired,
   isDataPlaneAdmissionSecret,
-  isLoopbackHostname,
-  managementRequestOrigin,
-  parseHttpHost,
 } from "./auth-cors";
+import {
+  authorizeGuiSessionRequest,
+  issueGuiSession as issueGuiSessionFromState,
+  type GuiPairingGrantRecord,
+  type GuiSessionBootstrap,
+  type GuiSessionRecord,
+  type GuiSessionRequestContext,
+} from "./gui-session";
+export type { GuiSessionBootstrap, GuiSessionRequestContext } from "./gui-session";
 
-const GUI_SESSION_TTL_MS = 5 * 60_000;
-const GUI_SESSION_LIMIT = 128;
 const LOCAL_READ_REPLAY_LIMIT = 256;
 const consumedLocalReadCapabilities = new Map<string, number>();
 const admittedLocalReadRequests = new WeakSet<Request>();
 const LOCAL_PROVIDER_RELOAD_REPLAY_LIMIT = 256;
 const consumedLocalProviderReloadCapabilities = new Map<string, number>();
 const admittedLocalProviderReloadRequests = new WeakSet<Request>();
-
-interface GuiSessionRecord {
-  csrfToken: string;
-  origin: string;
-  expiresAt: number;
-}
-
-export interface GuiSessionBootstrap extends GuiSessionRecord {
-  token: string;
-}
+const GUI_PAIR_REPLAY_LIMIT = 256;
+const consumedGuiPairCapabilities = new Map<string, number>();
+const admittedGuiPairRequests = new WeakSet<Request>();
+const admittedManagementRequests = new WeakMap<Request, ManagementPrincipal>();
 
 export type ManagementAuthState =
   | {
@@ -75,6 +81,7 @@ export type ManagementAuthState =
     token: string;
     source: "environment" | "file";
     sessions: Map<string, GuiSessionRecord>;
+    pairingGrants: Map<string, GuiPairingGrantRecord>;
   }
   | { available: false; reason: string };
 
@@ -201,7 +208,7 @@ function ready(token: string, source: "environment" | "file", config: OcxConfig)
   if (isDataPlaneAdmissionSecret(token, config)) {
     return fail("management credential conflicts with a data-plane credential");
   }
-  return { available: true, token, source, sessions: new Map() };
+  return { available: true, token, source, sessions: new Map(), pairingGrants: new Map() };
 }
 
 export function initializeManagementAuthState(config: OcxConfig): ManagementAuthState {
@@ -232,41 +239,32 @@ function equalSecret(actual: string, expected: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
-function removeExpiredSessions(state: Extract<ManagementAuthState, { available: true }>, now = Date.now()): void {
-  for (const [token, session] of state.sessions) {
-    if (session.expiresAt <= now) state.sessions.delete(token);
-  }
-}
-
-function randomSessionSecret(prefix: "ocx_session_"): string {
-  return `${prefix}${randomBytes(32).toString("base64url")}`;
-}
-
 export function issueGuiSession(
   req: Request,
   config: OcxConfig,
   state: ManagementAuthState,
+  context?: GuiSessionRequestContext,
 ): GuiSessionBootstrap | null {
-  if (isApiAuthRequired(config) || !state.available || req.method !== "GET" || !isAllowedManagementOrigin(req, config)) return null;
-  const host = parseHttpHost(req.headers.get("Host"));
-  if (!host || !isLoopbackHostname(host.hostname)) return null;
-  const origin = managementRequestOrigin(req, config);
-  if (!origin) return null;
-  const now = Date.now();
-  removeExpiredSessions(state, now);
-  while (state.sessions.size >= GUI_SESSION_LIMIT) {
-    const oldest = state.sessions.keys().next().value as string | undefined;
-    if (!oldest) break;
-    state.sessions.delete(oldest);
-  }
-  const token = randomSessionSecret("ocx_session_");
-  const session: GuiSessionRecord = {
-    csrfToken: randomBytes(32).toString("base64url"),
-    origin,
-    expiresAt: now + GUI_SESSION_TTL_MS,
+  if (!state.available) return null;
+  return issueGuiSessionFromState(req, config, state, context);
+}
+
+export interface ManagementSessionControl {
+  revokeCurrent(req: Request): boolean;
+}
+
+export function createManagementSessionControl(state: ManagementAuthState): ManagementSessionControl {
+  return {
+    revokeCurrent(req: Request): boolean {
+      if (!state.available) return false;
+      const credential = requestManagementCredential(req);
+      if (!credential) return false;
+      for (const token of state.sessions.keys()) {
+        if (equalSecret(credential, token)) return state.sessions.delete(token);
+      }
+      return false;
+    },
   };
-  state.sessions.set(token, session);
-  return { token, ...session };
 }
 
 /**
@@ -284,6 +282,7 @@ export function issueGuiSession(
 export type ManagementPrincipal =
   | "admin-token"
   | "gui-session"
+  | "gui-pair-capability"
   | "local-read-capability"
   | "local-provider-reload-capability"
   | "system-restart-capability";
@@ -416,6 +415,81 @@ function hasLocalProviderReloadCapability(
   return true;
 }
 
+function hasGuiPairCapability(
+  req: Request,
+  local: LocalManagementAuthContext | undefined,
+): boolean {
+  if (admittedGuiPairRequests.has(req)) return true;
+  if (!local || req.method !== "POST") return false;
+  let url: URL;
+  try {
+    url = new URL(req.url);
+  } catch {
+    return false;
+  }
+  if (url.pathname !== GUI_PAIR_PATH || url.search !== "") return false;
+  const contentLength = req.headers.get("content-length");
+  if (contentLength !== "0" || req.headers.has("transfer-encoding")) return false;
+  const expectedPid = parseExpectedGuiPairPid(req.headers.get(GUI_PAIR_EXPECTED_PID_HEADER));
+  if (expectedPid.kind !== "present" || expectedPid.pid !== local.pid) return false;
+  const expiresAtRaw = req.headers.get(GUI_PAIR_EXPIRES_AT_HEADER);
+  if (!expiresAtRaw || !/^[1-9]\d*$/.test(expiresAtRaw)) return false;
+  const expiresAt = Number(expiresAtRaw);
+  if (!Number.isSafeInteger(expiresAt)) return false;
+  const capability = req.headers.get(GUI_PAIR_CAPABILITY_HEADER);
+  const now = Date.now();
+  if (!verifyGuiPairCapability(
+    local.attestationSecret,
+    req.headers.get(GUI_PAIR_NONCE_HEADER),
+    req.method,
+    url.pathname,
+    req.headers.get(GUI_PAIR_BROWSER_ORIGIN_HEADER),
+    local.pid,
+    local.port,
+    expiresAt,
+    capability,
+    now,
+  )) return false;
+  for (const [consumed, retainedUntil] of consumedGuiPairCapabilities) {
+    if (retainedUntil <= now) consumedGuiPairCapabilities.delete(consumed);
+  }
+  if (!capability) return false;
+  const capabilityDigest = createHash("sha256").update(capability).digest("base64url");
+  if (consumedGuiPairCapabilities.has(capabilityDigest)) return false;
+  if (consumedGuiPairCapabilities.size >= GUI_PAIR_REPLAY_LIMIT) return false;
+  consumedGuiPairCapabilities.set(capabilityDigest, expiresAt);
+  admittedGuiPairRequests.add(req);
+  return true;
+}
+
+function requestManagementCredential(req: Request): string | null {
+  return req.headers.get("x-opencodex-api-key")?.trim()
+    || req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim()
+    || null;
+}
+
+function resolveManagementAdmission(
+  req: Request,
+  state: ManagementAuthState,
+  config?: OcxConfig,
+  local?: LocalManagementAuthContext,
+): ManagementPrincipal | null {
+  const cached = admittedManagementRequests.get(req);
+  if (cached) return cached;
+  let principal: ManagementPrincipal | null = null;
+  if (hasSystemRestartCapability(req, local)) principal = "system-restart-capability";
+  else if (hasLocalProviderReloadCapability(req, local)) principal = "local-provider-reload-capability";
+  else if (hasLocalReadCapability(req, local)) principal = "local-read-capability";
+  else if (hasGuiPairCapability(req, local)) principal = "gui-pair-capability";
+  else if (state.available) {
+    const actual = requestManagementCredential(req);
+    if (actual && equalSecret(actual, state.token)) principal = "admin-token";
+    else if (config && authorizeGuiSessionRequest(req, config, state).ok) principal = "gui-session";
+  }
+  if (principal) admittedManagementRequests.set(req, principal);
+  return principal;
+}
+
 /**
  * The principal for a request that already passed `requireManagementAuth`. Kept as a
  * separate resolution (rather than a changed return type) so every existing caller
@@ -429,17 +503,7 @@ export function managementPrincipal(
   config?: OcxConfig,
   local?: LocalManagementAuthContext,
 ): ManagementPrincipal | null {
-  if (hasSystemRestartCapability(req, local)) return "system-restart-capability";
-  if (hasLocalProviderReloadCapability(req, local)) return "local-provider-reload-capability";
-  if (hasLocalReadCapability(req, local)) return "local-read-capability";
-  if (!state.available) return null;
-  const actual = req.headers.get("x-opencodex-api-key")?.trim()
-    || req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
-  if (!actual) return null;
-  if (equalSecret(actual, state.token)) return "admin-token";
-  if (!config) return null;
-  removeExpiredSessions(state);
-  return state.sessions.has(actual) ? "gui-session" : null;
+  return resolveManagementAdmission(req, state, config, local);
 }
 
 export function requireManagementAuth(
@@ -448,35 +512,13 @@ export function requireManagementAuth(
   config?: OcxConfig,
   local?: LocalManagementAuthContext,
 ): Response | null {
-  if (hasSystemRestartCapability(req, local)) return null;
-  if (hasLocalProviderReloadCapability(req, local)) return null;
-  if (hasLocalReadCapability(req, local)) return null;
+  if (resolveManagementAdmission(req, state, config, local)) return null;
   if (!state.available) {
     return Response.json({
       error: "management API unavailable",
       reason: state.reason,
       hint: "Set OPENCODEX_ADMIN_AUTH_TOKEN to bypass file-backed admin token ACL hardening",
     }, { status: 503 });
-  }
-  const actual = req.headers.get("x-opencodex-api-key")?.trim()
-    || req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
-  if (actual && equalSecret(actual, state.token)) return null;
-  if (actual && config) {
-    removeExpiredSessions(state);
-    const session = state.sessions.get(actual);
-    if (session) {
-      const requestOrigin = managementRequestOrigin(req, config);
-      const claimedOrigin = req.headers.get("x-opencodex-gui-origin");
-      const browserOrigin = req.headers.get("Origin");
-      const sameOrigin = requestOrigin === session.origin
-        && claimedOrigin === session.origin
-        && (!browserOrigin || browserOrigin === session.origin);
-      const safeMethod = req.method === "GET" || req.method === "HEAD";
-      const csrf = req.headers.get("x-opencodex-csrf-token")?.trim();
-      if (sameOrigin && (safeMethod || (browserOrigin === session.origin && !!csrf && equalSecret(csrf, session.csrfToken)))) {
-        return null;
-      }
-    }
   }
   return Response.json({ error: "opencodex admin token required" }, { status: 401 });
 }

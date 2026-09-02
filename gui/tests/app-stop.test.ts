@@ -9,6 +9,20 @@ function response(body: unknown, status = 200): Response {
 }
 
 describe("App proxy stop", () => {
+  test("routes standalone stop and connected disconnect to different machine mutations", async () => {
+    const seen: Array<{ url: string; method: string; body: unknown }> = [];
+    const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({ url: String(input), method: String(init?.method), body: init?.body });
+      return response({ success: true }, init?.body ? 202 : 200);
+    }) as typeof fetch;
+    expect((await requestProxyStop("http://machine", { fetchFn })).accepted).toBe(true);
+    expect((await requestProxyStop("http://machine", { fetchFn, mode: "client" })).accepted).toBe(true);
+    expect(seen).toEqual([
+      { url: "http://machine/api/stop", method: "POST", body: undefined },
+      { url: "http://machine/api/machine/disconnect", method: "POST", body: "{}" },
+    ]);
+  });
+
   test("releases the pending UI and exposes a non-2xx server message", async () => {
     const outcome = await requestProxyStop("", {
       fetchFn: (async () => response({
@@ -61,7 +75,8 @@ describe("App proxy stop", () => {
     expect(brandIdx).toBeGreaterThan(handleStopIdx);
     const handler = app.slice(handleStopIdx, brandIdx);
 
-    expect(handler).toContain("await requestProxyStop(API_BASE");
+    expect(handler).toContain("await requestProxyStop(machineBase");
+    expect(handler).toContain('mode: targets.connected ? "client" : "standalone"');
     expect(handler).toContain("if (!outcome.accepted)");
     expect(handler).toContain("setStopping(false)");
     expect(handler).toContain("alert(outcome.message)");

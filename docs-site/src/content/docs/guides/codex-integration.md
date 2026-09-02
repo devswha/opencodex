@@ -55,6 +55,22 @@ Standalone `/images/generations` calls never enter that bridge.
   `openai-responses` provider whose endpoint implements the OpenAI Images API. Explicit selection
   fails closed and never falls back to a different paid upstream. Registry-managed provider ids
   are not accepted here; omit `images.provider` to use the built-in OpenAI tiers.
+- **xAI Imagine (Grok OAuth) relay:** when `images.bridgeEnabled` is `true`, `images.provider` is
+  omitted, and an `xai` provider is configured, `/v1/images/generations` and `/v1/images/edits`
+  are sent to `https://api.x.ai/v1`. The credential depends on the provider's `authMode`: with
+  `"oauth"` the relay reuses the Grok CLI grant from `ocx login xai`; with any other mode it uses
+  the provider's API key. An OAuth login does not arm a keyed provider, and vice versa. ChatGPT
+  credentials are not forwarded. If the credential is missing, the proxy returns 400 instead of
+  billing ChatGPT. Setting `images.provider` explicitly hands `/v1/images` to that provider; its
+  own validation errors are returned as-is and the xAI relay is never tried.
+  The relay maps Codex `size` / `aspect_ratio` onto xAI's Imagine body and returns
+  the same `{created, data:[{b64_json}]}` shape. Combined decoded bytes and base64-encoded output
+  across the batch (inline `b64_json` and downloaded URLs) stay under 100 MiB; a batch that would
+  exceed that cap returns 502. When xAI returns an image URL instead of inline bytes, the proxy
+  fetches it itself with no credential: the URL must be public HTTPS (no redirects, no
+  `file:`, no loopback or private addresses), each download is capped at 50 MiB, and the result is
+  materialized as a local artifact that is served only through the authenticated management
+  endpoint. This is independent of the Responses Image Bridge loop (which remains API-key-only).
 - **Google Antigravity (CCA) fallback:** when neither an OpenAI forward candidate nor a keyed
   provider is configured, `/v1/images/generations` (not `/images/edits`) falls back to the
   Antigravity **Cloud Code Assist** endpoint using the `gemini-3.1-flash-image` model. The fallback
@@ -175,6 +191,48 @@ aligned with native Codex. opencodex also serves `/v1/responses` over WebSocket.
 provider advertises `supports_websockets = true` only when `"websockets": true`; on loopback Codex's
 built-in provider may try WebSocket first, and a disabled proxy returns `426` so Codex falls back to
 HTTP/SSE.
+
+### Authless Codex Desktop (opt-in)
+
+Codex Desktop shows its ChatGPT login screen whenever the active provider requires OpenAI auth. If
+your OpenCodex setup never uses ChatGPT credentials (routed providers only, or a blocked
+`chatgpt.com`), you can opt out of that gate:
+
+```bash
+ocx system settings --desktop-authless on    # or "codexDesktopAuthless": true in config.json
+ocx sync                                     # rewrites ~/.codex/config.toml; restart Desktop
+```
+
+With the switch on, a loopback bind injects the dedicated provider form instead of the root
+`openai_base_url` override:
+
+```toml
+model_provider = "opencodex"
+
+[model_providers.opencodex]
+name = "OpenCodex Proxy"
+base_url = "http://127.0.0.1:10100/v1"
+wire_api = "responses"
+requires_openai_auth = false
+```
+
+Desktop then starts without a login and routes every turn through the proxy. The setting survives
+`ocx start`, restart, `ocx sync`, and `ocx ensure`; turning it off (`--desktop-authless off`) makes the
+next sync restore the default loopback form, and `ocx restore` strips it like any other injected
+routing. What to expect while it is on:
+
+- ChatGPT-gated Desktop chrome (account, usage, Fast mode) stays dark: Codex derives those surfaces
+  from the provider's auth requirement.
+- New threads are tagged with the `opencodex` provider, as on a non-loopback bind, and history is
+  handled the same way.
+- Desktop releases that filter the model picker against a native-only allowlist may show an empty
+  or `Custom` picker in this mode as well; requests still use the configured model. Set
+  `model = "<provider>/<id>"` in `config.toml` as described in
+  [Desktop remote servers](/guides/codex-app-models/#desktop-remote-servers).
+
+This only changes the Desktop login gate. Non-loopback binds keep `requires_openai_auth = true` and
+the `env_key` admission credential regardless of the switch; it never exposes an OpenCodex listener
+without authentication.
 
 ## Thread identity and history
 
@@ -413,6 +471,36 @@ ocx service install    # persistent: auto-starts on login and respawns on crash
 
 `ocx status` shows whether the proxy is running and prints the same restart hint when
 it is not; `ocx doctor` reports restart safety (service/shim coverage).
+
+## Routed models during Codex reserve mode
+
+When the ChatGPT 5-hour quota is exhausted, Codex may offer a reserve fallback model
+(`gpt-reserve` / Luna Reserve). While that state is active, the Codex model picker can make
+**every other entry unselectable — including opencodex routed models**, even though those
+run on independent providers and credentials and consume none of the exhausted quota.
+
+**This is a Codex client behavior and the proxy cannot change it.** The reserve state
+arrives from the ChatGPT backend on the client's own authenticated connection, not through
+the proxy. The desktop app polls `backend-api/wham/usage` and treats reserve as active when
+the response carries `rate_limit_upsell.banner_type = "luna_reserve"`, the primary
+`rate_limit.allowed` is `false`, and `additional_rate_limits[]` contains an entry with
+`limit_name = "gpt-reserve"` that is still allowed. While that holds, the app forces the
+conversation's model setting to `gpt-reserve` and rewrites any other pick back to it — the
+picker is collapsed to the reserve entry by the client, and a `model =` value in
+`config.toml` is overridden the same way. None of this consults the model catalog, so no
+representation on our side participates in the decision. opencodex has no reserve concept to
+adjust, and the alternative — misreporting your own quota back to your own client — would be
+a worse bug than the one it papered over.
+
+**Workaround:** the models themselves stay fully usable; only the Codex app's model
+selection is gated. Reach them from a client that does not consult the ChatGPT usage
+snapshot:
+
+- Claude Code through the proxy (`ocx claude`).
+- Any HTTP client against the local `/v1` endpoint.
+- The dashboard's own request paths.
+
+Normal picker behavior returns when the 5-hour window resets.
 
 ## The subagent picker
 

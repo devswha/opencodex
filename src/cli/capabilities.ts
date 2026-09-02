@@ -108,6 +108,29 @@ export const CAPABILITIES: readonly Capability[] = [
     details: ["Reads /healthz plus local config; drives no management API route."],
   },
   {
+    command: ["connect", "rotate"],
+    summary: "Rotate the connected client's data key against the hub, with commit and abort.",
+    // One command drives all three: start returns the new secret once, commit promotes it,
+    // and abort unwinds a rotation that could not be confirmed. They are not separate verbs
+    // because a half-rotation is not a state an operator should be able to leave behind.
+    routes: [
+      { method: "POST", path: "/api/keys/rotate" },
+      { method: "POST", path: "/api/keys/rotate/commit" },
+      { method: "DELETE", path: "/api/keys/rotate" },
+    ],
+    flags: [
+      { name: "--pairing-code-stdin", value: "boolean", summary: "Read a one-time pairing code from stdin as the rotation authority." },
+      { name: "--admin-token-stdin", value: "boolean", summary: "Read the hub admin token from stdin as the rotation authority." },
+      { name: "--json", value: "boolean", summary: "Emit the rotation result as JSON." },
+    ],
+    mutates: true,
+    json: "payload",
+    details: [
+      "Requires transient authority on stdin; the credential is never persisted or echoed.",
+      "A rotation left pending by a crash is resumed here — startup and status stop rather than guess which key generation is live.",
+    ],
+  },
+  {
     command: ["capabilities"],
     summary: "List the declared CLI capabilities and the management routes they drive.",
     routes: [],
@@ -129,6 +152,21 @@ export const CAPABILITIES: readonly Capability[] = [
     mutates: false,
     json: "envelope",
     details: ["Reads local config; drives no management API route."],
+  },
+  {
+    command: ["provider", "keychain"],
+    summary: "Move a provider's API key into the OS keychain, restore it, or report where it lives.",
+    routes: [
+      { method: "GET", path: "/api/providers/keychain" },
+      { method: "POST", path: "/api/providers/keychain" },
+    ],
+    flags: [{ name: "--json", value: "boolean", summary: "Emit the keychain status or result as JSON." }],
+    mutates: true,
+    json: "payload",
+    details: [
+      "`store` verifies every keychain write by read-back before config.json is rewritten with keychain: references; an unavailable keychain refuses with 503 and leaves the file untouched.",
+      "Headless services usually have no unlocked keychain session; prefer ${ENV_VAR} references there.",
+    ],
   },
   {
     command: ["account", "list"],
@@ -460,13 +498,14 @@ export const CAPABILITIES: readonly Capability[] = [
   },
   {
     command: ["integration", "native"],
-    summary: "Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations.",
+    summary: "Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations, and read the Cursor status (which builds are installed, gateway values, last request seen).",
     routes: [
       { method: "GET", path: "/api/native-integrations" },
       { method: "PUT", path: "/api/native-integrations/claude" },
       { method: "PUT", path: "/api/native-integrations/claude-desktop" },
       { method: "PUT", path: "/api/native-integrations/codex" },
       { method: "PUT", path: "/api/native-integrations/grok" },
+      { method: "GET", path: "/api/native-integrations/cursor" },
     ],
     flags: [{ name: "--json", value: "boolean", summary: "Emit the client rows or toggle result as JSON." }],
     mutates: true,

@@ -22,6 +22,7 @@ export interface HealthzIdentity {
   port?: unknown;
   restartCapability?: unknown;
   providerReloadCapability?: unknown;
+  guiPairCapability?: unknown;
 }
 
 export interface LivenessIo {
@@ -269,6 +270,12 @@ interface ReadyzBody {
   pid?: unknown;
   port?: unknown;
   status?: unknown;
+  // Remote protocol metadata is intentionally additive here. Ordinary
+  // readiness remains compatible with legacy standalone servers; `ocx connect`
+  // validates these fields separately in src/remote/protocol.ts.
+  protocol?: unknown;
+  minimumClientProtocol?: unknown;
+  managementUrl?: unknown;
 }
 
 export interface ReadinessProbeResult {

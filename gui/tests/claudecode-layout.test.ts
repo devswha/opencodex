@@ -17,7 +17,7 @@ test("ClaudeCode renders the denser workspace rail layout", async () => {
 
   // Claude is now a panel of the Integrations tab strip rather than its own
   // top-level page, so App renders the shell and the shell renders Claude.
-  expect(app).toContain("<Integrations apiBase={API_BASE} />");
+  expect(app).toContain('<Integrations apiBase={sharedBase} machineApiBase={machineBase} connected={targets.connected} />');
   const integrations = await Bun.file(new URL("../src/pages/Integrations.tsx", import.meta.url)).text();
   expect(integrations).toContain("<Claude apiBase={apiBase} active={active} />");
   // Title/subtitle sit above the Code/Desktop strip (not inside each panel).

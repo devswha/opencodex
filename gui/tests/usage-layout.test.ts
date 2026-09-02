@@ -23,11 +23,21 @@ test("Usage renders every section in one scrollable column with a sticky strip",
   expect(page).toContain("<SectionTabs");
   expect(page).toContain("sectionAnchorId");
 
-  expect(app).toContain("<Usage apiBase={API_BASE} />");
+  expect(app).toContain('<Usage apiBase={sharedBase} connected={targets.connected} apiKeyId={targets.apiKeyId} />');
   expect(css).toContain("styles-usage-workspace.css");
   // The strip has to stay reachable while reading down the page.
   expect(css).toContain(".section-tabs");
   expect(css).toContain("position: sticky");
+});
+
+test("connected Usage defaults to the exact machine key and can toggle hub-wide without local fallback", async () => {
+  const src = await Bun.file(new URL("../src/pages/Usage.tsx", import.meta.url)).text();
+  expect(src).toContain('useState<UsageScope>("machine")');
+  expect(src).toContain('query.set("apiKeyId", apiKeyId)');
+  expect(src).toContain('setScope("hub")');
+  expect(src).toContain('connected ? "connected" : "standalone"');
+  expect(src).toContain('t("usage.hubOffline")');
+  expect(src).not.toContain("/api/machine/usage");
 });
 
 test("Usage workspace sections mount report panels in order", async () => {
@@ -61,7 +71,7 @@ test("Usage loading and empty states guard the workspace body", async () => {
 });
 
 test("usage workspace i18n keys exist in every locale", async () => {
-  const locales = ["en", "de", "fr", "ja", "ko", "ru", "zh", "zh-TW"] as const;
+  const locales = ["en", "de", "fr", "ja", "ko", "ru", "tr", "zh", "zh-TW"] as const;
   for (const locale of locales) {
     const dict = await Bun.file(new URL(`../src/i18n/${locale}.ts`, import.meta.url)).text();
     expect(dict).toContain('"usage.workspace.sections":');
@@ -70,6 +80,10 @@ test("usage workspace i18n keys exist in every locale", async () => {
     expect(dict).toContain('"usage.historyTruncated":');
     expect(dict).toContain('"usage.historyTruncatedWindow":');
     expect(dict).toContain('"api.attribution.totalRequestsAvailable":');
+    expect(dict).toContain('"usage.source.connected":');
+    expect(dict).toContain('"usage.scope.machine":');
+    expect(dict).toContain('"usage.scope.hub":');
+    expect(dict).toContain('"usage.hubOffline":');
   }
 });
 

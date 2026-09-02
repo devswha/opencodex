@@ -50,7 +50,7 @@ test("the restart action comes from the shared hook, not an inline duplicate", (
   // The models page reuses the same controller; a second inline implementation
   // would drift on the four-branch message mapping. The hook now also takes an
   // options object, so match the call rather than one exact argument list.
-  expect(src).toContain("useCodexRestart(API_BASE");
+  expect(src).toContain("useCodexRestart(sharedBase");
   expect(src).not.toContain("requestCodexRestart(");
 });
 
@@ -117,4 +117,3 @@ test("every restart string exists in the English source with its slots intact", 
   expect(en["dash.codexRestartPartial"]).toContain("{count}");
   expect(en["dash.codexRestartFailed"]).toContain("{status}");
 });
-

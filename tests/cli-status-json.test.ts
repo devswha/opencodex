@@ -1,12 +1,14 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isConnectionRefused, isUncleanExitEvidence, proxyHealthFailureReason, resolveStatusPid, selectListenTarget } from "../src/cli/status";
+import { findDeadPid } from "./helpers/dead-pid";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const cliPath = join(repoRoot, "src", "cli", "index.ts");
@@ -68,6 +70,13 @@ describe("CLI status JSON", () => {
         };
         defaultProvider?: unknown;
         config?: { source?: unknown; error?: unknown };
+        connection?: {
+          state?: unknown;
+          serverUrl?: unknown;
+          apiKeyId?: unknown;
+          credentialFile?: unknown;
+          catalog?: unknown;
+        };
         service?: { summary?: unknown };
         codexShim?: { summary?: unknown };
         codexRuntime?: {
@@ -130,13 +139,17 @@ describe("CLI status JSON", () => {
       expect(typeof parsed.codexHome?.appCodexHome).toBe("string");
       expect(typeof parsed.codexHome?.mismatch).toBe("boolean");
       expect(parsed.codexHome?.warning === null || typeof parsed.codexHome?.warning === "string").toBe(true);
+      expect(parsed.connection).toMatchObject({
+        state: "disconnected",
+        credentialFile: "missing",
+      });
 
       const serialized = JSON.stringify(parsed).toLowerCase();
       for (const forbidden of ["apikey", "sk-test-secret", "token", "refreshtoken", "authorization", "email"]) {
         expect(serialized).not.toContain(forbidden);
       }
     } finally {
-      rmSync(opencodexHome, { recursive: true, force: true });
+      removeTreeWithRetry(opencodexHome);
     }
   });
 
@@ -193,7 +206,7 @@ describe("CLI status JSON", () => {
       });
     } finally {
       resetCodexRuntimeResolveCacheForTests();
-      rmSync(opencodexHome, { recursive: true, force: true });
+      removeTreeWithRetry(opencodexHome);
     }
   });
 
@@ -216,7 +229,7 @@ describe("CLI status JSON", () => {
       expect(result.stderr).toContain("Usage: ocx status [--json]");
       expect(result.stdout).toBe("");
     } finally {
-      rmSync(opencodexHome, { recursive: true, force: true });
+      removeTreeWithRetry(opencodexHome);
     }
   });
 
@@ -239,7 +252,7 @@ describe("CLI status JSON", () => {
       expect(result.stderr).toContain("Usage: ocx status [--json]");
       expect(result.stdout).toBe("");
     } finally {
-      rmSync(opencodexHome, { recursive: true, force: true });
+      removeTreeWithRetry(opencodexHome);
     }
   });
 
@@ -270,7 +283,7 @@ describe("CLI status JSON", () => {
       expect(serialized).not.toContain("sk-status-secret");
       expect(serialized).not.toContain("apiKey");
     } finally {
-      rmSync(opencodexHome, { recursive: true, force: true });
+      removeTreeWithRetry(opencodexHome);
     }
   });
 
@@ -431,7 +444,7 @@ describe("unclean prior exit evidence", () => {
 describe("status reports stale process records end to end", () => {
   const seed = (home: string, opts: { pid?: number; runtime?: boolean; port: number }): void => {
     writeFileSync(join(home, "config.json"), JSON.stringify({ port: opts.port, codexAutoStart: false }), "utf8");
-    const pid = opts.pid ?? (process.pid === 4242 ? 4243 : 4242);
+    const pid = opts.pid ?? findDeadPid();
     if (opts.pid !== 0) writeFileSync(join(home, "ocx.pid"), String(pid), "utf8");
     if (opts.runtime) {
       writeFileSync(join(home, "runtime-port.json"), JSON.stringify({ pid, port: opts.port, hostname: "127.0.0.1" }), "utf8");
@@ -468,7 +481,7 @@ describe("status reports stale process records end to end", () => {
       });
       expect(human.stdout).toContain("may have exited unexpectedly");
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -488,7 +501,7 @@ describe("status reports stale process records end to end", () => {
       });
       expect(human.stdout).not.toContain("may have exited unexpectedly");
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -502,7 +515,7 @@ describe("status reports stale process records end to end", () => {
       const parsed = JSON.parse(runStatusJson(home).stdout) as { proxy?: { staleProcessState?: unknown } };
       expect(parsed.proxy?.staleProcessState).toBe(false);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -519,7 +532,7 @@ describe("status reports stale process records end to end", () => {
     await new Promise<void>(resolve => { occupied.listen(0, "127.0.0.1", () => resolve()); });
     const occupiedPort = (occupied.address() as AddressInfo).port;
     try {
-      const pid = process.pid === 4242 ? 4243 : 4242;
+      const pid = findDeadPid();
       writeFileSync(join(home, "config.json"), JSON.stringify({ port: occupiedPort, codexAutoStart: false }), "utf8");
       writeFileSync(join(home, "ocx.pid"), String(pid), "utf8");
       writeFileSync(join(home, "runtime-port.json"), JSON.stringify({ pid, port: freePort, hostname: "127.0.0.1" }), "utf8");
@@ -528,7 +541,7 @@ describe("status reports stale process records end to end", () => {
       expect(parsed.proxy?.staleProcessState).toBe(true);
     } finally {
       await new Promise<void>(resolve => { occupied.close(() => resolve()); });
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 });

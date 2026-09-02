@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import {
+  configureApiTargets,
   installApiAuthFetch,
   resetApiAuthFetchForTests,
   setRebootstrapTimeoutForTests,
   setResolutionWatchdogForTests,
 } from "../src/api";
+import { targetsFromMachineStatus, type MachineStatusV1 } from "../src/api-targets";
 
 const globals = ["document", "window", "navigator", "sessionStorage", "fetch"] as const;
 let previousGlobals: Record<(typeof globals)[number], unknown>;
@@ -52,6 +54,7 @@ function sessionDocumentHtml(token: string, csrf: string, origin: string): strin
     `<meta name="opencodex-session-token" content="${token}">`,
     `<meta name="opencodex-session-csrf" content="${csrf}">`,
     `<meta name="opencodex-session-origin" content="${origin}">`,
+    `<meta name="opencodex-session-server-origin" content="${origin}">`,
     "</head><body></body></html>",
   ].join("");
 }
@@ -67,9 +70,51 @@ function hangUntilAborted(signal?: AbortSignal | null): Promise<Response> {
   });
 }
 
-const MINTED = () => new Response(sessionDocumentHtml("ocx_session_fresh", "fresh-csrf", "http://localhost"), {
-  status: 200,
-  headers: { "Content-Type": "text/html" },
+const MINTED = () => {
+  const response = new Response(sessionDocumentHtml("ocx_session_fresh", "fresh-csrf", "http://localhost"), {
+    status: 200,
+    headers: { "Content-Type": "text/html" },
+  });
+  Object.defineProperty(response, "url", { configurable: true, value: "http://localhost/opencodex-session" });
+  return response;
+};
+
+test("a shared-target bootstrap watchdog does not block or clear the machine target", async () => {
+  for (const [name, content] of [
+    ["opencodex-session-token", "ocx_session_machine"],
+    ["opencodex-session-csrf", "machine-csrf"],
+    ["opencodex-session-origin", "http://localhost"],
+    ["opencodex-session-server-origin", "http://localhost"],
+  ]) {
+    const meta = document.createElement("meta");
+    meta.setAttribute("name", name);
+    meta.setAttribute("content", content);
+    document.head.append(meta);
+  }
+  const direct: MachineStatusV1 = {
+    mode: "client", connected: true, machineBase: "http://localhost",
+    sharedBase: "https://hub.example.test", sharedServerOrigin: "https://hub.example.test",
+    managementTransport: "direct", apiKeyId: "client-key-a", protocolVersion: 1,
+    connectedAt: "2026-08-28T00:00:00.000Z", hubReachability: "unknown",
+  };
+  configureApiTargets(targetsFromMachineStatus("", direct));
+  setRebootstrapTimeoutForTests(30);
+  const mockFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input), "http://localhost/");
+    if (url.origin === "https://hub.example.test" && url.pathname === "/opencodex-session") {
+      return hangUntilAborted(init?.signal);
+    }
+    if (url.origin === "https://hub.example.test") return new Response("unauthorized", { status: 401 });
+    const token = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)).get("x-opencodex-api-key");
+    return new Response("{}", { status: token === "ocx_session_machine" ? 200 : 401 });
+  }) as typeof fetch;
+  await installMockAuthFetch(mockFetch);
+
+  const shared = fetch("https://hub.example.test/api/config");
+  const machine = await fetch("/api/machine/status");
+  expect(machine.status).toBe(200);
+  expect((await shared).status).toBe(401);
+  expect(promptCalls).toBe(0);
 });
 test("hung bootstrap fails the wave within the deadline and a later wave re-bootstraps to success", async () => {
   setRebootstrapTimeoutForTests(50);

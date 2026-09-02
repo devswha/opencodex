@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync} from "node:fs";
 import { join } from "node:path";
 import { OAUTH_PROVIDERS, runLogin } from "../src/oauth";
 import { getAccountCredential, getAccountSet, saveCredential } from "../src/oauth/store";
 import type { OAuthController, OAuthCredentials } from "../src/oauth/types";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-oauth-reauth-bind");
 const previousHome = process.env.OPENCODEX_HOME;
@@ -31,16 +34,26 @@ function config(): OcxConfig {
   };
 }
 
+// No server runs here, so nothing drains the OAuth store's hardenConfigDir() flight before
+// teardown; on windows-latest the icacls child outlived the 2.45 s retry (run 33610501053).
+// The file tests reauth binding, not ACLs: stub both runners and flush.
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+
 beforeEach(() => {
-  rmSync(TEST_DIR, { recursive: true, force: true });
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  removeTreeWithRetry(TEST_DIR);
   mkdirSync(TEST_DIR, { recursive: true });
   process.env.OPENCODEX_HOME = TEST_DIR;
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
-  rmSync(TEST_DIR, { recursive: true, force: true });
+  removeTreeWithRetry(TEST_DIR);
 });
 
 describe("OAuth account-scoped reauth", () => {

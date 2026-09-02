@@ -26,6 +26,12 @@ export interface GatewayModelCacheRefreshOptions {
   configDir?: string;
   admissionConfig?: Pick<OcxConfig, "apiKeys">;
   env?: NodeJS.ProcessEnv;
+  fetchImpl?: typeof fetch;
+}
+
+export interface GatewayModelTarget {
+  baseUrl: string;
+  admissionToken: string;
 }
 
 /** Claude Code config dir (CLAUDE_CONFIG_DIR override honored, like the CLI). */
@@ -70,6 +76,14 @@ function serviceFileToken(env: NodeJS.ProcessEnv): string | null {
 /** Fetch the anthropic-flavor /v1/models from the local proxy and write the cache. */
 export async function refreshGatewayModelCacheFromProxy(
   port: number,
+  options?: GatewayModelCacheRefreshOptions,
+): Promise<string | null>;
+export async function refreshGatewayModelCacheFromProxy(
+  target: GatewayModelTarget,
+  options?: GatewayModelCacheRefreshOptions,
+): Promise<string | null>;
+export async function refreshGatewayModelCacheFromProxy(
+  portOrTarget: number | GatewayModelTarget,
   options: GatewayModelCacheRefreshOptions = {},
 ): Promise<string | null> {
   try {
@@ -82,12 +96,18 @@ export async function refreshGatewayModelCacheFromProxy(
     const configuredToken = options.admissionConfig?.apiKeys
       ?.find(entry => entry.key.trim().length > 0)
       ?.key.trim();
-    const admissionToken = envToken || serviceFileToken(options.env ?? process.env) || configuredToken;
+    const admissionToken = typeof portOrTarget === "number"
+      ? envToken || serviceFileToken(options.env ?? process.env) || configuredToken
+      : portOrTarget.admissionToken;
     if (admissionToken) headers.set("x-opencodex-api-key", admissionToken);
+
+    const baseUrl = typeof portOrTarget === "number"
+      ? `http://127.0.0.1:${portOrTarget}`
+      : new URL(portOrTarget.baseUrl).origin;
 
     // ?ids=cli pins the readable claude-ocx id family deterministically (audit 051
     // #5): the cache prewrite must not depend on UA sniffing.
-    const res = await fetch(`http://127.0.0.1:${port}/v1/models?limit=1000&ids=cli`, {
+    const res = await (options.fetchImpl ?? fetch)(`${baseUrl}/v1/models?limit=1000&ids=cli`, {
       headers,
       signal: AbortSignal.timeout(options.timeoutMs ?? 3_000),
     });
@@ -100,7 +120,7 @@ export async function refreshGatewayModelCacheFromProxy(
         id: m.id as string,
         display_name: typeof m.display_name === "string" ? m.display_name : undefined,
       }));
-    return writeGatewayModelCache(`http://127.0.0.1:${port}`, models, options.configDir);
+    return writeGatewayModelCache(baseUrl, models, options.configDir);
   } catch {
     return null;
   }

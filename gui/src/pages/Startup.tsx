@@ -70,7 +70,7 @@ function deriveCodexRuntimeNotice(
   return { warning: null, fix: null };
 }
 
-export default function Startup({ apiBase }: { apiBase: string }) {
+export default function Startup({ apiBase, machineApiBase = apiBase, connected = false }: { apiBase: string; machineApiBase?: string; connected?: boolean }) {
   const { t } = useI18n();
   const cacheKey = `${STARTUP_PAGE_CACHE_PREFIX}${apiBase}`;
   const cached = useMemo(() => readSessionListCache<StartupPageCache>(cacheKey), [cacheKey]);
@@ -89,6 +89,33 @@ export default function Startup({ apiBase }: { apiBase: string }) {
   const [runtimeNoticePending, setRuntimeNoticePending] = useState(() => !cached?.data);
   const paintedRef = useRef(Boolean(cached?.data));
   const secondaryGenerationRef = useRef(0);
+  const [machineShim, setMachineShim] = useState<{ installed?: boolean; healthy?: boolean } | null>(null);
+  const [machineBusy, setMachineBusy] = useState(false);
+
+  useEffect(() => {
+    if (!connected) return;
+    const controller = new AbortController();
+    void fetch(`${machineApiBase}/api/machine/shim`, { signal: controller.signal })
+      .then(response => response.ok ? response.json() : null)
+      .then(value => { if (!controller.signal.aborted) setMachineShim(value); })
+      .catch(() => { if (!controller.signal.aborted) setMachineShim(null); });
+    return () => controller.abort();
+  }, [connected, machineApiBase]);
+
+  const runMachineShim = async (action: "install" | "repair" | "uninstall") => {
+    setMachineBusy(true);
+    try {
+      const response = await fetch(`${machineApiBase}/api/machine/shim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      if (response.ok) {
+        const value = await response.json() as { shim?: { installed?: boolean; healthy?: boolean } };
+        setMachineShim(value.shim ?? null);
+      }
+    } finally { setMachineBusy(false); }
+  };
 
   useEffect(() => () => {
     secondaryGenerationRef.current += 1;
@@ -303,6 +330,17 @@ export default function Startup({ apiBase }: { apiBase: string }) {
           </button>
         </div>
       </div>
+
+      {connected && (
+        <section className="notice startup-page-notice" aria-label={t("connection.machine.title")}>
+          <strong>{t("connection.machine.title")}</strong>
+          <span>{machineShim?.healthy ? t("connection.machine.shimHealthy") : t("connection.machine.shimNeedsAttention")}</span>
+          <div className="startup-page-head-actions">
+            <button type="button" className="btn btn-ghost btn-sm" disabled={machineBusy} onClick={() => void runMachineShim("repair")}>{t("connection.machine.repairShim")}</button>
+            {machineShim?.installed && <button type="button" className="btn btn-ghost btn-sm" disabled={machineBusy} onClick={() => void runMachineShim("uninstall")}>{t("connection.machine.removeShim")}</button>}
+          </div>
+        </section>
+      )}
 
       {loadState.showSkeleton && !data ? (
         <DataSurfaceSkeleton label={t("startup.loading")} rows={5} />

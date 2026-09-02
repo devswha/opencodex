@@ -121,7 +121,29 @@ export function managementRequestOrigin(req: Request, config: OcxConfig): string
   const host = req.headers.get("Host");
   const parsedHost = parseHttpHost(host);
   if (!host || !parsedHost) return null;
-  if (!isApiAuthRequired(config) && !isLoopbackHostname(parsedHost.hostname)) return null;
+  if (isLoopbackHostname(parsedHost.hostname)) {
+    try {
+      const protocol = new URL(req.url).protocol;
+      if (protocol !== "http:" && protocol !== "https:") return null;
+      return new URL(`${protocol}//${host}`).origin;
+    } catch {
+      return null;
+    }
+  }
+  if (!isApiAuthRequired(config)) return null;
+  if (config.runtimeRole === "hub" && config.hub?.managementPublicOrigin) {
+    try {
+      const configured = new URL(config.hub.managementPublicOrigin);
+      if (
+        (configured.protocol === "http:" || configured.protocol === "https:")
+        && !configured.username
+        && !configured.password
+        && configured.pathname === "/"
+        && !configured.search
+        && !configured.hash
+      ) return configured.origin;
+    } catch { /* malformed direct fixture: fall through to observed origin */ }
+  }
   try {
     const protocol = new URL(req.url).protocol;
     if (protocol !== "http:" && protocol !== "https:") return null;
@@ -200,6 +222,7 @@ export function corsHeaders(req?: Request, config?: RequestPolicyView): Record<s
 
 export function managementCorsHeaders(req?: Request, config?: OcxConfig): Record<string, string> {
   const headers = corsHeaders();
+  headers["Access-Control-Allow-Headers"] = `${STATIC_ALLOWED_REQUEST_HEADERS}, X-OpenCodex-GUI-Origin, X-OpenCodex-CSRF-Token`;
   const origin = req?.headers.get("Origin");
   if (origin && req && config && isAllowedManagementOrigin(req, config)) {
     headers["Access-Control-Allow-Origin"] = origin;
@@ -351,6 +374,10 @@ export function resolveDataPlaneAdmissionSecret(
   if (secretEquals(actual, configuredApiAuthToken(config))) return { kind: "environment", source };
   for (const k of config.apiKeys ?? []) {
     if (secretEquals(actual, k.key)) return { kind: "configured", keyId: k.id, source };
+    const pending = k.pendingRotation;
+    if (pending && Date.parse(pending.expiresAt) > Date.now() && secretEquals(actual, pending.key)) {
+      return { kind: "configured", keyId: k.id, source };
+    }
   }
   return null;
 }
@@ -667,6 +694,13 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     "noStructuredOutputModels",
   );
   if (structuredOutputOptOutError) return `provider ${name} ${structuredOutputOptOutError}`;
+  const retainModelsError = nonBlankStringArrayConfigError(raw.retainModels, "retainModels");
+  if (retainModelsError) return `provider ${name} ${retainModelsError}`;
+  const toolReasoningOptOutError = nonBlankStringArrayConfigError(
+    raw.omitReasoningEffortWithToolsModels,
+    "omitReasoningEffortWithToolsModels",
+  );
+  if (toolReasoningOptOutError) return `provider ${name} ${toolReasoningOptOutError}`;
   const openRouterError = openRouterRoutingConfigError(typed);
   if (openRouterError) return `provider ${name} ${openRouterError}`;
   const vercelError = vercelGatewayRoutingConfigError(typed);
@@ -760,6 +794,8 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "noTopPModels",
       "noPenaltyModels",
       "noStructuredOutputModels",
+      "retainModels",
+      "omitReasoningEffortWithToolsModels",
       "upstreamHttpVersion",
       "autoToolChoiceOnlyModels",
       "preserveReasoningContentModels",

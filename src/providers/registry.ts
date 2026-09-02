@@ -13,10 +13,12 @@ import {
   CURSOR_NO_VISION_MODELS,
   CURSOR_STATIC_MODELS,
   cursorModelContextWindows,
+  cursorModelDisplayNames,
   cursorModelIds,
   cursorModelInputModalities,
   cursorModelReasoningEfforts,
 } from "../adapters/cursor/discovery";
+import { cursorFastCapableBases } from "../adapters/cursor/catalog";
 import { COMMAND_CODE_MODEL_REASONING_EFFORTS } from "./command-code-efforts";
 import { isCanonicalOpenRouterTarget } from "./openrouter-routing";
 
@@ -270,6 +272,12 @@ export interface ProviderRegistryEntry {
   modelDiscovery?: ProviderModelDiscoverySpec;
   contextWindow?: number;
   modelContextWindows?: Record<string, number>;
+  /**
+   * Registry-supplied picker labels. Without these a routed row shows its raw slug,
+   * because `routedDisplayName` (codex/catalog/sync.ts) passes the slug through for every
+   * provider. An operator's `modelDisplayNames` still wins: derive only fills when absent.
+   */
+  modelDisplayNames?: Record<string, string>;
   modelInputModalities?: Record<string, string[]>;
   defaultMaxOutputTokens?: number;
   modelMaxOutputTokens?: Record<string, number>;
@@ -306,6 +314,7 @@ export interface ProviderRegistryEntry {
   preserveReasoningContentModels?: string[];
   requiresReasoningPlaceholderModels?: string[];
   reasoningSplitModels?: string[];
+  reasoningDetailsModels?: string[];
   thinkingToggleModels?: string[];
   thinkingBudgetModels?: string[];
   escapeBuiltinToolNames?: boolean;
@@ -324,10 +333,11 @@ export type ProviderConfigSeed = Pick<
   OcxProviderConfig,
   "adapter" | "baseUrl" | "apiKeyTransport" | "responsesPath" | "authMode" | "keyOptional" | "freeTier" | "modelSuffixBracketStrip" | "defaultModel" | "models"
   | "liveModels" | "contextWindow" | "modelContextWindows" | "modelInputModalities"
+  | "modelDisplayNames"
   | "modelMaxInputTokens" | "defaultMaxOutputTokens" | "modelMaxOutputTokens"
   | "reasoningEfforts" | "modelReasoningEfforts" | "modelDefaultReasoningEfforts" | "reasoningEffortMap" | "modelReasoningEffortMap" | "reasoningWireFormat"
   | "noVisionModels" | "noReasoningModels" | "noTemperatureModels" | "noTopPModels" | "noPenaltyModels"
-  | "autoToolChoiceOnlyModels" | "preserveReasoningContentModels" | "requiresReasoningPlaceholderModels" | "reasoningSplitModels" | "thinkingToggleModels" | "thinkingBudgetModels" | "escapeBuiltinToolNames" | "openaiChatEofTolerance"
+  | "autoToolChoiceOnlyModels" | "preserveReasoningContentModels" | "requiresReasoningPlaceholderModels" | "reasoningSplitModels" | "reasoningDetailsModels" | "thinkingToggleModels" | "thinkingBudgetModels" | "escapeBuiltinToolNames" | "openaiChatEofTolerance"
   | "googleMode" | "project" | "location" | "headers"
 >;
 
@@ -335,8 +345,10 @@ export type ProviderConfigSeed = Pick<
 // same static model seed.
 // 260710 context refresh: Tier-2 evidence in
 // devlog/_plan/260710_provider_hardening/001_research_frontier.md.
-const ANTHROPIC_MODELS = ["claude-fable-5", "claude-sonnet-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"];
-const ANTHROPIC_MODEL_CONTEXT_WINDOWS: Record<string, number> = { "claude-sonnet-5": 1_000_000, "claude-fable-5": 1_000_000, "claude-opus-5": 1_000_000, "claude-opus-4-8": 1_000_000, "claude-opus-4-7": 1_000_000, "claude-opus-4-6": 1_000_000, "claude-sonnet-4-6": 1_000_000, "claude-haiku-4-5": 200_000 };
+// 260902 Claude Fable 5.1 (`claude-fable-5-1`): 1M context / 128K output / adaptive thinking
+// always on, per the official models overview and pricing page (platform.claude.com).
+const ANTHROPIC_MODELS = ["claude-fable-5-1", "claude-fable-5", "claude-sonnet-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"];
+const ANTHROPIC_MODEL_CONTEXT_WINDOWS: Record<string, number> = { "claude-fable-5-1": 1_000_000, "claude-sonnet-5": 1_000_000, "claude-fable-5": 1_000_000, "claude-opus-5": 1_000_000, "claude-opus-4-8": 1_000_000, "claude-opus-4-7": 1_000_000, "claude-opus-4-6": 1_000_000, "claude-sonnet-4-6": 1_000_000, "claude-haiku-4-5": 200_000 };
 
 // 260814 GLM-5.3 is registered pre-emptively alongside 5.2 everywhere 5.2 appears. Z.AI's
 // devpack "How to Switch Models" page (docs.z.ai/devpack/latest-model) lists glm-5.3 and
@@ -1108,6 +1120,16 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     liveModels: true,
     defaultModel: "auto",
     modelContextWindows: cursorModelContextWindows(CURSOR_STATIC_MODELS),
+    modelDisplayNames: cursorModelDisplayNames(),
+    // Cursor's Fast product is a model VARIANT, not a service_tier field, so the wire kind
+    // is cursor-variant and the request builder consumes the decision.
+    fastWire: { kind: "cursor-variant", canonicalToWire: { priority: "fast" }, foreignCallerTiers: "drop" },
+    // Deliberately NO provider-level supportsServiceTier: resolveFastPolicy short-circuits on
+    // `capability.provider === false` BEFORE consulting the per-model map, which would make
+    // these entries dead config. Absent leaves unlisted bases "unclassified", and a
+    // non-service-tier adapter cannot forward a caller tier, so they still publish no toggle.
+    modelSupportsServiceTier: Object.fromEntries(cursorFastCapableBases().map(id => [id, true])),
+    fastTierDescription: "Cursor Fast variant",
     modelInputModalities: cursorModelInputModalities(CURSOR_STATIC_MODELS),
     modelReasoningEfforts: cursorModelReasoningEfforts(CURSOR_STATIC_MODELS),
     // Kimi K3 documents `max` as its API default, and its Cursor ladder has no `medium`
@@ -2642,6 +2664,13 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     // never a fabricated placeholder (chatgpt-codex-connector P2 on #1205).
     requiresReasoningPlaceholderModels: [],
     reasoningSplitModels: MINIMAX_MODELS,
+    // With reasoning_split the upstream returns thinking as a structured
+    // reasoning_details array (cumulative text snapshots per stream chunk) and
+    // requires that array back verbatim on the next turn — a reasoning_content
+    // string replay is the native-format pass-back the docs say is unsupported.
+    // Evidence: platform.minimax.io/docs/guides/text-m3-function-call and
+    // /docs/api-reference/text-openai-api (verified 2026-09-01).
+    reasoningDetailsModels: MINIMAX_MODELS,
     thinkingToggleModels: ["MiniMax-M3"],
     jawcodeBundle: "minimax", metadataModelIdNormalize: "case-insensitive", note: "Subscription Key or API Key",
   },
@@ -2655,6 +2684,7 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     preserveReasoningContentModels: MINIMAX_MODELS,
     requiresReasoningPlaceholderModels: [],
     reasoningSplitModels: MINIMAX_MODELS,
+    reasoningDetailsModels: MINIMAX_MODELS,
     thinkingToggleModels: ["MiniMax-M3"],
     jawcodeBundle: "minimax", metadataModelIdNormalize: "case-insensitive", note: "中国区 Subscription Key",
   },

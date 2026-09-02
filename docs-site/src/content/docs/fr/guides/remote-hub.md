@@ -1,0 +1,72 @@
+---
+title: Déploiement Remote Hub
+description: Déployer un hub opencodex avec une gestion locale, Tailscale Serve et OAuth sans interface locale.
+---
+
+Un hub conserve les identifiants fournisseur, le catalogue et l’usage sur un hôte. Les clients authentifiés appellent directement son plan de données. Le plan de gestion est distinct : son écoute facultative reste sur `127.0.0.1` et ne sert que le tableau de bord et `/api/*`. Elle ne sert jamais `/v1/*`, `/healthz`, `/readyz` ni WebSocket. Ne publiez pas le port `10101` et n’utilisez pas Tailscale Funnel.
+
+## Rôles, connexion et sécurité
+
+`standalone` réunit données et gestion. `hub` possède les secrets fournisseur et l’usage. `client` ne conserve que l’état de connexion et une clé de données dédiée.
+
+```bash
+ocx connect https://hub-name.tailnet-name.ts.net --pairing-code-stdin
+ocx connect status
+ocx sync
+```
+
+La clé client est écrite dans le fichier privé `service-api-token`, jamais dans `config.json`. En mode connecté, l’usage provient du hub et est filtré par `apiKeyId`; après déconnexion, il provient du stockage local. Il n’existe aucune réplication entre les deux.
+
+Le jeton admin permet la gestion ordinaire mais ne peut jamais créer une session de consentement. Les actions de consentement exigent une `gui-session`, une Origin correspondante et un jeton CSRF. `Tailscale-User-Login` n’est fiable que sur l’entrée de gestion dédiée; renseignez les identités exactes dans `remoteGui.allowedTailscaleUsers`.
+
+## Service et Tailscale Serve
+
+```bash
+ocx config set runtimeRole hub
+ocx config set hostname 100.64.0.10
+ocx config set hub.managementPublicOrigin '"https://hub-name.tailnet-name.ts.net"'
+ocx config set corsAllowOrigins '["http://localhost:10100"]'
+ocx config set hub.managementIngress '{"enabled":true,"port":10101}'
+ocx config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
+export OPENCODEX_API_AUTH_TOKEN="$(openssl rand -hex 32)"
+ocx service install
+```
+
+Le service lit le secret depuis `service-api-token`; le plist ou l’unité systemd ne contient pas sa valeur.
+
+```bash
+curl --fail --silent http://100.64.0.10:10100/healthz
+curl --fail --silent http://100.64.0.10:10100/readyz
+tailscale serve --bg --https=443 http://127.0.0.1:10101
+tailscale serve status
+```
+
+`/healthz` ne prouve que la vie du processus. Validez aussi `/readyz`, `GET /v1/catalog` authentifié et une vraie réponse routée. Le port de gestion doit écouter uniquement sur `127.0.0.1`. Pour un proxy TLS privé, utilisez `tailscale cert hub-name.tailnet-name.ts.net` et ne fabriquez jamais d’en-têtes `Tailscale-User-*`; utilisez l’association à usage unique.
+
+## OAuth, rotation et déconnexion
+
+```bash
+ocx config set oauthOpenBrowser false
+ocx connect rotate --pairing-code-stdin
+# uniquement en HTTPS :
+ocx connect rotate --admin-token-stdin
+```
+
+Démarrez OAuth avec `POST /api/oauth/login`; si le rappel ne rejoint pas le hub, envoyez l’URL finale ou le code à `POST /api/oauth/login/code` sous `{provider,input}`. Ne placez jamais le code OAuth dans argv ou les journaux.
+
+La rotation garde les deux clés valides sous le même `apiKeyId` pendant dix minutes au plus. L’ancienne clé est sauvegardée dans `service-api-token.prev`, la nouvelle est installée atomiquement et vérifiée avec `/v1/catalog`, puis validée. Si le résultat est incertain, relancez `ocx connect rotate` avec une autorité transitoire; ne supprimez aucun candidat.
+
+`ocx disconnect` restaure l’état local même hors ligne et ne révoque pas la clé du hub. Après déconnexion, la seule voie de révocation est **Integrations → API Keys** sur le hub. `ocx connect revoke --admin-token-stdin` fonctionne uniquement tant que le client est connecté.
+
+## Docker, retour arrière et dépannage
+
+Il n’existe pas d’image Docker officielle. Épinglez l’image Bun par digest, conservez `/home/bun/.opencodex` dans un volume et montez le secret sur `/run/secrets/ocx_api_token`. Publiez seulement `10100`, jamais `10101`. Ne placez aucun secret dans `ARG`, `ENV`, `COPY`, Compose, l’historique d’image ou argv. Après le healthcheck, vérifiez séparément `/readyz`, le catalogue authentifié et une réponse réelle.
+
+- Hub indisponible : `ocx disconnect` restaure localement, mais la révocation reste à faire.
+- Catalogue périmé : seul un dernier catalogue validé est conservé après une panne transitoire; aucune substitution locale après erreur d’authentification, schéma, taille ou protocole.
+- Récupération `.prev` : conservez les deux fichiers et relancez la rotation avec une autorité transitoire.
+- `hub-too-new`/`hub-too-old` : mettez à niveau le côté indiqué avant toute écriture locale.
+- Code d’association perdu ou épuisé : créez-en un nouveau; les essais sont limités avec 429.
+- HTTP non local exige `--allow-insecure-http`; un jeton admin n’est jamais envoyé en HTTP.
+- Déconnexion/expiration de session navigateur n’affecte pas la clé de données.
+- Avant `tailscale serve reset`, inspectez `tailscale serve status`, car reset supprime tous les mappages.

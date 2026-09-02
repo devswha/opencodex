@@ -225,3 +225,7 @@ Session 簽發在需要 data-plane 認證時停用，這包含遠端綁定。遠
 ## 選擇客戶端
 
 對於普通管理，[網頁儀表板](/zh-tw/guides/web-dashboard/)提供最安全的引導工作流程。對於無頭主機與自動化，請使用對應的 `ocx` 指令：它們呼叫此相同的即時 API，並在代理不可達或操作失敗時回傳非零結果。直接 HTTP 對需要上述精確端點契約的整合最為有用。
+
+## 遠端工作階段與資料金鑰輪替
+
+`POST /api/keys/rotate {id}` 開始十分鐘重疊期，且只回傳一次新金鑰。`POST /api/keys/rotate/commit {id,rotationId}` 提交，`DELETE /api/keys/rotate {id,rotationId}` 中止。全部都需要管理驗證，資料金鑰不能呼叫。`POST /api/session/logout` 需要目前的 `gui-session`、相符的 Origin 與 CSRF。Admin token 會收到 403，永遠不能建立使用者同意工作階段。

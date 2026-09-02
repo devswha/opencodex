@@ -17,8 +17,6 @@ import {
 } from "../../i18n/log-guard-state-labels";
 import { formatBytes } from "../../format-bytes";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "";
-
 export interface StorageLargestEntry {
   path: string;
   bytes: number;
@@ -370,6 +368,7 @@ function CodexLogGuardUnavailablePanel({ locale, t }: { locale: Locale; t: TFn }
 export interface StorageWorkspaceProps {
   report: StorageReport;
   locale: Locale;
+  apiBase?: string;
   logGuardBusy?: boolean;
   onLogGuardAction?: (action: CodexLogGuardAction) => void;
 }
@@ -398,6 +397,7 @@ type GenerationScopedCompaction = {
 export default function StorageWorkspace({
   report,
   locale,
+  apiBase = "",
   logGuardBusy = false,
   onLogGuardAction,
 }: StorageWorkspaceProps) {
@@ -460,7 +460,7 @@ export default function StorageWorkspace({
             body: JSON.stringify({ mode: action.mode }),
           } : {}),
         };
-        const response = await fetch(`${API_BASE}/api/storage/codex-logs/${suffix}`, init);
+        const response = await fetch(`${apiBase}/api/storage/codex-logs/${suffix}`, init);
         if (!response.ok) {
           const errorPayload = await response.json().catch(() => ({})) as Record<string, unknown>;
           setLogGuardError({ generation, message: mutationErrorLabel(locale, errorPayload.error) });
@@ -512,7 +512,7 @@ export default function StorageWorkspace({
           // The mutation has already succeeded. Refresh is deliberately best effort so
           // a transient GET/JSON failure cannot be presented as a failed compaction.
           try {
-            const refreshed = await fetch(`${API_BASE}/api/storage/codex-logs`);
+            const refreshed = await fetch(`${apiBase}/api/storage/codex-logs`);
             if (refreshed.ok) {
               const payload = await refreshed.json() as CodexLogGuardReport;
               setLogGuardOverride({ generation, report: payload });

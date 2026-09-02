@@ -230,8 +230,11 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "PUT", path: "/api/native-integrations/claude-desktop", module: "server/management/native-integration-routes", mutates: true },
   { method: "PUT", path: "/api/native-integrations/codex", module: "server/management/native-integration-routes", mutates: true },
   { method: "PUT", path: "/api/native-integrations/grok", module: "server/management/native-integration-routes", mutates: true },
+  // server/management/cursor-integration-routes
+  { method: "GET", path: "/api/native-integrations/cursor", module: "server/management/cursor-integration-routes", mutates: false },
   // server/management/oauth-account-routes
   { method: "DELETE", path: "/api/keys", module: "server/management/oauth-account-routes", mutates: true },
+  { method: "DELETE", path: "/api/keys/rotate", module: "server/management/oauth-account-routes", mutates: true },
   { method: "DELETE", path: "/api/oauth/accounts", module: "server/management/oauth-account-routes", mutates: true },
   { method: "DELETE", path: "/api/providers/keys", module: "server/management/oauth-account-routes", mutates: true },
   { method: "GET", path: "/api/key-providers", module: "server/management/oauth-account-routes", mutates: false },
@@ -241,9 +244,13 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/oauth/providers", module: "server/management/oauth-account-routes", mutates: false },
   { method: "GET", path: "/api/oauth/status", module: "server/management/oauth-account-routes", mutates: false },
   { method: "GET", path: "/api/providers/keys", module: "server/management/oauth-account-routes", mutates: false },
+  { method: "GET", path: "/api/providers/keychain", module: "server/management/oauth-account-routes", mutates: false },
+  { method: "POST", path: "/api/providers/keychain", module: "server/management/oauth-account-routes", mutates: true },
   { method: "PATCH", path: "/api/keys", module: "server/management/oauth-account-routes", mutates: true },
   { method: "PATCH", path: "/api/oauth/accounts/pool", module: "server/management/oauth-account-routes", mutates: true },
   { method: "POST", path: "/api/keys", module: "server/management/oauth-account-routes", mutates: true },
+  { method: "POST", path: "/api/keys/rotate", module: "server/management/oauth-account-routes", mutates: true },
+  { method: "POST", path: "/api/keys/rotate/commit", module: "server/management/oauth-account-routes", mutates: true },
   { method: "POST", path: "/api/oauth/accounts/clear-cooldown", module: "server/management/oauth-account-routes", mutates: true },
   { method: "POST", path: "/api/oauth/accounts/import", module: "server/management/oauth-account-routes", mutates: true },
   { method: "POST", path: "/api/oauth/login", module: "server/management/oauth-account-routes", mutates: true },
@@ -275,6 +282,8 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/routing-profiles", module: "server/management/routing-profile-routes", mutates: false },
   { method: "POST", path: "/api/routing-profiles/dry-run", module: "server/management/routing-profile-routes", mutates: true },
   { method: "PUT", path: "/api/routing-profiles", module: "server/management/routing-profile-routes", mutates: true },
+  // server/management/session-routes
+  { method: "POST", path: "/api/session/logout", module: "server/management/session-routes", mutates: true, exempt: { reason: "session-only", why: "Logs out the CURRENT gui-session and requires its own Origin and CSRF. There is nothing for a CLI verb to log out of: the CLI holds an admin token, and the admin token is refused here precisely so it cannot end a consent session it never established." } },
   // server/management/sidebar-routes
   { method: "GET", path: "/api/github/star", module: "server/management/sidebar-routes", mutates: false },
   { method: "GET", path: "/api/update/badge", module: "server/management/sidebar-routes", mutates: false },
@@ -286,6 +295,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "POST", path: "/api/storage/codex-logs/repair", module: "server/management/storage-log-guard-routes", mutates: true },
   { method: "POST", path: "/api/storage/codex-logs/unprotect", module: "server/management/storage-log-guard-routes", mutates: true },
   // server/management/system-routes
+  { method: "GET", path: "/api/system/health", module: "server/management/system-routes", mutates: false },
   { method: "GET", path: "/api/system/memory", module: "server/management/system-routes", mutates: false },
   { method: "GET", path: "/api/system/windows-replace-retries", module: "server/management/system-routes", mutates: false },
   { method: "POST", path: "/api/system/restart", module: "server/management/system-routes", mutates: true },

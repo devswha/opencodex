@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { watchdogMs } from "./helpers/ci-watchdog";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 // Every wait here is bounded by a real `ocx start` child coming up: spawning Bun,
 // binding a port, and writing its runtime record. That is intrinsic to the
@@ -148,10 +149,79 @@ afterEach(async () => {
     const child = children.pop()!;
     if (child.exitCode === null) await child.exited;
   }
-  while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true });
+  while (roots.length) removeTreeWithRetry(roots.pop()!);
 });
 
 describe("start and ensure journal ownership (#1230)", () => {
+  test("startup preserves only a client journal matching the final committed api key id", async () => {
+    for (const matches of [true, false]) {
+      const fx = fixture();
+      const original = '# original client baseline\nmodel_provider = "openai"\n';
+      const injected = '# connected remote routing\nmodel_provider = "opencodex"\n';
+      writeFileSync(fx.configPath, injected);
+      writeFileSync(join(fx.ocxHome, "config.json"), JSON.stringify({
+        port: 0,
+        providers: {},
+        defaultProvider: "openai",
+        runtimeRole: "client",
+        client: {
+          serverUrl: "https://hub.example.test",
+          managementUrl: "https://hub.example.test",
+          managementTransport: "direct",
+          selectedClients: ["codex"],
+          tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
+          apiKeyId: matches ? "client-key-1" : "different-key",
+          tokenFingerprint: "a".repeat(64),
+          protocolVersion: 1,
+          connectedAt: "2026-08-28T00:00:00.000Z",
+        },
+      }));
+      writeFileSync(fx.journalPath, JSON.stringify({
+        version: 1,
+        originalConfig: Buffer.from(original).toString("base64"),
+        originalProfile: null,
+        owner: { kind: "client", apiKeyId: "client-key-1" },
+        pid: 999_999,
+        timestamp: new Date().toISOString(),
+      }));
+
+      const child = Bun.spawn([process.execPath, cliPath, "start"], {
+        cwd: fx.root,
+        env: fx.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      children.push(child);
+      const runtimePath = join(fx.ocxHome, "runtime-port.json");
+      const runtime = await waitFor(async () => {
+        if (!existsSync(runtimePath)) {
+          if (child.exitCode === null) return null;
+          const [stdout, stderr] = await Promise.all([
+            new Response(child.stdout).text(),
+            new Response(child.stderr).text(),
+          ]);
+          throw new Error(`connected client exited ${child.exitCode}: ${stderr || stdout}`);
+        }
+        try {
+          const value = JSON.parse(readFileSync(runtimePath, "utf8")) as { pid?: number; port?: number; hostname?: string };
+          return value.pid === child.pid && typeof value.port === "number" && value.port > 0 ? value : null;
+        } catch { return null; }
+      }, "connected client runtime record");
+      try {
+        const health = await fetch(`http://127.0.0.1:${runtime.port}/healthz`).then(response => response.json()) as { role?: string };
+        expect(health.role).toBe("client");
+        expect(runtime.hostname).toBe("127.0.0.1");
+        expect((await fetch(`http://127.0.0.1:${runtime.port}/v1/models`)).status).toBe(404);
+        expect((await fetch(`http://127.0.0.1:${runtime.port}/api/config`)).status).toBe(404);
+        expect(readFileSync(fx.configPath, "utf8")).toBe(matches ? injected : original);
+        expect(existsSync(fx.journalPath)).toBe(matches);
+      } finally {
+        child.kill("SIGTERM");
+        await child.exited;
+      }
+    }
+  }, 30_000);
+
   test("a healthy proxy owner preserves the journal for both start and ensure", async () => {
     const fx = fixture();
     const owner = await startOwner(fx);

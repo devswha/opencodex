@@ -58,6 +58,7 @@ managed map을 활성화하면 privacy-safe selector를 만들고, 이후 계정
 | `baseUrl` | `string` | 상위 API 기본 URL입니다. 대부분의 내장 고정 엔드포인트는 불일치를 무시합니다. 충돌 안전 키 프리셋은 같은 이름의 이전 사용자 지정 목적지를 보존합니다. |
 | `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | 업스트림 사용량, 과금, rate-limit 지표와 별개인 선택적 클라이언트 측 아웃바운드 요청 시작 속도 조절입니다. Provider 제한은 모든 모델에 적용되고 `models` 항목은 정확한 업스트림 모델 ID와 일치하며 지연을 더 늘릴 때만 적용됩니다. 큐 대기는 응답 헤더 타임아웃을 소모하지 않습니다. HTTP, Responses WebSocket, 명시적 어댑터 `fetchResponse`/`runTurn` 전송을 포함합니다. |
 | `responsesPath?` | `string` | 키 인증 `openai-responses` 요청의 상대 리소스 경로입니다. 반드시 `/`로 시작해야 하며 스킴, query, fragment를 포함하면 안 됩니다. |
+| `upstreamWebsocket?` | `boolean` | `openai-responses` 요청에 대한 업스트림 Responses WebSocket 전송을 선택적으로 활성화합니다(기본값 `false`). 업스트림이 이 프로토콜을 지원하면 스트리밍 POST가 설정된 Responses 경로(기본값 `/v1/responses`)로 HTTPS 기반 WSS를 사용하고, 일반 파이프라인을 위해 SSE로 다시 인코딩됩니다. forward 공급자는 `{baseUrl}/responses`를 사용하고, key-auth 공급자는 `responsesPath`를 사용하며 미설정 시 기존 `/v1/responses`로 대체됩니다. HTTP 기본 URL은 SSE를 유지하고, Responses가 아닌 경로와 `openai-chat` 요청은 HTTP를 사용합니다. |
 | `supportsServiceTier?` | `boolean` | `service_tier` 케이퍼빌리티 3상태입니다. `true`: fast 모드가 주입할 수 있고 호출자 값도 보존합니다. `false`: 필드를 제거하고 절대 주입하지 않습니다(미지원으로 문서화된 업스트림에는 볼 수 없습니다). 미설정: 미분류 — 호출자가 준 값은 그대로 보존하고 fast 모드는 주입하지 않습니다. 레지스트리는 정식 OpenAI(`true`), DeepSeek, Volcengine Ark(`false`)를 분류하며, 실제로 티어를 지원하는 커스텀 게이트웨이에만 명시적으로 설정하세요. |
 | `preserveResponsesReasoningContent?` | `boolean` | 리플레이되는 Responses reasoning 항목의 평문 reasoning 내용을 지우지 않고 유지합니다(지우는 것은 ChatGPT 백엔드 규칙입니다). DeepSeek처럼 reasoning 리플레이를 허용하는 업스트림에 켜세요. 프록시가 만든 `ocxr1` 봉투는 항상 제거됩니다. |
 | `disabled?` | `boolean` | 공급자를 디스크에는 남기되, 라우팅과 모델/카탈로그 목록에서는 제외합니다. |
@@ -68,6 +69,7 @@ managed map을 활성화하면 privacy-safe selector를 만들고, 이후 계정
 | `models?` | `string[]` | 시드/폴백 모델 목록입니다. `liveModels: false`이면 이 목록만 발견된 모델로 취급합니다. |
 | `liveModels?` | `boolean` | 시작 또는 동기화 시 라이브 카탈로그를 가져옵니다. 기본값은 `true`입니다. 사용자 지정 공급자는 `${baseUrl}/models`를 사용하고, 내장은 레지스트리 URL을 사용한 뒤 필터링할 수 있습니다. |
 | `selectedModels?` | `string[]` | 발견 후 카탈로그 허용 목록입니다. 값이 비어 있지 않으면 그 id만 노출하고, 비어 있거나 생략하면 발견된 모델을 모두 노출합니다. |
+| `modelDisplayNames?` | `Record<string, string>` | 이 공급자의 정확한 네이티브 모델 id를 키로 쓰는 영구 표시 전용 이름입니다. 키는 대소문자를 구분합니다. 이름은 공급자 카탈로그 메타데이터보다 우선하며 인증, 어댑터, 라우팅, 청구 또는 업스트림 요청을 바꾸지 않습니다. 맵은 발견 한도와 같은 최대 2,000개 항목을 가질 수 있습니다. |
 | `contextWindow?` | `number` | 업스트림 메타데이터가 없을 때 쓰이는 공급자 전반의 컨텍스트 값입니다. 메타데이터가 있으면 상한으로 동작해 더 작은 라이브 값을 그대로 둡니다. Models 대시보드에서 `providerContextCaps`와 별도로 설정합니다. |
 | `modelContextWindows?` | `Record<string, number>` | 모델별 컨텍스트 값이자 상한입니다. `contextWindow`보다 우선하며, 창 크기를 알 수 없으면 설정값을 쓰고 더 작은 라이브 메타데이터가 있으면 그쪽을 따릅니다. |
 | `modelInputModalities?` | `Record<string, string[]>` | `["text"]` 또는 `["text", "image"]` 같은 모델별 입력 힌트입니다. |
@@ -107,6 +109,7 @@ managed map을 활성화하면 privacy-safe selector를 만들고, 이후 계정
 | `transientRetryOn5xx?` | `{ enabled?: boolean; attempts?: number }` | 키 인증 `openai-chat` 프로바이더 전용입니다. 스트림 시작 전의 일시적인 업스트림 상태(500, 502, 503, 504, 520, 521, 522)를 선택적으로 재시도합니다. 이 옵션이 없으면 꺼져 있고, 객체가 있으면 `enabled: false`가 아닌 한 활성화됩니다. 최초 Responses 요청, 터미널 가드 연속 요청, 네이티브 `/v1/chat/completions`, 429/계정 복구 재조회를 포함합니다. `attempts`는 최초 전송을 포함하여 요청 하나에 허용되는 업스트림 전송의 총횟수(1..10, 기본값 3)입니다. 연결 재설정 복구와 요청 단위 예산 하나를 공유하므로 `3`이면 실제로 프로바이더에 도달하는 요청은 최대 세 번입니다. 대기에는 400ms로 고정된 지수 백오프를 사용하고 상한은 5초이며 `Retry-After`를 따릅니다. 속도 제한을 처리하는 `retryOn429`와는 별개이며, 스트림 도중의 실패는 절대 재전송하지 않습니다. |
 | `autoToolChoiceOnlyModels?` | `string[]` | `tool_choice`가 `auto` 또는 `none`만 받는 모델입니다. 강제 선택은 낮은 수준으로 바뀝니다. |
 | `preserveReasoningContentModels?` | `string[]` | chat 기록에서 이전 assistant `reasoning_content`가 필요한 모델입니다. |
+| `reasoningDetailsModels?` | `string[]` | thinking을 구조화된 `reasoning_details` 배열로 반환하는 모델(`reasoning_split` 사용 MiniMax M 시리즈). 스트림 델타는 누적 스냅샷이라 prefix-diff로 처리하고, 보존된 reasoning은 `reasoning_content` 문자열 대신 `reasoning_details` 배열로 리플레이합니다. |
 | `requiresReasoningPlaceholderModels?` | `string[]` | `reasoning_content`가 없는 tool_call 연속을 업스트림이 거부하는 모델(DeepSeek thinking 모드). 리플레이 캐시 미스 시 최소 플레이스홀더를 주입합니다. 미설정 시 `preserveReasoningContentModels`를 따르며 `[]`로 명시적 해제 가능. |
 | `thinkingToggleModels?` | `string[]` | effort 계층 대신 `thinking.enabled`를 쓰는 chat 모델입니다. |
 | `thinkingBudgetModels?` | `string[]` | 정수 `thinking_budget`를 쓰는 chat 모델입니다. effort는 예산 비율로 매핑됩니다. |
@@ -344,6 +347,8 @@ Vercel AI Gateway는 하나의 모델을 여러 기반 추론 공급자에 걸�
 `liveModels: false`로 두면 `models`만 노출합니다. `models`가 비어 있거나 생략되면 공급자는 어떤 라우팅 모델도 노출하지 않습니다. 라이브 발견은 캐싱 전에 4 MiB 또는 원시 모델 행 2,000개를 넘으면 거부합니다. 내장 프리셋은 더 낮은 한도를 쓰고 chat 가능한 행만 필터링할 수 있습니다. 너무 크거나 형식이 잘못된 결과는 오래된/설정된 폴백을 따릅니다. 유효하지만 선택 가능한 항목이 0개인 결과는 그대로 권위가 있으며, 조용히 다른 값으로 바꾸거나 잘라내지 않습니다.
 
 `selectedModels`는 발견은 계속하되, 선택된 id만 Codex와 `/v1/models`에 나타나게 하고 싶을 때 사용합니다. 대시보드는 나중에 허용 목록을 바꿀 수 있도록 발견된 전체 목록을 보관합니다.
+
+표시 이름은 `modelDisplayNames`로 설정합니다. 우선순위는 운영자가 설정한 `modelDisplayNames`, 공급자 카탈로그 메타데이터, 일반 `provider/model` 표시 순서입니다. 키는 이 공급자 안의 정확한 네이티브 모델 id입니다. 예를 들어 `xai/grok-4.6`의 키는 `grok-4.6`입니다. 이름은 표시 전용이며 정확한 라우팅 id나 업스트림 모델 id를 바꾸지 않습니다. `config.json`의 기존 공급자 설정에 이 필드만 추가하고 다른 모든 필드는 유지하세요. `PUT /api/providers/:provider/model-display-names`에 `{ "modelId": "grok-4.6", "displayName": "Grok 4.6" }`를 보내 저장하고, `displayName: null`을 보내 해당 이름만 초기화합니다.
 
 프리뷰 GPT-5.6 폴백 항목도 같은 메커니즘을 사용합니다. OpenAI API 키 프리셋은 base와 Pro id에 컨텍스트 `922000`, 최대 입력 `922000`을 채웁니다. OpenRouter는 `openai/gpt-5.6-sol`, `openai/gpt-5.6-terra`, `openai/gpt-5.6-luna`에 컨텍스트 `922000`을 채웁니다. Pool/Direct는 `922000`을 노출하고, 동기화된 카탈로그는 `xhigh`를 구분한 채 `max`를 노출합니다.
 

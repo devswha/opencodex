@@ -1,11 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { CLI_COMMANDS } from "../src/cli/registry";
-import { DISPATCH_ALIASES, DISPATCH_COMMANDS, dispatchCommand, resolveDispatchCommand } from "../src/cli/dispatch";
+import { DISPATCH_ALIASES, DISPATCH_COMMANDS, dispatchCommand, resolveDispatchCommand, decideStartWithLiveOwner } from "../src/cli/dispatch";
 import type { CliDispatchDeps } from "../src/cli/dispatch";
-import { existsSync, readFileSync } from "node:fs";
+import { runGuiCommand } from "../src/cli/gui";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigDir } from "../src/config";
 import { getAccountSet, removeCredential, saveCredential } from "../src/oauth/store";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 /** Minimal fake deps. dispatchCommand only touches deps for real command
  * runners, which these tests never invoke, so an empty object is enough. */
@@ -62,6 +65,34 @@ describe("CLI dispatch aliases", () => {
 });
 
 describe("dispatchCommand exit codes", () => {
+  test("invalid client state refuses sync before local proxy discovery", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-dispatch-client-invalid-"));
+    const previous = process.env.OPENCODEX_HOME;
+    let discoveries = 0;
+    try {
+      process.env.OPENCODEX_HOME = home;
+      writeFileSync(join(home, "config.json"), JSON.stringify({
+        port: 10100,
+        providers: {},
+        defaultProvider: "openai",
+        runtimeRole: "client",
+        client: { apiKeyId: "half-present" },
+      }), "utf8");
+      const args = ["sync"];
+      const deps = {
+        ...fakeDeps,
+        args,
+        findLiveProxy: async () => { discoveries += 1; return null; },
+      };
+      expect(await dispatchCommand({ kind: "command", command: "sync", args }, deps)).toBe(1);
+      expect(discoveries).toBe(0);
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previous;
+      removeTreeWithRetry(home);
+    }
+  });
+
   test("returns 0 for help forms", async () => {
     expect(await dispatchCommand({ kind: "help", command: "help", args: ["help"] }, fakeDeps)).toBe(0);
     expect(await dispatchCommand({ kind: "help", command: "--help", args: ["--help"] }, fakeDeps)).toBe(0);
@@ -183,6 +214,56 @@ describe("start probes the configured port before shadowing it (source-level)", 
     for (const call of invocations) {
       expect(call).toContain("probeConfiguredPort: true");
     }
+  });
+
+  /**
+   * The #3106 guard refused start whenever ANY live proxy existed, ignoring an explicit
+   * `--port` that differs from the live proxy's port. That is not the shadow the guard
+   * targets (a bare `start` landing on an ephemeral port); it broke starting a second
+   * instance on another port, and every spawned-launcher test on a machine running a
+   * real proxy timed out its startup wait. The decision is a pure function so the whole
+   * matrix runs at runtime here; the source oracle below only pins that handleStart
+   * actually routes through it.
+   */
+  test("the live-owner decision matrix", () => {
+    // Bare start: the #3106 shadow — still refused.
+    expect(decideStartWithLiveOwner({ livePort: 10100, requestedPort: undefined, ocxService: undefined }))
+      .toBe("refuse");
+    // Explicit port equal to the live proxy's: same conflict — still refused.
+    expect(decideStartWithLiveOwner({ livePort: 10100, requestedPort: 10100, ocxService: undefined }))
+      .toBe("refuse");
+    // Explicit DIFFERENT port, interactive: the sibling request this fix restores.
+    expect(decideStartWithLiveOwner({ livePort: 10100, requestedPort: 65301, ocxService: undefined }))
+      .toBe("sibling");
+    // Service wrapper keeps its exact stay-out semantics on both port shapes.
+    expect(decideStartWithLiveOwner({ livePort: 10100, requestedPort: 10100, ocxService: "1" }))
+      .toBe("service-stay-out");
+    expect(decideStartWithLiveOwner({ livePort: 10100, requestedPort: 8080, ocxService: "1" }))
+      .toBe("service-stay-out");
+    // Only the exact "1" sentinel is service context — "0"/"false" cannot reach stay-out.
+    expect(decideStartWithLiveOwner({ livePort: 10100, requestedPort: 8080, ocxService: "0" }))
+      .toBe("sibling");
+    expect(decideStartWithLiveOwner({ livePort: 10100, requestedPort: undefined, ocxService: "false" }))
+      .toBe("refuse");
+  });
+
+  test("handleStart routes its live-owner branch through the shared decision", () => {
+    expect(cliSource).toContain("decideStartWithLiveOwner({");
+    // No leftover inline refusal that could bypass the tested decision.
+    expect(cliSource).not.toContain("explicitSiblingPort");
+  });
+
+  test("a sibling start carries its flag into every chooseListenPort call", () => {
+    // The sibling instance must not persist its explicit port into config.port: the
+    // configured-port proxy still owns this home, and `ocx service` bakes config.port.
+    // Both call sites (initial pick and the EADDRINUSE re-pick) have to pass the flag,
+    // or the re-pick path silently regains the old behavior.
+    const calls = cliSource.match(/await chooseListenPort(([^)]*))/g) ?? [];
+    expect(calls.length).toBe(2);
+    for (const call of calls) {
+      expect(call).toContain("sibling: siblingStart");
+    }
+    expect(cliSource).toContain("siblingStart = true;");
   });
 
   test("the probe option still gates on an explicit true", () => {
@@ -481,6 +562,65 @@ describe("doctor refuses --json rather than printing prose as success", () => {
   test("exact --json, --json=true, and Unicode dashes all exit 2", async () => {
     for (const flag of ["--json", "--json=true", "\u2014json"]) {
       expect(await runDoctor(flag), `${JSON.stringify(flag)} must be refused`).toBe(2);
+    }
+  });
+});
+
+describe("GUI command delegation", () => {
+  const config = {
+    port: 10100,
+    runtimeRole: "hub" as const,
+    hub: { managementPublicOrigin: "https://hub.example.test" },
+    corsAllowOrigins: ["https://dashboard.example.test"],
+    providers: {},
+    defaultProvider: "openai",
+  };
+
+  test("keeps the default open behavior and requires an explicit pairing origin", async () => {
+    let opens = 0;
+    const deps = {
+      loadConfig: () => config,
+      openDefaultGui: async () => { opens += 1; return 0; },
+    };
+    expect(await runGuiCommand([], deps)).toBe(0);
+    expect(opens).toBe(1);
+    expect(await runGuiCommand(["pair"], deps)).toBe(1);
+    expect(await runGuiCommand(["pair", "--origin", "https://dashboard.example.test", "extra"], deps)).toBe(1);
+  });
+
+  test("prints a created grant once and maps remote API refusal to exit 1 without echoing response data", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const logSpy = spyOn(console, "log").mockImplementation(value => { stdout.push(String(value)); });
+    const errorSpy = spyOn(console, "error").mockImplementation(value => { stderr.push(String(value)); });
+    try {
+      const base = {
+        loadConfig: () => config,
+        openDefaultGui: async () => 0,
+        findLiveProxy: async () => ({ pid: 4242, port: 10100, source: "runtime" as const }),
+      };
+      const grant = `ocx_pair_${"C".repeat(43)}`;
+      expect(await runGuiCommand(["pair", "--origin", "https://dashboard.example.test", "--json"], {
+        ...base,
+        requestPairingGrant: async () => ({
+          kind: "created",
+          grant,
+          browserOrigin: "https://dashboard.example.test",
+          serverOrigin: "https://hub.example.test",
+          expiresAt: 1_800_000_300_000,
+        }),
+      })).toBe(0);
+      expect(stdout.join(" ").split(grant)).toHaveLength(2);
+
+      stdout.length = 0;
+      expect(await runGuiCommand(["pair", "--origin", "https://dashboard.example.test"], {
+        ...base,
+        requestPairingGrant: async () => ({ kind: "unavailable", reason: "rejected" }),
+      })).toBe(1);
+      expect(`${stdout.join(" ")} ${stderr.join(" ")}`).not.toContain("remote-response-secret");
+    } finally {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
     }
   });
 });

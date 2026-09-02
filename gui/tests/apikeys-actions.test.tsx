@@ -249,6 +249,41 @@ test("without a fresh key the protocol chips are disabled, not silently passing"
   expect(chips.every(c => (c.getAttribute("title") ?? "").length > 0)).toBe(true);
 });
 
+test("rotation start, one-time secret, commit, and abort stay explicit", async () => {
+  const calls: string[] = [];
+  const container = await mount({
+    onRotationStart: async id => { calls.push(`start:${id}`); return true; },
+  });
+  await openKey(container);
+  await act(async () => { button(container, "Start rotation").click(); await Promise.resolve(); });
+  expect(calls).toEqual(["start:k1"]);
+
+  await act(async () => { active?.unmount(); active = null; });
+  const pending = await mount({
+    keys: [{
+      id: "k1",
+      name: "alpha",
+      prefix: "ocx_data_aaaaaaaa...",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      pendingRotation: {
+        id: "rotation-1",
+        createdAt: "2026-08-28T00:00:00.000Z",
+        expiresAt: "2026-08-28T00:10:00.000Z",
+      },
+      usage: { requests7d: 0, totalRequests: 0 },
+    }],
+    rotationSecret: { id: "k1", key: "ocx_data_shown_once", rotationId: "rotation-1" },
+    onRotationCommit: async (id, rotationId) => { calls.push(`commit:${id}:${rotationId}`); return true; },
+    onRotationAbort: async (id, rotationId) => { calls.push(`abort:${id}:${rotationId}`); return true; },
+  });
+  await openKey(pending);
+  expect(pending.textContent).toContain("ocx_data_shown_once");
+  await act(async () => { button(pending, "Commit rotation").click(); await Promise.resolve(); });
+  await act(async () => { button(pending, "Abort rotation").click(); await Promise.resolve(); });
+  expect(calls).toContain("commit:k1:rotation-1");
+  expect(calls).toContain("abort:k1:rotation-1");
+});
+
 test("a protocol result belongs to its own chip", async () => {
   const container = await mount({
     filteredModels: [{ id: "gpt-5.4", displayName: "gpt-5.4", provider: "openai", native: true }],

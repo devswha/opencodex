@@ -286,3 +286,7 @@ Pour l'administration courante, le [tableau de bord web](/fr/guides/web-dashboar
 Pour les hôtes sans interface graphique et l'automatisation, utilisez les commandes `ocx` correspondantes : elles appellent cette
 même API active et renvoient un code différent de zéro lorsque le proxy est inaccessible ou que l'opération échoue.
 L'accès HTTP direct est surtout utile aux intégrations qui exigent les contrats exacts des points de terminaison ci-dessus.
+
+## Sessions distantes et rotation des clés de données
+
+`POST /api/keys/rotate {id}` démarre un chevauchement de dix minutes et renvoie le nouveau secret une seule fois. `POST /api/keys/rotate/commit {id,rotationId}` valide; `DELETE /api/keys/rotate {id,rotationId}` annule. L'authentification de gestion est obligatoire et une clé de données ne suffit pas. `POST /api/session/logout` exige la `gui-session` courante, l'Origin correspondante et CSRF. Un jeton admin reçoit 403 et ne peut jamais créer une session de consentement.
