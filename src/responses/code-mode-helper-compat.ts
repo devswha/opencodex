@@ -21,7 +21,7 @@ function unwrapPatchInput(value: string): string {
  * Convert a nested Code Mode helper call into unified-exec JavaScript.
  *
  * Parsed values are serialized as data, never interpolated as source, so command and patch text
- * cannot escape the generated call. Invalid structured shell payloads are also passed as data so
+ * cannot escape the generated call. Invalid structured helper payloads are also passed as data so
  * nested-tool validation can reject them without evaluating provider text as JavaScript.
  */
 export function compileCodeModeHelperInput(argumentsText: unknown, toolName: string): string {
@@ -45,6 +45,9 @@ export function compileCodeModeHelperInput(argumentsText: unknown, toolName: str
   ) {
     args.cmd = args.command;
     delete args.command;
+  }
+  if (toolName === "write_stdin") {
+    return `const result = await tools.write_stdin(${JSON.stringify(args)});\ntext(result);`;
   }
   return `const result = await tools.exec_command(${JSON.stringify(args)});\ntext(result);`;
 }

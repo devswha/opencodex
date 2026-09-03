@@ -150,6 +150,74 @@ describe("routed Responses custom-tool compatibility", () => {
     rewrite.dispose?.();
   });
 
+  test("restores streamed write_stdin arguments through unified exec", () => {
+    const rewrite = createRoutedCustomToolRestoreBlockRewrite(
+      new Set(["exec"]),
+      undefined,
+      new Set(),
+      new Set(["exec"]),
+    );
+    const added = rewrite(frame("response.output_item.added", {
+      output_index: 0,
+      item: {
+        type: "function_call",
+        id: "fc_stdin_alias",
+        call_id: "call_stdin_alias",
+        name: "write_stdin",
+        arguments: "",
+        status: "in_progress",
+      },
+    }));
+    expect(dataPayload(added[0]!).item).toMatchObject({ type: "custom_tool_call", name: "exec" });
+    expect(rewrite(frame("response.function_call_arguments.delta", {
+      output_index: 0,
+      item_id: "fc_stdin_alias",
+      delta: '{"session_id":17,"yield_time_ms":1000}',
+    }))).toEqual([]);
+    const done = rewrite(frame("response.function_call_arguments.done", {
+      output_index: 0,
+      item_id: "fc_stdin_alias",
+      arguments: '{"session_id":17,"yield_time_ms":1000}',
+    }));
+    expect(dataPayload(done[0]!)).toMatchObject({
+      type: "response.custom_tool_call_input.done",
+      input: compileCodeModeHelperInput(
+        '{"session_id":17,"yield_time_ms":1000}',
+        "write_stdin",
+      ),
+    });
+    rewrite.dispose?.();
+  });
+
+  test("restores a non-streaming write_stdin call through unified exec", () => {
+    const upstream = JSON.stringify({
+      id: "resp_stdin",
+      output: [{
+        type: "function_call",
+        id: "fc_stdin",
+        call_id: "call_stdin",
+        name: "write_stdin",
+        arguments: '{"session_id":17,"yield_time_ms":1000}',
+        status: "completed",
+      }],
+    });
+
+    const restored = JSON.parse(restoreRoutedCustomCallsInJson(
+      upstream,
+      new Set(["exec"]),
+      new Set(),
+      new Set(["exec"]),
+    )) as { output: Array<Record<string, unknown>> };
+    expect(restored.output[0]).toMatchObject({
+      type: "custom_tool_call",
+      name: "exec",
+      input: compileCodeModeHelperInput(
+        '{"session_id":17,"yield_time_ms":1000}',
+        "write_stdin",
+      ),
+    });
+  });
+
   test("rewrites exec definitions and paired history without touching apply_patch", () => {
     const raw = {
       model: "deepseek-v4-flash",

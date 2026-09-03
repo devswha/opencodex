@@ -43,6 +43,28 @@ describe("code-mode helper compatibility", () => {
     expect(received).toEqual({ workdir: "/tmp", cmd: "pwd" });
   });
 
+  test("write_stdin arguments remain data and target the nested helper", async () => {
+    const args = {
+      session_id: 17,
+      chars: "`); throw new Error('escaped') //",
+      yield_time_ms: 1_000,
+    };
+    const source = compileCodeModeHelperInput(JSON.stringify(args), "write_stdin");
+    let received: unknown;
+    let output: unknown;
+    const run = new AsyncFunction("tools", "text", source);
+
+    await run({
+      write_stdin: async (value: unknown) => {
+        received = value;
+        return { output: "more" };
+      },
+    }, (value: unknown) => { output = value; });
+
+    expect(received).toEqual(args);
+    expect(output).toEqual({ output: "more" });
+  });
+
   test("apply_patch text remains one string argument", async () => {
     const patch = "*** Begin Patch\n*** Add File: note.txt\n+`); throw new Error('escaped')\n*** End Patch";
     const source = compileCodeModeHelperInput(patch, "apply_patch");

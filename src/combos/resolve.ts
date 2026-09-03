@@ -1,6 +1,7 @@
 import type { OcxComboTarget, OcxConfig } from "../types";
 import { getCachedProviderQuota } from "../providers/quota-routing-cache";
-import { coolComboTarget, isComboTargetInCooldown } from "./failover";
+import type { ProviderQuota } from "../providers/quota-types";
+import { coolComboTarget, isComboTargetInCooldown, type ComboFailureCooldownScope } from "./failover";
 import { quotaResetRemainingMs } from "./reset-window";
 import { getCombo, resolveComboId, targetKey } from "./types";
 import type { NormalizedComboConfig } from "./types";
@@ -56,6 +57,28 @@ export class NoAvailableComboTargetsError extends Error {
 function targetProviderIsUsable(config: OcxConfig, target: OcxComboTarget): boolean {
   return Object.hasOwn(config.providers, target.provider)
     && config.providers[target.provider]?.disabled !== true;
+}
+
+function quotaWindowExhausted(percent: number | undefined, resetAt: number | undefined, now: number): boolean {
+  if (typeof percent !== "number" || !Number.isFinite(percent) || percent < 100) return false;
+  return typeof resetAt !== "number" || !Number.isFinite(resetAt) || resetAt > now;
+}
+
+export function cachedProviderQuotaIsExhausted(
+  quota: ProviderQuota | null,
+  now = Date.now(),
+): boolean {
+  if (!quota) return false;
+  if (quotaWindowExhausted(quota.fiveHourPercent, quota.fiveHourResetAt, now)) return true;
+  if (quotaWindowExhausted(quota.weeklyPercent, quota.weeklyResetAt, now)) return true;
+  if (quotaWindowExhausted(quota.monthlyPercent, quota.monthlyResetAt, now)) return true;
+  if (quota.customWindows?.some(window => quotaWindowExhausted(window.percent, window.resetAt, now))) return true;
+  if (quota.creditsUsd?.unlimited !== true
+      && typeof quota.creditsUsd?.percent === "number"
+      && Number.isFinite(quota.creditsUsd.percent)
+      && quota.creditsUsd.percent >= 100
+      && quota.creditsUsd.remaining <= 0) return true;
+  return false;
 }
 
 function smoothWeightedIndex(
@@ -121,14 +144,17 @@ export function pickComboTarget(
   options: {
     exclude?: Iterable<string>;
     eligible?: (target: Required<OcxComboTarget>) => boolean;
+    now?: number;
   } = {},
 ): ComboPick | null {
   const writerGeneration = captureConfigGeneration();
   const combo = getCombo(config, comboId);
   if (!combo) throw new UnknownComboError(comboId);
   const excluded = new Set(options.exclude ?? []);
+  const now = options.now ?? Date.now();
   const eligible = (target: Required<OcxComboTarget>): boolean =>
     targetProviderIsUsable(config, target)
+    && !cachedProviderQuotaIsExhausted(getCachedProviderQuota(target.provider, now), now)
     && !excluded.has(targetKey(target))
     && (options.eligible?.(target) ?? true);
 
@@ -187,7 +213,7 @@ export function pickComboTarget(
       }
     }
   } else if (combo.strategy === "reset-window") {
-    targetIndex = resetWindowIndex(combo.targets, eligible);
+    targetIndex = resetWindowIndex(combo.targets, eligible, now);
   } else {
     targetIndex = combo.targets.findIndex(eligible);
   }
@@ -250,15 +276,26 @@ export function advanceComboAfterFailure(
     retryAfter?: string | null;
     now?: number;
     eligible?: (target: Required<OcxComboTarget>) => boolean;
+    cooldownScope?: ComboFailureCooldownScope;
+    status?: number;
+    code?: string | null;
+    message?: string;
   } = {},
 ): ComboPick | null {
   noteComboFailure(pick.comboId, pick.target, pick.writerGeneration);
-  coolComboTarget(pick.comboId, pick.target, {
-    ...options,
-    writerGeneration: pick.writerGeneration,
-  });
+  const combo = getCombo(config, pick.comboId);
+  const cooldownTargets = options.cooldownScope === "provider" && combo
+    ? combo.targets.filter(target => target.provider === pick.target.provider)
+    : [pick.target];
+  for (const target of cooldownTargets) {
+    coolComboTarget(pick.comboId, target, {
+      ...options,
+      writerGeneration: pick.writerGeneration,
+    });
+  }
   return pickComboTarget(config, pick.comboId, {
     exclude: pick.attempted,
+    now: options.now,
     eligible: target => !isComboTargetInCooldown(pick.comboId, target, options.now)
       && (options.eligible?.(target) ?? true),
   });

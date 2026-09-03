@@ -343,6 +343,8 @@ free-experimentation model.
 | Vultr Serverless Inference | `https://api.vultrinference.com/v1` |
 | Baseten Model APIs | `https://inference.baseten.co/v1` |
 | Command Code | `https://api.commandcode.ai/provider/v1` |
+| Meta Model API | `https://api.meta.ai/v1` |
+| Meta Muse Code (CLI credential) | `https://api.meta.ai/v1` |
 | SambaNova Cloud | `https://api.sambanova.ai/v1` |
 | Nebius Token Factory | `https://api.tokenfactory.nebius.com/v1` |
 | DigitalOcean Serverless Inference | `https://inference.do-ai.run/v1` |
@@ -436,6 +438,45 @@ account-scoped and comes from the authenticated discovery endpoint after login. 
 preset (`commandcode`) uses the active configured Bearer key for chat requests; the OAuth preset
 (`command-code`) uses the stored account bearer for authenticated discovery and chat. Create
 Provider-API keys at [Command Code Studio](https://commandcode.ai/studio/).
+
+**Meta Model API (`meta-model`).** Muse Spark on Meta's own OpenAI-compatible endpoint,
+served over `/v1/responses`. Create a key in
+[the Meta developer console](https://dev.meta.ai/docs/authentication) — Meta calls this
+variable `MODEL_API_KEY`, but opencodex derives the env var from the provider id, so
+export it as **`META_MODEL_API_KEY`** (or paste it during `ocx init`). The account needs a
+payment method before it will serve requests, and every call is metered per token. Two
+models are seeded — `meta-model/muse-spark-1.3` and `meta-model/muse-spark-1.3-contributor`
+— with the vendor's `minimal`/`low`/`medium`/`high`/`xhigh` ladder and a 1M context window.
+Discovery stays off until an authenticated roster is verified, because Meta serves image and
+voice models on the same host.
+
+Two things worth knowing before you pick it. **A Muse Code subscription does not apply
+here:** Meta scopes that credential to the Muse Code CLI and bills any other key
+pay-as-you-go. And the Contributor tier is cheap because Meta trains on your prompts —
+roughly 92% off input, 95% off output, and 99% off cached input — so keep confidential
+material off it. Muse Spark is also reachable through resellers, with a narrower roster:
+`command-code` carries both tiers, while `opencode-go` serves only
+`muse-spark-1.3-contributor`.
+
+**Meta Muse Code (`meta-muse`).** If you already use the Muse Code CLI, this imports the
+API key it stored after `muse login` instead of asking you to provision a second one.
+macOS only — the CLI keeps that key in the macOS Keychain, and no other platform's
+storage has been verified. OpenCodex never launches the CLI: if no credential is present
+it tells you to run `muse login` yourself.
+
+**Read this before enabling it.** Meta scopes that credential to the Muse Code CLI, so
+using it here is an *unsupported* path. Meta does not authorize subscription coverage
+outside its own client, how these calls settle is not observable from the API, and you
+should treat every call as billable against your account. The imported key is copied into
+OpenCodex's auth store (`~/.opencodex/auth.json`, mode 0600) like every other OAuth
+credential. The dashboard shows a Terms-of-Service warning before the first login and
+before any reauthentication — the same treatment Anthropic and Google Antigravity get.
+
+Meta reports subscription window usage inside streaming responses, but OpenCodex does not
+yet read or display it, and there is no endpoint to query it on demand, so this provider
+shows no quota. Rate limits apply per team, not per key.
+
+For a supported setup, use `meta-model` above with your own key.
 
 **Command Code quota.** The dashboard and `ocx account refresh` probe Command Code's
 `/alpha/billing/credits` windows (5-hour and weekly) on the canonical

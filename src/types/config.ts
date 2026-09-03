@@ -348,7 +348,10 @@ export interface OcxConfig {
    * the guess is wrong.
    */
   oauthOpenBrowser?: boolean;
-  /** Maximum usage-log bytes read for one management snapshot. */
+  /**
+   * @deprecated Compatibility-only limit for bounded legacy usage readers.
+   * `GET /api/usage` always aggregates the complete ledger.
+   */
   managementUsageMaxReadBytes?: number;
   providers: Record<string, OcxProviderConfig>;
   defaultProvider: string;
@@ -366,6 +369,12 @@ export interface OcxConfig {
   };
   /** Enable the shipped model alias patterns for providers without an override. */
   defaultModelAliases?: boolean;
+  /**
+   * Opt-in Cursor Private Inference compatibility rows. When true, `/v1/models`
+   * adds `<base-id>--<effort>` selectors for reasoning-capable model ids absent
+   * from Cursor's built-in effort table. Omitted/false preserves discovery output.
+   */
+  cursorEffortRows?: boolean;
   /** Explicit top-level deletion intent used by stale whole-config rebases. */
   configRebaseProvenance?: OcxConfigRebaseProvenance | Record<string, unknown>;
   /** OpenAI provider-contract migration marker (v2 = single `openai` provider with account mode). */

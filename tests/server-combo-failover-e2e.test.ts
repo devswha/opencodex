@@ -440,6 +440,46 @@ describe("server combo failover 030 activation matrix", () => {
     expect(hits).toEqual(["a:m1:SECRET_PROMPT_X"]);
   });
 
+  test("monthly quota then Orca free-prompt cap continues to a healthy third provider", async () => {
+    const hits: string[] = [];
+    const go = serve(async request => {
+      const body = await request.json() as { model?: string };
+      hits.push(`go:${body.model}`);
+      return Response.json({
+        error: { type: "GoUsageLimitError", message: "Monthly usage limit reached. Resets in 14 days." },
+      }, { status: 429 });
+    });
+    const orca = serve(async request => {
+      const body = await request.json() as { model?: string };
+      hits.push(`orca:${body.model}`);
+      return Response.json({ error: {
+        message: "This prompt is longer than the free tier allows for a single request.",
+        type: "invalid_request_error",
+        code: "free_rate_limited",
+        metadata: { reason: "err_free_prompt_cap" },
+      } }, { status: 400 });
+    });
+    const backup = serve(async request => {
+      const body = await request.json() as { model?: string };
+      hits.push(`backup:${body.model}`);
+      return chatSuccess("healthy fallback", "m3");
+    });
+    const config = comboConfig({
+      a: provider("openai-chat", baseUrl(go), "key-a"),
+      b: provider("openai-chat", baseUrl(orca), "key-b"),
+      c: provider("openai-chat", baseUrl(backup), "key-c"),
+    }, [
+      { provider: "a", model: "m1" },
+      { provider: "b", model: "m2" },
+      { provider: "c", model: "m3" },
+    ]);
+
+    const response = await post(config);
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(await response.json())).toContain("healthy fallback");
+    expect(hits).toEqual(["go:m1", "orca:m2", "backup:m3"]);
+  });
+
   test("ordinary openai-chat 503 hops to backup for non-stream and stream", async () => {
     const hits: string[] = [];
     const a = serve(async request => {
@@ -844,6 +884,7 @@ describe("server combo failover 030 activation matrix", () => {
         liveModels: false,
         models: ["deepseek-chat"],
         modelContextWindows: { "deepseek-chat": 128_000 },
+        modelMaxOutputTokens: { "deepseek-chat": 64_000 },
       }),
     }, combo.targets, { alias: combo.alias });
     saveConfig(config);
@@ -853,7 +894,12 @@ describe("server combo failover 030 activation matrix", () => {
         const response = await fetch(new URL("/v1/models", server.url));
         expect(response.status).toBe(200);
         const payload = await response.json() as {
-          data: Array<{ id: string; owned_by: string; is_combo?: boolean }>;
+          data: Array<{
+            id: string;
+            owned_by: string;
+            is_combo?: boolean;
+            capabilities?: { max_output_tokens?: number };
+          }>;
         };
         return payload.data;
       };
@@ -868,6 +914,7 @@ describe("server combo failover 030 activation matrix", () => {
       const initialRows = (await publicRows()).filter(model => model.id === selector);
       expect(initialRows).toHaveLength(1);
       expect(initialRows[0]).toMatchObject({ id: selector, object: "model", created: 0, owned_by: "openai", is_combo: true });
+      expect(initialRows[0]!.capabilities?.max_output_tokens).toBe(64_000);
 
       const renamed = await updateAlias("fast-chat");
       expect(renamed.status).toBe(200);
@@ -875,6 +922,7 @@ describe("server combo failover 030 activation matrix", () => {
       const renamedSelectorRows = renamedRows.filter(model => model.id === selector);
       expect(renamedSelectorRows).toHaveLength(1);
       expect(renamedSelectorRows[0]).toMatchObject({ id: selector, object: "model", created: 0, owned_by: "deepseek" });
+      expect(renamedSelectorRows[0]!.capabilities?.max_output_tokens).toBe(64_000);
       expect(renamedSelectorRows[0].is_combo).toBeUndefined();
       const renamedAliasRows = renamedRows.filter(model => model.id === "fast-chat");
       expect(renamedAliasRows).toHaveLength(1);
@@ -888,6 +936,7 @@ describe("server combo failover 030 activation matrix", () => {
       const deletedSelectorRows = deletedRows.filter(model => model.id === selector);
       expect(deletedSelectorRows).toHaveLength(1);
       expect(deletedSelectorRows[0]).toMatchObject({ id: selector, object: "model", created: 0, owned_by: "deepseek" });
+      expect(deletedSelectorRows[0]!.capabilities?.max_output_tokens).toBe(64_000);
       expect(deletedSelectorRows[0].is_combo).toBeUndefined();
       expect(deletedRows.some(model => model.is_combo === true)).toBe(false);
     } finally {
