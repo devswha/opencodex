@@ -35,20 +35,23 @@ export function namespacedToolName(namespace: string | undefined, name: string):
  * Codex unified-exec name normalization.
  *
  * Codex's code-mode shell tool is declared as `exec` (a freeform custom tool whose own
- * description mentions the nested `await tools.exec_command(...)` helper). Routed models —
- * DeepSeek in particular — sometimes echo that helper name as the tool-call name, emitting
- * `exec_command` or `apply_patch` instead of the declared `exec`. Accept these nested helper
- * names only when the request catalog actually declares `exec` and does not itself declare the
- * emitted name (an MCP server may legitimately advertise one under its own namespace).
+ * description mentions the nested `await tools.exec_command(...)` helper). Some routed providers
+ * echo that helper name as the tool-call name, emitting `exec_command`, `write_stdin`, or
+ * `apply_patch` instead of the declared `exec`. Accept these nested helper names only when the
+ * request catalog actually declares `exec` and does not itself declare the emitted name (an MCP
+ * server may legitimately advertise one under its own namespace).
  */
 const LEGACY_SHELL_BRIDGE_TOOL_NAMES = ["exec_command", "shell_command"] as const;
-const CODE_MODE_HELPER_TOOL_NAMES = [...LEGACY_SHELL_BRIDGE_TOOL_NAMES, "apply_patch"] as const;
+const CODE_MODE_HELPER_TOOL_NAMES = [
+  ...LEGACY_SHELL_BRIDGE_TOOL_NAMES,
+  "write_stdin",
+  "apply_patch",
+] as const;
 
 /**
  * The one declared name that turns nested-helper normalization on. Declaring it is not just a
- * name: it also decides whether an emitted `exec_command`/`shell_command`/`apply_patch` is
- * accepted as that shell tool, so callers that build declared-name sets must add it only for a
- * genuine bare declaration.
+ * name: it also decides whether an emitted helper name is accepted as that shell tool, so callers
+ * that build declared-name sets must add it only for a genuine bare declaration.
  */
 export const CODE_MODE_EXEC_TOOL_NAME = "exec";
 

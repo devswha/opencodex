@@ -282,8 +282,50 @@ describe("google adapter — Antigravity system prompt compatibility", () => {
     expect(systemInstructionText(ccaEnvelope.request)).not.toContain(REJECTED_CLAUDE_SDK_PARAGRAPH);
   });
 
-  test("preserves the paragraph for another Cloud Code Assist model", async () => {
+  test("removes the rejected paragraph for CCA Gemini 3.8 Flash too", async () => {
+    // Probed 2026-09-03: 3.8 answers 429 RESOURCE_EXHAUSTED while this paragraph survives
+    // into systemInstruction, and 200 once stripped. Since 3.8 is now the default, a
+    // 3.7-only guard would 429 every Claude-Agent-shaped request and report it as quota.
+    const parsed = systemPromptParsed("gemini-3.8-flash");
+    const envelope = JSON.parse((await createGoogleAdapter(ccaProvider).buildRequest(parsed)).body) as {
+      request: Record<string, unknown>;
+    };
+
+    expect(systemInstructionText(envelope.request)).not.toContain(REJECTED_CLAUDE_SDK_PARAGRAPH);
+  });
+
+  test("removes it for a raw 3.8 suffix selector published by a partial ladder", async () => {
+    // When CCA returns an incomplete tier set the picker publishes raw suffix ids, so
+    // parsed.modelId can be the wire id rather than the collapsed base — exactly the ids the
+    // 429 probe used. A base-only membership test would lose the guard precisely when CCA is
+    // already degraded.
+    for (const suffixId of ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"]) {
+      const built = await createGoogleAdapter(ccaProvider).buildRequest(systemPromptParsed(suffixId));
+      const envelope = JSON.parse(built.body) as { request: Record<string, unknown> };
+
+      expect(systemInstructionText(envelope.request)).not.toContain(REJECTED_CLAUDE_SDK_PARAGRAPH);
+    }
+  });
+
+  test("removes it for a RETIRED id that rule 0 redirects onto the rejecting generation", async () => {
+    // A saved gemini-3.6-flash selection does not call 3.6 — rule 0 routes it to
+    // gemini-3.7-flash-tiered, which rejects the paragraph (probed at 429 with it intact).
+    // Retired ids deliberately keep their own identity for usage accounting, so they never
+    // canonicalize into the generation they actually reach; judging the SELECTOR would leave
+    // every saved 3.6/3.5 config broken. This is why the guard reads the routed wire id.
     const parsed = systemPromptParsed("gemini-3.6-flash");
+    const envelope = JSON.parse((await createGoogleAdapter(ccaProvider).buildRequest(parsed)).body) as {
+      request: Record<string, unknown>;
+    };
+
+    expect(systemInstructionText(envelope.request)).not.toContain(REJECTED_CLAUDE_SDK_PARAGRAPH);
+  });
+
+  test("preserves the paragraph for a Cloud Code Assist model that does not reject it", async () => {
+    // Membership is probe-established per generation, so a model with no recorded rejection
+    // keeps its system prompt byte-identical. Claude-on-Antigravity is the natural control:
+    // the paragraph is literally true for it.
+    const parsed = systemPromptParsed("claude-sonnet-4-6");
     const envelope = JSON.parse((await createGoogleAdapter(ccaProvider).buildRequest(parsed)).body) as {
       request: Record<string, unknown>;
     };

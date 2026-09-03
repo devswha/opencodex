@@ -14,9 +14,9 @@ async function drain(stream: ReadableStream<Uint8Array>): Promise<string> {
   return out;
 }
 
-async function* toolTurn(name: string): AsyncGenerator<AdapterEvent> {
+async function* toolTurn(name: string, argumentsText = '{"cmd":"ls"}'): AsyncGenerator<AdapterEvent> {
   yield { type: "tool_call_start", id: "call-1", name } as AdapterEvent;
-  yield { type: "tool_call_delta", id: "call-1", arguments: '{"cmd":"ls"}' } as AdapterEvent;
+  yield { type: "tool_call_delta", id: "call-1", arguments: argumentsText } as AdapterEvent;
   yield { type: "tool_call_end", id: "call-1" } as AdapterEvent;
   yield { type: "done" } as AdapterEvent;
 }
@@ -25,7 +25,7 @@ async function* toolTurn(name: string): AsyncGenerator<AdapterEvent> {
 // nested `tools.exec_command(...)` helper. Routed models echo the helper name back, and the
 // undeclared-tool guard turned that into a 502 mid-turn. These pin the SSE path the guard
 // actually runs on, which the review flagged as untested.
-describe("bridge normalizes legacy shell names against the declared catalog (#2493)", () => {
+describe("bridge normalizes code-mode helper names against the declared catalog", () => {
   test("exec_command is delivered as the declared exec instead of failing the turn", async () => {
     const sse = await drain(bridgeToResponsesSSE(
       toolTurn("exec_command"), "deepseek-x", undefined, new Set(["exec"]), undefined, undefined, 50_000,
@@ -45,6 +45,22 @@ describe("bridge normalizes legacy shell names against the declared catalog (#24
     expect(sse).not.toContain("undeclared client tool");
     expect(sse).toContain('"name":"exec"');
     expect(sse).toContain('await tools.exec_command({\\"cmd\\":\\"ls\\"})');
+  });
+
+  test("write_stdin is wrapped through the declared exec tool", async () => {
+    const sse = await drain(bridgeToResponsesSSE(
+      toolTurn("write_stdin", '{"session_id":17,"yield_time_ms":1000}'),
+      "fixture-model",
+      undefined,
+      new Set(["exec"]),
+      undefined,
+      undefined,
+      50_000,
+      { declaredToolNames: new Set(["exec"]) },
+    ));
+    expect(sse).not.toContain("undeclared client tool");
+    expect(sse).toContain('"name":"exec"');
+    expect(sse).toContain('await tools.write_stdin({\\"session_id\\":17,\\"yield_time_ms\\":1000})');
   });
 
   test("a genuinely undeclared tool still fails the turn", async () => {

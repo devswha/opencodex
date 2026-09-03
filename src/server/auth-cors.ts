@@ -749,73 +749,258 @@ export function copyIfDefined<K extends keyof OcxProviderConfig>(
   if (value !== undefined) out[key as string] = value as unknown;
 }
 
+/**
+ * Exhaustive provider-field policy shared by dashboard redaction and editor
+ * admission. `satisfies Record<keyof OcxProviderConfig, ...>` makes a newly added
+ * provider field fail typecheck until it is deliberately classified.
+ *
+ * `editor` fields are user-authored, `redacted` fields may contain credentials,
+ * and `runtime` fields are observations/limits that must never become editor write
+ * authority. MCP and desktop executor blocks are redacted as a whole because both
+ * contain arbitrary environment variables and/or headers.
+ */
+type ProviderConfigFieldPolicy = "editor" | "redacted" | "runtime";
+
+const PROVIDER_CONFIG_FIELD_POLICY = {
+  alias: "editor",
+  modelAliases: "editor",
+  modelDisplayNames: "editor",
+  defaultAliases: "editor",
+  adapter: "editor",
+  codexToolMode: "editor",
+  requestPacing: "editor",
+  mcpMaxTools: "editor",
+  mcpMaxSchemaBytes: "editor",
+  mcpMaxResultBytes: "editor",
+  modelAdapters: "editor",
+  fastWire: "editor",
+  baseUrl: "editor",
+  responsesPath: "editor",
+  commandCodeVersion: "editor",
+  statelessResponses: "editor",
+  requiresAdjacentResponsesToolResults: "editor",
+  annotateEmptyToolOutputs: "editor",
+  supportsServiceTier: "editor",
+  modelSupportsServiceTier: "editor",
+  preserveResponsesReasoningContent: "editor",
+  decodesNativeCompactionBlobs: "editor",
+  allowPrivateNetwork: "editor",
+  upstreamHttpVersion: "editor",
+  upstreamWebsocket: "editor",
+  directGeminiWireRenames: "editor",
+  disabled: "editor",
+  codexAccountMode: "editor",
+  apiKey: "redacted",
+  apiKeyTransport: "editor",
+  apiKeyPool: "redacted",
+  defaultModel: "editor",
+  models: "editor",
+  liveModels: "editor",
+  selectedModels: "editor",
+  retainModels: "editor",
+  newModelPolicy: "editor",
+  modelPreset: "editor",
+  contextWindow: "editor",
+  modelContextWindows: "editor",
+  modelInputModalities: "editor",
+  modelMaxInputTokens: "runtime",
+  modelAutoCompactTokenLimits: "editor",
+  defaultMaxOutputTokens: "editor",
+  modelMaxOutputTokens: "editor",
+  modelCosts: "editor",
+  headers: "redacted",
+  openRouterRouting: "editor",
+  modelOpenRouterRouting: "editor",
+  vercelGatewayRouting: "editor",
+  modelVercelGatewayRouting: "editor",
+  authMode: "editor",
+  oauthAccountFailover: "editor",
+  keyOptional: "editor",
+  freeTier: "editor",
+  note: "editor",
+  modelSuffixBracketStrip: "editor",
+  refreshPolicy: "editor",
+  reasoningEfforts: "editor",
+  modelReasoningEfforts: "editor",
+  modelDefaultReasoningEfforts: "editor",
+  modelSupportsReasoningSummaries: "editor",
+  modelSupportsVerbosity: "editor",
+  supportsVerbosity: "editor",
+  modelReasoningSummaryDelivery: "editor",
+  modelPreferHostedTools: "editor",
+  supportsOpenAiWebSearchToolFields: "editor",
+  xaiResponsesXSearch: "editor",
+  supportsResponsesCustomTools: "editor",
+  responsesSnapshotRepair: "editor",
+  reasoningEffortMap: "editor",
+  modelReasoningEffortMap: "editor",
+  reasoningWireFormat: "editor",
+  noReasoningModels: "editor",
+  noTemperatureModels: "editor",
+  noTopPModels: "editor",
+  noPenaltyModels: "editor",
+  noStructuredOutputModels: "editor",
+  omitReasoningEffortWithToolsModels: "editor",
+  parallelToolCalls: "editor",
+  pinParallelToolCallsFalse: "editor",
+  terminalContinuationGuard: "editor",
+  openaiChatEofTolerance: "editor",
+  promptCacheKey: "editor",
+  chatServiceTier: "editor",
+  responsesItemIdRepair: "editor",
+  autoToolChoiceOnlyModels: "editor",
+  preserveReasoningContentModels: "editor",
+  requiresReasoningPlaceholderModels: "editor",
+  retryOn429: "editor",
+  transientRetryOn5xx: "editor",
+  reasoningSplitModels: "editor",
+  reasoningDetailsModels: "editor",
+  thinkingToggleModels: "editor",
+  thinkingBudgetModels: "editor",
+  escapeBuiltinToolNames: "editor",
+  anthropicEofTolerance: "editor",
+  noVisionModels: "editor",
+  googleMode: "editor",
+  project: "editor",
+  location: "editor",
+  mcpServers: "redacted",
+  desktopExecutor: "redacted",
+  unsafeAllowNativeLocalExec: "editor",
+  nativeLocalExec: "editor",
+} as const satisfies Record<keyof OcxProviderConfig, ProviderConfigFieldPolicy>;
+
+type ProviderFieldWithPolicy<Policy extends ProviderConfigFieldPolicy> = {
+  [Field in keyof typeof PROVIDER_CONFIG_FIELD_POLICY]:
+    typeof PROVIDER_CONFIG_FIELD_POLICY[Field] extends Policy ? Field : never;
+}[keyof typeof PROVIDER_CONFIG_FIELD_POLICY];
+
+type RedactedProviderField = ProviderFieldWithPolicy<"redacted">;
+type RuntimeProviderField = ProviderFieldWithPolicy<"runtime">;
+export const REDACTED_PROVIDER_FIELDS = Object.freeze(Object.entries(PROVIDER_CONFIG_FIELD_POLICY)
+  .filter(([, policy]) => policy === "redacted")
+  .map(([field]) => field as RedactedProviderField));
+const RUNTIME_PROVIDER_FIELDS = Object.freeze(Object.entries(PROVIDER_CONFIG_FIELD_POLICY)
+  .filter(([, policy]) => policy === "runtime")
+  .map(([field]) => field as RuntimeProviderField));
+
+const PROVIDER_EDITOR_DERIVED_FIELDS = [
+  ...RUNTIME_PROVIDER_FIELDS,
+  ...FORBIDDEN_PROVIDER_RUNTIME_FIELDS,
+  "fetch",
+  "hasApiKey",
+  "hasHeaders",
+  "xaiResponsesOptInState",
+] as const;
+
+export const PROVIDER_EDITOR_DENIED_FIELDS = [
+  ...REDACTED_PROVIDER_FIELDS,
+  ...PROVIDER_EDITOR_DERIVED_FIELDS,
+] as const;
+
+export type ProviderEditorProviderDTO = Omit<OcxProviderConfig, RedactedProviderField | RuntimeProviderField>
+  & Record<string, unknown>;
+
+export interface ProviderEditorConfigDTO {
+  defaultProvider: string;
+  providers: Record<string, ProviderEditorProviderDTO>;
+}
+
+export type ProviderEditorConfigParseResult =
+  | { ok: true; value: ProviderEditorConfigDTO }
+  | { ok: false; error: string; code: "invalid_provider_editor_body" | "invalid_provider_editor_field" };
+
+const PROVIDER_EDITOR_DENIED_FIELD_SET = new Set<string>(PROVIDER_EDITOR_DENIED_FIELDS);
+const PROVIDER_CONFIG_FIELD_SET = new Set<string>(Object.keys(PROVIDER_CONFIG_FIELD_POLICY));
+
+function isPlainDataRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+/**
+ * Project one provider through the same redaction path used by both the public
+ * config DTO and the raw editor. Persisted unknown fields remain on disk but are
+ * not exposed until OcxProviderConfig classifies them as editor-safe.
+ */
+function providerEditorProviderDTO(name: string, provider: OcxProviderConfig): ProviderEditorProviderDTO {
+  const dto = Object.fromEntries(Object.entries(provider)
+    .filter(([field]) => PROVIDER_CONFIG_FIELD_SET.has(field) && !PROVIDER_EDITOR_DENIED_FIELD_SET.has(field))
+    .map(([field, value]) => [field, structuredClone(value)])) as Record<string, unknown>;
+  dto.baseUrl = publicProviderBaseUrl(provider.baseUrl);
+  const modelCosts = sanitizeModelCostsForDisplay(provider.modelCosts);
+  if (modelCosts) dto.modelCosts = modelCosts;
+  else delete dto.modelCosts;
+
+  const registryNote = (providerMatchesRegistryTransport(name, provider)
+    ? getProviderRegistryEntry(name)
+    : registryEntryForProviderDestination(provider))?.note;
+  if (typeof registryNote === "string" && registryNote.trim()) dto.note = registryNote;
+  const codexAccountMode = providerCodexAccountMode(name, provider);
+  if (codexAccountMode) dto.codexAccountMode = codexAccountMode;
+  return dto as ProviderEditorProviderDTO;
+}
+
+/** The complete non-secret provider shape the raw GUI editor may round-trip. */
+export function providerEditorConfigDTO(config: OcxConfig): ProviderEditorConfigDTO {
+  const providers: Record<string, ProviderEditorProviderDTO> = Object.create(null);
+  for (const [name, provider] of Object.entries(config.providers)) {
+    providers[name] = providerEditorProviderDTO(name, provider);
+  }
+  return { defaultProvider: config.defaultProvider, providers };
+}
+
+/** Parse an editor snapshot; unknown, redacted, and derived fields fail closed. */
+export function parseProviderEditorConfigDTO(value: unknown): ProviderEditorConfigParseResult {
+  if (!isPlainDataRecord(value)) {
+    return { ok: false, error: "provider editor config must be a plain object", code: "invalid_provider_editor_body" };
+  }
+  const rootKeys = Object.keys(value);
+  if (rootKeys.length !== 2 || !Object.hasOwn(value, "defaultProvider") || !Object.hasOwn(value, "providers")) {
+    return { ok: false, error: "provider editor config must contain only defaultProvider and providers", code: "invalid_provider_editor_body" };
+  }
+  if (typeof value.defaultProvider !== "string" || value.defaultProvider.trim() === "") {
+    return { ok: false, error: "defaultProvider must be a non-empty string", code: "invalid_provider_editor_body" };
+  }
+  if (!isPlainDataRecord(value.providers)) {
+    return { ok: false, error: "providers must be a plain object", code: "invalid_provider_editor_body" };
+  }
+
+  const providers: Record<string, ProviderEditorProviderDTO> = Object.create(null);
+  for (const [name, provider] of Object.entries(value.providers)) {
+    if (!isPlainDataRecord(provider)) {
+      return { ok: false, error: `provider ${JSON.stringify(redactSecretString(name))} must be a plain object`, code: "invalid_provider_editor_body" };
+    }
+    const deniedField = Object.keys(provider).find(field =>
+      !PROVIDER_CONFIG_FIELD_SET.has(field) || PROVIDER_EDITOR_DENIED_FIELD_SET.has(field));
+    if (deniedField) {
+      return {
+        ok: false,
+        error: `provider ${JSON.stringify(redactSecretString(name))} contains non-editable field ${JSON.stringify(redactSecretString(deniedField))}`,
+        code: "invalid_provider_editor_field",
+      };
+    }
+    providers[name] = structuredClone(provider) as ProviderEditorProviderDTO;
+  }
+  return {
+    ok: true,
+    value: { defaultProvider: value.defaultProvider, providers },
+  };
+}
+
 /** Public dashboard DTO for config.json: provider entries with secrets stripped and documented fields exposed (including `modelCosts`). */
 export function safeConfigDTO(config: OcxConfig): unknown {
+  const editor = providerEditorConfigDTO(config);
   const providers: Record<string, Record<string, unknown>> = {};
   for (const [name, provider] of Object.entries(config.providers)) {
     const dto: Record<string, unknown> = {
-      adapter: provider.adapter,
-      baseUrl: publicProviderBaseUrl(provider.baseUrl),
+      ...editor.providers[name],
       hasApiKey: !!provider.apiKey,
       hasHeaders: !!provider.headers && Object.keys(provider.headers).length > 0,
     };
     if (name === "xai") {
       dto.xaiResponsesOptInState = xaiResponsesOptInState(provider);
     }
-    for (const key of [
-      "defaultModel",
-      "alias",
-      "modelAliases",
-      "defaultAliases",
-      "disabled",
-      "allowPrivateNetwork",
-      "authMode",
-      "apiKeyTransport",
-      "keyOptional",
-      "freeTier",
-      "liveModels",
-      "requestPacing",
-      "models",
-      "contextWindow",
-      "modelContextWindows",
-      "modelAutoCompactTokenLimits",
-      "defaultMaxOutputTokens",
-      "modelMaxOutputTokens",
-      "openRouterRouting",
-      "modelOpenRouterRouting",
-      "vercelGatewayRouting",
-      "modelVercelGatewayRouting",
-      "reasoningEfforts",
-      "modelReasoningEfforts",
-      "reasoningWireFormat",
-      "noVisionModels",
-      "noReasoningModels",
-      "noTemperatureModels",
-      "noTopPModels",
-      "noPenaltyModels",
-      "noStructuredOutputModels",
-      "retainModels",
-      "omitReasoningEffortWithToolsModels",
-      "upstreamHttpVersion",
-      "autoToolChoiceOnlyModels",
-      "preserveReasoningContentModels",
-      "requiresReasoningPlaceholderModels",
-      "escapeBuiltinToolNames",
-    ] as const) {
-      copyIfDefined(dto, provider, key);
-    }
-    const modelCosts = sanitizeModelCostsForDisplay(provider.modelCosts);
-    if (modelCosts) dto.modelCosts = modelCosts;
-    // Resolve the note by DESTINATION, not by name. A preset saved under a custom name is
-    // still pointed at the same vendor route, and a usage restriction the user needs to see
-    // must not disappear because the row was renamed. Prefer the same-name entry so an
-    // unrenamed provider keeps its exact registry note.
-    const registryNote = (providerMatchesRegistryTransport(name, provider)
-      ? getProviderRegistryEntry(name)
-      : registryEntryForProviderDestination(provider))?.note;
-    if (typeof registryNote === "string" && registryNote.trim()) dto.note = registryNote;
-    const codexAccountMode = providerCodexAccountMode(name, provider);
-    if (codexAccountMode) dto.codexAccountMode = codexAccountMode;
     providers[name] = dto;
   }
   return {

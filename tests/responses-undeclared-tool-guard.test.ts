@@ -593,6 +593,31 @@ describe("a refused turn does not become continuation state", () => {
     expect(JSON.stringify(expanded)).not.toContain('"name":"apply_patch"');
   });
 
+  test("a bridged write_stdin turn is remembered as the declared exec call", async () => {
+    const responseId = "resp_stdin_bridged";
+    const accepted = await turn(responseId, {
+      type: "function_call",
+      id: "fc_stdin",
+      call_id: "call_stdin",
+      name: "write_stdin",
+      arguments: JSON.stringify({ session_id: 17, yield_time_ms: 1_000 }),
+      status: "completed",
+    });
+
+    expect(accepted.status).toBe(200);
+    const expanded = expandPreviousResponseInput({
+      model: "fixture-model",
+      previous_response_id: responseId,
+      input: [{ role: "user", content: [{ type: "input_text", text: "continue" }] }],
+      tools: declaredTools,
+    }) as { input?: Array<Record<string, unknown>> };
+    const rememberedCall = expanded.input?.find(item => item.call_id === "call_stdin");
+
+    expect(rememberedCall).toMatchObject({ type: "custom_tool_call", name: "exec" });
+    expect(rememberedCall?.input).toContain("tools.write_stdin");
+    expect(JSON.stringify(expanded)).not.toContain('"name":"write_stdin"');
+  });
+
   test("a streamed bridged apply_patch turn is remembered as the declared exec call", async () => {
     const responseId = "resp_stream_apply_patch_bridged";
     const call = {
@@ -1415,7 +1440,7 @@ describe("empty and absent tool catalogs", () => {
       namespace: "mcp__functions",
     });
 
-    for (const name of ["apply_patch", "exec_command", "shell_command"]) {
+    for (const name of ["apply_patch", "exec_command", "shell_command", "write_stdin"]) {
       const refused = await post(
         false,
         tools,
@@ -1503,6 +1528,16 @@ describe("undeclaredToolCallNameInResponse", () => {
     expect(undeclaredToolCallNameInResponse(response, new Set())).toBe("exec_command");
   });
 
+  test("accepts write_stdin only through a bare unified exec declaration", () => {
+    const response = {
+      output: [{ type: "function_call", name: "write_stdin" }],
+    };
+
+    expect(undeclaredToolCallNameInResponse(response, new Set(["exec"]))).toBeUndefined();
+    expect(undeclaredToolCallNameInResponse(response, new Set(["write_stdin"]))).toBeUndefined();
+    expect(undeclaredToolCallNameInResponse(response, new Set())).toBe("write_stdin");
+  });
+
   test("never legacy-normalizes a namespaced shell bridge call", () => {
     // A namespaced call (e.g. an MCP server advertising its own exec_command) must be
     // matched by its full wire name only — never normalized to bare `exec`.
@@ -1526,7 +1561,7 @@ describe("undeclaredToolCallNameInResponse", () => {
       tools: [{ type: "namespace", name: "mcp", tools: [{ type: "function", name: "exec" }] }],
     });
 
-    for (const name of ["exec_command", "shell_command", "apply_patch", "exec"]) {
+    for (const name of ["exec_command", "shell_command", "apply_patch", "write_stdin", "exec"]) {
       expect(undeclaredToolCallNameInResponse(
         { output: [{ type: "function_call", name, call_id: "call_1" }] },
         declared,

@@ -12,6 +12,9 @@ export interface CursorSeen {
 export interface CursorModelExpectation {
   id: string;
   reasoning: string[] | null;
+  family: string | null;
+  tableLess: boolean;
+  effortRows: string[];
   context: { defaultWindow: number; longWindow: number } | null;
 }
 
@@ -20,6 +23,7 @@ export interface CursorIntegrationStatus {
   regularCursor: { installed: boolean; path: string | null };
   gateway: { baseUrl: string; apiKeyMode: "credential" | "placeholder"; placeholder: string };
   lastSeen: CursorSeen | null;
+  effortTable: { source: "bundle" | "static"; version: string | null; families: number | null };
   models: CursorModelExpectation[];
   guideUrl: string;
 }

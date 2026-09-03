@@ -68,12 +68,14 @@ import { resolvePassiveRouteSubjectId } from "../passive-route-linker";
 import {
   advanceComboAfterFailure,
   comboDefaultEffort,
+  comboFailureCooldownScope,
   comboFailureDecision,
   comboIdFromRawBody,
   comboRequestHasImageInput,
   concreteComboRequestBody,
   getCombo,
   isComboTargetInCooldown,
+  comboCooldownRetryAfterSeconds,
   NoAvailableComboTargetsError,
   noteComboSuccess,
   parseRetryAfterMs,
@@ -326,6 +328,7 @@ import {
   restoreImageGenCallsInJson,
 } from "../responses-image-gen-repair";
 import { createResponsesModelPayloadRewrite, rewriteResponsesModelJson } from "../responses-model-rewrite";
+import { parseRequestEffortRowId } from "../effort-row";
 import {
   collectSelfNamedNamespaceScrubAuthorization,
   createSelfNamedToolCallNamespaceScrubRewrite,
@@ -1434,13 +1437,27 @@ export function decodeRequestErrorResponse(err: unknown, label: string): Respons
 
 
 
-export function comboUnavailableResponse(message: string): Response {
+export function comboUnavailableResponse(
+  message: string,
+  options?: { retryAfter?: string | null },
+): Response {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  const retryAfter = options?.retryAfter?.trim();
+  if (retryAfter && retryAfter.length > 0 && retryAfter.length <= 128) {
+    headers.set("Retry-After", retryAfter);
+  }
   return new Response(
     JSON.stringify({
       error: { message, type: "server_error", code: "combo_unavailable" },
     }),
-    { status: 503, headers: { "Content-Type": "application/json" } },
+    { status: 503, headers },
   );
+}
+
+function comboUnavailable(comboId: string, now = Date.now()): Response {
+  return comboUnavailableResponse(`No available targets for combo: ${comboId}`, {
+    retryAfter: comboCooldownRetryAfterSeconds(comboId, now),
+  });
 }
 
 
@@ -2297,7 +2314,7 @@ export async function handleComboResponses(
         config,
         { parentThreadId: inboundClientThreadId },
       );
-      return comboUnavailableResponse(`No available targets for combo: ${comboId}`);
+      return comboUnavailable(comboId);
     }
     let recovered = false;
     try {
@@ -2334,7 +2351,7 @@ export async function handleComboResponses(
   }
 
   if (!pick) {
-    return comboUnavailableResponse(`No available targets for combo: ${comboId}`);
+    return comboUnavailable(comboId);
   }
   // One immutable combo selection trace, before any child dispatch; child
   // adoption below must never replace it with a concrete child route trace.
@@ -2541,7 +2558,13 @@ export async function handleComboResponses(
     const nextPick = advanceComboAfterFailure(config, pick, {
       retryAfter: failure.retryAfter,
       now: Date.now(),
+      cooldownScope: comboFailureCooldownScope(failure.response.status, failure.classificationText, {
+        code: failure.upstreamCode,
+      }),
       eligible: payloadEligible,
+      status: failure.response.status,
+      code: failure.upstreamCode,
+      message: failure.classificationText,
     });
     if (!nextPick) adoptFailedChildLog(childLog);
     pick = nextPick;
@@ -2697,6 +2720,23 @@ async function handleResponsesInner(
     }
     return decodeRequestErrorResponse(err, "responses");
   }
+  // An effort row naming a table-less combo (`combo/x--high`) must reach the combo dispatcher
+  // as its base id, so the selector is normalized here, before comboIdFromRawBody reads model.
+  const comboEffortRow = !options.comboAttempt && body && typeof body === "object" && !Array.isArray(body)
+    && typeof (body as { model?: unknown }).model === "string"
+    ? parseRequestEffortRowId((body as { model: string }).model, config)
+    : null;
+  if (comboEffortRow) {
+    const raw = body as Record<string, unknown>;
+    raw.model = comboEffortRow.baseId;
+    const rawReasoning = raw.reasoning;
+    raw.reasoning = {
+      ...(rawReasoning && typeof rawReasoning === "object" && !Array.isArray(rawReasoning)
+        ? rawReasoning as Record<string, unknown>
+        : {}),
+      effort: comboEffortRow.effort,
+    };
+  }
   const comboId = !options.comboAttempt ? comboIdFromRawBody(body, config) : null;
   if (comboId && Object.hasOwn(config.combos ?? {}, comboId)) {
     options.onRequestBodyRead?.();
@@ -2751,6 +2791,20 @@ async function handleResponsesInner(
   let toolBridgeMaps: ReturnType<typeof buildToolBridgeMaps>;
   try {
     parsed = parseRequest(body);
+    const effortRow = parseRequestEffortRowId(parsed.modelId, config);
+    if (effortRow) {
+      parsed.modelId = effortRow.baseId;
+      parsed.options.reasoning = effortRow.effort;
+      const raw = parsed._rawBody as Record<string, unknown>;
+      const rawReasoning = raw.reasoning;
+      raw.model = effortRow.baseId;
+      raw.reasoning = {
+        ...(rawReasoning && typeof rawReasoning === "object" && !Array.isArray(rawReasoning)
+          ? rawReasoning as Record<string, unknown>
+          : {}),
+        effort: effortRow.effort,
+      };
+    }
     if (options.comboReplaySnapshot?.recoveredPlaintext) {
       markBodyNonPersistable(parsed._rawBody);
     }
@@ -2881,7 +2935,7 @@ async function handleResponsesInner(
     logCtx.routeDecision = route.routeDecision;
   } catch (err) {
     if (err instanceof NoAvailableComboTargetsError) {
-      return comboUnavailableResponse(err.message);
+      return comboUnavailable(err.comboId);
     }
     if (err instanceof NoEligiblePolicyCandidateError) {
       // Persist the evaluation trace (per-candidate exclusions + the
@@ -2991,7 +3045,7 @@ async function handleResponsesInner(
         logCtx.routeDecision = route.routeDecision;
       } catch (err) {
         if (err instanceof NoAvailableComboTargetsError) {
-          return comboUnavailableResponse(err.message);
+          return comboUnavailable(err.comboId);
         }
         if (err instanceof NoEligiblePolicyCandidateError) {
           logCtx.routeDecision = err.trace;
@@ -3115,7 +3169,7 @@ async function handleResponsesInner(
               logCtx.routeDecision = route.routeDecision;
             } catch (err) {
               if (err instanceof NoAvailableComboTargetsError) {
-                return comboUnavailableResponse(err.message);
+                return comboUnavailable(err.comboId);
               }
               if (err instanceof NoEligiblePolicyCandidateError) {
                 logCtx.routeDecision = err.trace;

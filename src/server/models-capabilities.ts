@@ -1,3 +1,5 @@
+import type { CursorEffortTable } from "../integrations/cursor-effort-table";
+
 /**
  * Extended capability advertisement for the OpenAI-shape `GET /v1/models` list.
  *
@@ -23,7 +25,8 @@ export const OPENAI_FAMILY_API_TYPES: ReadonlySet<string> = new Set(["chat_compl
  * The reasoning-effort ladder Cursor's local-agent runtime attaches to a model, keyed by the
  * model id after its last `/`. Cursor decides this from its own table rather than from the
  * gateway's `reasoning_effort` list, so the dashboard can only PREDICT it; the values here
- * mirror that table (read from the 3.18.25 bundle) and carry no Cursor behavior of their own.
+ * form the fallback mirror of the 3.18.25 table; the live table is read by
+ * `src/integrations/cursor-effort-table.ts`. These values carry no Cursor behavior of their own.
  * Null means Cursor shows no Reasoning control for the id. Distinct from
  * `src/adapters/cursor/effort-map.ts`, which maps opencodex efforts onto Cursor's *backend*
  * tiers for the outbound provider; this is what Cursor's *local* picker renders.
@@ -43,15 +46,62 @@ const CURSOR_EFFORT_FAMILIES: ReadonlyArray<{ test: RegExp; ladder: readonly str
 ];
 
 export function cursorEffortFamily(modelId: string): string[] | null {
+  const id = normalizeCursorPickerId(modelId);
+  for (const family of CURSOR_EFFORT_FAMILIES) {
+    if (family.test.test(id)) return family.ladder.length > 0 ? [...family.ladder] : null;
+  }
+  return null;
+}
+
+export interface CursorEffortPrediction {
+  ladder: string[] | null;
+  source: "bundle" | "static";
+  /** Bundle family id when one matched (e.g. "anthropic-opus-5"); null otherwise. */
+  family: string | null;
+  outputCap?: number;
+}
+
+export function normalizeCursorPickerId(modelId: string): string {
   let id = modelId.trim().toLowerCase();
   const slash = id.lastIndexOf("/");
   if (slash !== -1) id = id.slice(slash + 1);
   const at = id.indexOf("@");
   if (at !== -1) id = id.slice(0, at);
-  for (const family of CURSOR_EFFORT_FAMILIES) {
-    if (family.test.test(id)) return family.ladder.length > 0 ? [...family.ladder] : null;
+  return id;
+}
+
+/**
+ * `supportsReasoning` is what the gateway row will advertise in
+ * `capabilities.supports_reasoning`; Cursor's gemini family withholds its control when that is
+ * false (`effortRequiresReasoningCapability`). Callers that do not know the row pass nothing
+ * and get the id-only prediction.
+ */
+export function predictCursorEffort(
+  modelId: string,
+  table: CursorEffortTable | null,
+  supportsReasoning?: boolean,
+): CursorEffortPrediction {
+  const id = normalizeCursorPickerId(modelId);
+  if (table) {
+    for (const family of table.families) {
+      if (family.pattern.test(id)) {
+        if (family.requiresReasoningCapability && supportsReasoning === false) {
+          return { ladder: null, source: "bundle", family: family.id };
+        }
+        return {
+          ladder: family.ladder.length > 0 ? [...family.ladder] : null,
+          source: "bundle",
+          family: family.id,
+          ...(family.outputCap !== undefined ? { outputCap: family.outputCap } : {}),
+        };
+      }
+    }
+    if (table.bareGpt5?.pattern.test(id)) return { ladder: [...table.bareGpt5.ladder], source: "bundle", family: "gpt-5" };
+    return { ladder: null, source: "bundle", family: null };
   }
-  return null;
+  const staticLadder = cursorEffortFamily(modelId);
+  const gated = supportsReasoning === false && id.startsWith("gemini-") ? null : staticLadder;
+  return { ladder: gated, source: "static", family: null };
 }
 
 export interface ModelCapabilityInput {
@@ -64,6 +114,7 @@ export interface ModelCapabilityInput {
    * as costing more).
    */
   longContextWindow?: number;
+  maxOutputTokens?: number;
   inputModalities?: readonly string[];
 }
 
@@ -71,6 +122,7 @@ export interface ModelCapabilityFields {
   api_types: readonly string[];
   capabilities: {
     context_length?: number;
+    max_output_tokens?: number;
     /** Cursor's extended-row filter REQUIRES this to contain "text"; every route emits text. */
     output_modalities: string[];
     input_modalities?: string[];
@@ -91,13 +143,15 @@ export interface ModelCapabilityFields {
 function positiveInt(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
   const floored = Math.floor(value);
-  return floored > 0 ? floored : undefined;
+  // Catalog limits are safe integers everywhere else; an unsafe finite value is a bad row.
+  return floored > 0 && Number.isSafeInteger(floored) ? floored : undefined;
 }
 
 export function modelCapabilityFields(input: ModelCapabilityInput): ModelCapabilityFields {
   const efforts = (input.reasoningEfforts ?? []).filter(effort => typeof effort === "string" && effort.length > 0);
   const contextLength = positiveInt(input.contextWindow);
   const longContextLength = positiveInt(input.longContextWindow);
+  const maxOutputTokens = positiveInt(input.maxOutputTokens);
   const hasLongTier = contextLength !== undefined && longContextLength !== undefined && longContextLength > contextLength;
   const modalities = Array.isArray(input.inputModalities)
     ? input.inputModalities.filter(modality => typeof modality === "string" && modality.length > 0)
@@ -109,6 +163,7 @@ export function modelCapabilityFields(input: ModelCapabilityInput): ModelCapabil
       ...(hasLongTier
         ? { context_length: longContextLength }
         : contextLength !== undefined ? { context_length: contextLength } : {}),
+      ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
       // Once a gateway advertises api_types, Cursor keeps only rows whose output_modalities
       // include "text"; omitting the key drops the row from the extended catalog.
       output_modalities: ["text"],
