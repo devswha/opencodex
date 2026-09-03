@@ -26,6 +26,31 @@ measurements that came out of chasing a false lead.
 Screenshots: `assets/042_live_overview.png`, `assets/042_live_accounts.png`,
 `assets/042_live_usage.png`.
 
+## The raw API evidence
+
+`/api/oauth/accounts?provider=meta-muse&quota=1`, after the streaming turn:
+
+```json
+{ "activeAccountId": "12aa2dd21fa72edb0f8dc81a7a475360",
+  "accounts": [ { "id": "12aa2dd21fa72edb0f8dc81a7a475360",
+    "quota": { "updatedAt": 1788447368848,
+      "fiveHourPercent": 0, "fiveHourResetAt": 1788465334000,
+      "weeklyPercent": 0, "weeklyResetAt": 1788739200000 } } ] }
+```
+
+`/api/provider-quotas`, the new row:
+
+```json
+{ "provider": "meta-muse", "label": "Meta Muse Code (CLI credential)",
+  "source": "meta-muse:subscription-observation",
+  "quota": { "updatedAt": 1788447368848, "fiveHourPercent": 0,
+    "fiveHourResetAt": 1788465334000, "weeklyPercent": 0, "weeklyResetAt": 1788739200000 },
+  "updatedAt": 1788447368848 }
+```
+
+The dashboard evidence is attached to PR #3363 as a comment
+(`issuecomment-5527983009`) rendering the three committed screenshots.
+
 ## Finding 1 — the event reaches the proxy but not the client
 
 While chasing "why no observation", a long bisect of request shapes found nothing,
