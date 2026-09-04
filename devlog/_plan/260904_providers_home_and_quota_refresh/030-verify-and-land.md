@@ -15,6 +15,16 @@ no bare `bun test`, no `bun run test`.
    the served bundle is the new one before believing any UI observation. A
    merged source tree is not a deployed one — `gui/dist` is gitignored and the
    proxy can serve a stale checkout.
+5. Because this unit also edits `docs-site/`, build the site the way CI does:
+
+   ```bash
+   cd docs-site && bun install --frozen-lockfile && bun run build
+   ```
+
+   There is no root `bun run build` script in this repository — `package.json`
+   ships `build:gui` (which already runs the frozen-lockfile GUI install and
+   `prepare:package`) and no bare `build`. Running the GUI build plus the
+   docs-site build covers both changed surfaces.
 
 ## Live proof required
 
