@@ -358,7 +358,36 @@ export default function ProviderAuthPanel({
 
   return (
     <section className="pwi-section pwi-auth-section" aria-label={isOauth ? t("pws.availableAccounts") : t("pws.apiKeys")}>
-      <h3 className="pwi-section-title">{isOauth ? t("pws.availableAccounts") : t("pws.apiKeys")}</h3>
+      {/*
+        The refresh control is in the section HEAD, not only at the foot of the list.
+        Every account renders a stack of 5-hour/weekly/Fable bars, so with two accounts
+        the footer copy sits well below the fold: an operator looking straight at stale
+        bars had to scroll past all of them to find the button that re-reads them. The
+        header keeps it beside the numbers it refreshes; the footer copy stays where it
+        is, next to "Add account", because that is the account-management cluster.
+      */}
+      <div className="pwi-auth-head">
+        <h3 className="pwi-section-title">{isOauth ? t("pws.availableAccounts") : t("pws.apiKeys")}</h3>
+        {isOauth && loggedIn && onRefreshQuota && (
+          <div className="pwi-auth-head-actions">
+            {quotaRefreshResult && (
+              <span role="status" className={quotaRefreshResult.ok ? "pws-status-ok" : "pws-status-warn"}>
+                {quotaRefreshResult.text}
+              </span>
+            )}
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={refreshingQuota || busy || Boolean(switchingAccountId)}
+              onClick={() => { void refreshQuota(); }}
+            >
+              <IconRefresh width={14} height={14} aria-hidden="true" />
+              {" "}
+              {refreshingQuota ? t("codexAuth.refreshingQuota") : t("codexAuth.refreshQuota")}
+            </button>
+          </div>
+        )}
+      </div>
       <div className="pwi-auth-body">
         {item.name === "xai" && (
           <XaiResponsesOptInControl
@@ -577,11 +606,11 @@ export default function ProviderAuthPanel({
                     {refreshingQuota ? t("codexAuth.refreshingQuota") : t("codexAuth.refreshQuota")}
                   </button>
                 )}
-                {quotaRefreshResult && (
-                  <span role="status" className={quotaRefreshResult.ok ? "pws-status-ok" : "pws-status-warn"}>
-                    {quotaRefreshResult.text}
-                  </span>
-                )}
+                {/*
+                  The result line lives in the section head only. Rendering it in both
+                  places would announce one refresh twice to a screen reader, since both
+                  spans carry role="status".
+                */}
               </div>
             )}
           </>
