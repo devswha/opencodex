@@ -154,7 +154,7 @@ describe("GitHub Actions hardening", () => {
         run?: string;
       }>;
     } | undefined;
-    expect(linuxConfinementJob?.["runs-on"]).toBe("ubuntu-latest");
+    expect(linuxConfinementJob?.["runs-on"]).toBe("ubuntu-22.04");
     const linuxConfinementSteps = linuxConfinementJob?.steps ?? [];
     const linuxCheckout = linuxConfinementSteps.find(step => step.name === "Checkout");
     expect(linuxCheckout?.uses).toBe("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0");

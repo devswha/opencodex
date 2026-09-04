@@ -706,7 +706,10 @@ jobs:
     name: Linux workspace confinement
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-latest
+    # Noble's AppArmor user-namespace policy can make bwrap fail closed before the test reaches the
+    # product boundary. Use a fixed hosted Jammy image for the semantic confinement proof instead
+    # of weakening the disposable runner's kernel policy with a privileged sysctl.
+    runs-on: ubuntu-22.04
     timeout-minutes: 8
     steps:
       - name: Checkout

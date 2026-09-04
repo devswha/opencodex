@@ -36,6 +36,18 @@ const PROFILE: &str = r#"
   (subpath (param "OCX_WORKSPACE"))
   (subpath (param "OCX_TMP"))
   TOOLCHAIN_RULES)
+(allow file-map-executable
+  (subpath "/System")
+  (subpath "/usr")
+  (subpath "/bin")
+  (subpath "/sbin")
+  (subpath "/Library/Apple")
+  (subpath "/Library/Frameworks")
+  (subpath "/Library/Developer/CommandLineTools")
+  (subpath "/Applications/Xcode.app/Contents")
+  (subpath (param "OCX_WORKSPACE"))
+  (subpath (param "OCX_TMP"))
+  TOOLCHAIN_RULES)
 (allow file-write*
   (literal "/dev/null")
   (subpath (param "OCX_WORKSPACE"))

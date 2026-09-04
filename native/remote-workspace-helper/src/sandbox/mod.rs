@@ -9,9 +9,10 @@ mod windows;
 use crate::protocol::{CommandOutcome, HelperRequest};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 #[cfg(target_os = "macos")]
 use std::process::Command;
+use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 pub use macos::{probe, run};
@@ -70,7 +71,10 @@ pub fn run_probe_child() -> i32 {
     if fs::write(&outside_write, b"escaped").is_ok() {
         return 27;
     }
-    if TcpStream::connect(listener_address).is_ok() {
+    let Ok(listener_address) = listener_address.parse::<SocketAddr>() else {
+        return 23;
+    };
+    if TcpStream::connect_timeout(&listener_address, Duration::from_millis(500)).is_ok() {
         return 28;
     }
     #[cfg(target_os = "macos")]
