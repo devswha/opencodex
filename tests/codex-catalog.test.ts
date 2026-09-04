@@ -2,7 +2,12 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyNativeVisibility, augmentRoutedModelsWithMetadata, augmentRoutedModelsWithRegistryOpenAiApiRows, buildCatalogEntries, buildComboCatalogOmission, catalogModelSlug, clampCatalogModelsToCodexSupport, clampEntryToCodexSupportedEfforts, clampedDefaultEffort, CODEX_ACCOUNT_BOUND_CATALOG_KIND, CODEX_NATIVE_ALIAS_CATALOG_KIND, comboCatalogOmissionReason, deriveComboCatalogModel, exactComboCatalogSlugs, filterCatalogVisibleModels, filterSupportedNativeSlugs, gatherRoutedModels as gatherRoutedModelsDirect, isDatedVariantId, isMediaGenerationModelId, loadBundledCodexCatalog, materializeBundledCodexCatalog, mergeCatalogEntriesForSync, NATIVE_DAYBREAK_BLUE_MODEL, NATIVE_OPENAI_MODELS, nativeDefaultReasoningEffort, nativeInputModalities, nativeOpenAiCapabilitySourceSlug, nativeOpenAiContextWindow, nativeReasoningEfforts, normalizeRoutedCatalogEntry, resetCatalogRuntimeStateForTests, resetOpenAiApiCatalogWarningStateForTests, resolveComboCatalogMember, shouldExposeRoutedModel, upstreamNativeEntry } from "../src/codex/catalog";
+import { codexAccountGatedCanonicalWireModel } from "../src/server/responses/core";
+import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../src/codex/catalog/native-models";
+import { isGpt56NativeSlug } from "../src/codex/catalog/effort";
+import { nativeOpenAiContextTier, nativeOpenAiMaxInputTokens } from "../src/codex/catalog";
+import { shouldUpgradeToUpstreamEntry } from "../src/codex/catalog/metadata";
+import { applyNativeVisibility, augmentRoutedModelsWithMetadata, augmentRoutedModelsWithRegistryOpenAiApiRows, buildCatalogEntries, buildComboCatalogOmission, catalogModelSlug, clampCatalogModelsToCodexSupport, clampEntryToCodexSupportedEfforts, clampedDefaultEffort, CODEX_ACCOUNT_BOUND_CATALOG_KIND, CODEX_NATIVE_ALIAS_CATALOG_KIND, comboCatalogOmissionReason, deriveComboCatalogModel, exactComboCatalogSlugs, filterCatalogVisibleModels, filterSupportedNativeSlugs, gatherRoutedModels as gatherRoutedModelsDirect, isDatedVariantId, isMediaGenerationModelId, loadBundledCodexCatalog, materializeBundledCodexCatalog, mergeCatalogEntriesForSync, NATIVE_DAYBREAK_BLUE_MODEL, NATIVE_GPT6_ASTRA_MODEL, NATIVE_OPENAI_MODELS, nativeDefaultReasoningEffort, nativeInputModalities, nativeOpenAiCapabilitySourceSlug, nativeOpenAiContextWindow, nativeReasoningEfforts, normalizeRoutedCatalogEntry, resetCatalogRuntimeStateForTests, resetOpenAiApiCatalogWarningStateForTests, resolveComboCatalogMember, shouldExposeRoutedModel, upstreamNativeEntry } from "../src/codex/catalog";
 import { applyProviderConfigHints, mergeConfiguredModelsIntoLiveCatalog } from "../src/codex/catalog/provider-fetch";
 import {
   CODEX_CUSTOM_MODEL_CATALOG_KIND,
@@ -3353,6 +3358,91 @@ describe("Codex catalog routed normalization", () => {
     expect(projected.some(entry => entry.slug === "daybreak-blue-latest")).toBe(false);
   });
 
+  test("gpt-6-astra projects its own shipped upstream row, not a borrowed one", () => {
+    // SHIPPED 2026-09-03 (openai/codex ed391d4dd #42607). The slug is SELF-DESCRIBED: its
+    // metadata comes from its own pinned upstream row, not from Sol's. It stays ungated
+    // (rolling out; an unentitled account gets a real upstream refusal rather than a hidden
+    // row) and goes to the wire AS gpt-6-astra — it is NOT a Daybreak-style serving alias.
+    expect(NATIVE_GPT6_ASTRA_MODEL).toBe("gpt-6-astra");
+    expect(ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(NATIVE_GPT6_ASTRA_MODEL)).toBe(false);
+    // Self-described: it resolves to itself rather than borrowing a capability source.
+    expect(nativeOpenAiCapabilitySourceSlug(NATIVE_GPT6_ASTRA_MODEL)).toBe(NATIVE_GPT6_ASTRA_MODEL);
+    expect(nativeOpenAiContextWindow(NATIVE_GPT6_ASTRA_MODEL)).toBe(272_000);
+    // The shipped ceiling is 872k. Before the pin landed this read 922k, inherited from the
+    // measured GPT-5.6 clamp, which over-advertised the ceiling by 50k.
+    expect(nativeOpenAiContextTier(NATIVE_GPT6_ASTRA_MODEL))
+      .toEqual({ defaultWindow: 272_000, longWindow: 872_000 });
+    // The input ceiling stays clamped to the resolved window: advertising 872k input under a
+    // 272k window is the over-advertising that clamp exists to prevent.
+    expect(nativeOpenAiMaxInputTokens(NATIVE_GPT6_ASTRA_MODEL)).toBe(272_000);
+    expect(nativeReasoningEfforts(NATIVE_GPT6_ASTRA_MODEL))
+      .toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(nativeDefaultReasoningEffort(NATIVE_GPT6_ASTRA_MODEL)).toBe("low");
+    expect(NATIVE_OPENAI_MODELS).toContain(NATIVE_GPT6_ASTRA_MODEL);
+
+    // The full 5.6-era ladder is what the sync path keys on. Without this, catalog sync takes
+    // the else-branch and truncates the shipped ladder at xhigh, dropping max and ultra.
+    expect(isGpt56NativeSlug(NATIVE_GPT6_ASTRA_MODEL)).toBe(true);
+
+    const projected = buildCatalogEntries(
+      nativeTemplate(),
+      NATIVE_OPENAI_MODELS,
+      [],
+      undefined,
+      false,
+      "default",
+      new Set(),
+      ["main"],
+      new Set(),
+      new Set(),
+      undefined,
+      [...NATIVE_OPENAI_MODELS],
+      new Map([["main", [...NATIVE_OPENAI_MODELS]]]),
+    );
+    expect(projected.filter(entry => entry.slug === NATIVE_GPT6_ASTRA_MODEL)).toHaveLength(1);
+    expect(projected.filter(entry => entry.slug === `main/${NATIVE_GPT6_ASTRA_MODEL}`)).toHaveLength(1);
+
+    // Its own shipped identity. Cross-checked against the upstream checkout below when present;
+    // these literals are the values that checkout carries at ed391d4dd.
+    expect(upstreamNativeEntry(NATIVE_GPT6_ASTRA_MODEL)).toMatchObject({
+      display_name: "GPT-6-Astra",
+      description: "Our most capable model for complex, demanding work.",
+      context_window: 272_000,
+      max_context_window: 872_000,
+    });
+
+    // Widening the pinned-entry lookup must not admit the other pinned slugs: UPSTREAM_NATIVE_ENTRIES
+    // also authorizes replacing persisted rows during sync, which stays reserved for the 5.6 family
+    // plus the two self-described/aliased natives.
+    for (const leaked of ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "codex-auto-review"]) {
+      expect(upstreamNativeEntry(leaked)).toBeNull();
+    }
+
+    // A row this project authored from a guess must be replaceable on sync. The 2026-09-03
+    // speculative release wrote "GPT-6 Astra" with a provisional description onto every install;
+    // those rows look genuine (a real display_name, not the bare slug), so the ordinary
+    // fallback-only upgrade rule would have preserved them forever and permanently shadowed the
+    // shipped metadata.
+    expect(shouldUpgradeToUpstreamEntry({
+      slug: NATIVE_GPT6_ASTRA_MODEL,
+      display_name: "GPT-6 Astra",
+    } as never)).toBe(true);
+    // Once it matches the shipped label there is nothing left to replace.
+    expect(shouldUpgradeToUpstreamEntry({
+      slug: NATIVE_GPT6_ASTRA_MODEL,
+      display_name: "GPT-6-Astra",
+    } as never)).toBe(false);
+    // The escape hatch stays scoped to slugs this project fabricated: a genuine upstream row for
+    // another native is still preserved untouched.
+    expect(shouldUpgradeToUpstreamEntry({
+      slug: "gpt-5.6-sol",
+      display_name: "GPT-5.6-Sol",
+    } as never)).toBe(false);
+
+    // Never rewritten to another model on the wire: the leaked slug IS the API id.
+    expect(codexAccountGatedCanonicalWireModel(NATIVE_GPT6_ASTRA_MODEL)).toBeUndefined();
+  });
+
   test("configured ChatGPT-forward Daybreak gets Sol native metadata without API-key crossover", async () => {
     globalThis.fetch = (() => { throw new Error("forward providers must not fetch /models"); }) as typeof fetch;
     const forwardConfig: OcxConfig = {
@@ -3417,6 +3507,45 @@ describe("Codex catalog routed normalization", () => {
     const apiRows = augmentRoutedModelsWithRegistryOpenAiApiRows([], openAiApiCatalogConfig());
     expect(apiRows.find(row => row.provider === "openai-apikey" && row.id === "daybreak-blue-latest"))
       .toMatchObject({ contextWindow: 1_050_000, maxInputTokens: 922_000 });
+  });
+
+  test("a ChatGPT-forward custom Astra row projects the Astra product identity", async () => {
+    globalThis.fetch = (() => { throw new Error("forward providers must not fetch /models"); }) as typeof fetch;
+    const forwardConfig: OcxConfig = {
+      port: 10100,
+      defaultProvider: "openai",
+      providers: {
+        openai: {
+          adapter: "openai-responses",
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          codexAccountMode: "pool",
+        },
+      },
+      codexAccountPickerEnabled: false,
+      codexAccountNamespaces: { main: "@main" },
+      customModels: [{
+        id: "astra-codex-forward",
+        provider: "openai",
+        modelId: NATIVE_GPT6_ASTRA_MODEL,
+      }],
+    };
+
+    const models = await gatherRoutedModels(forwardConfig);
+    const model = models.find(row => row.provider === "openai" && row.id === NATIVE_GPT6_ASTRA_MODEL);
+    // Per-model presentation: the custom row must not borrow Daybreak's label. Astra is
+    // self-described since it shipped, so its label comes from its own pinned upstream row
+    // rather than a hand-written alias entry — the capability inheritance is identical either way.
+    expect(model).toMatchObject({
+      displayName: "GPT-6-Astra",
+      codexForwardNativeCapabilityAlias: true,
+      reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    });
+
+    const entries = buildCatalogEntries(nativeTemplate(), [], models);
+    const astra = entries.find(entry => entry.slug === `openai/${NATIVE_GPT6_ASTRA_MODEL}`);
+    expect(astra).toMatchObject({ display_name: "GPT-6-Astra" });
+    expect(astra?.base_instructions).toContain("powered by the gpt-6-astra");
+    expect(astra?.base_instructions).not.toContain("daybreak");
   });
 
   test("Daybreak metadata inheritance rejects noncanonical providers", async () => {

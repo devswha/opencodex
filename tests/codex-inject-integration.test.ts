@@ -49,6 +49,12 @@ function runRestore(codexHome: string, ocxHome: string): { stdout: string; statu
 }
 
 describe("injectCodexConfig integration (Design B)", () => {
+  const DESIGN_B_BLOCK = [
+    "# Auto-injected by opencodex",
+    'openai_base_url = "http://127.0.0.1:10100/v1"',
+    "# Auto-injected by opencodex",
+    'experimental_realtime_ws_base_url = "http://127.0.0.1:10100/v1"',
+  ].join("\n");
   let codexHome: string;
   let ocxHome: string;
 
@@ -138,8 +144,9 @@ describe("injectCodexConfig integration (Design B)", () => {
     expect(config).not.toContain("[model_providers.opencodex]");
     expect(config).not.toContain('model_provider = "opencodex"');
     expect(config).toContain('model = "gpt-5.5"');
-    // Exactly one marker survives (the Design B one) — no duplicate accumulation.
-    expect(config.match(/Auto-injected by opencodex/g)?.length).toBe(1);
+    // Exactly the Design B markers survive (routing + realtime sideband) — no accumulation.
+    expect(config.match(/Auto-injected by opencodex/g)?.length).toBe(2);
+    expect(config).toContain(DESIGN_B_BLOCK);
   });
 
   test("upgrade path: a non-loopback legacy env_http_headers config converts to env_key (#2073)", () => {
@@ -176,8 +183,135 @@ describe("injectCodexConfig integration (Design B)", () => {
     const second = readFileSync(join(codexHome, "config.toml"), "utf8");
 
     expect(second.match(/openai_base_url/g)?.length).toBe(1);
-    expect(second.match(/Auto-injected by opencodex/g)?.length).toBe(1);
+    expect(second.match(/Auto-injected by opencodex/g)?.length).toBe(2);
     expect(second).toBe(first);
+    // Voice sideband override rides along with the routing override (#35830 regression).
+    expect(second.match(/experimental_realtime_ws_base_url/g)?.length).toBe(1);
+    expect(second).toContain('experimental_realtime_ws_base_url = "http://127.0.0.1:10100/v1"');
+  });
+
+  describe("realtime sideband override (openai/codex #35830 regression)", () => {
+    const proxyUrl = "http://127.0.0.1:10100/v1";
+
+    test("inject writes it under the marker block, journals it, and restore removes both keys", () => {
+      writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
+      expect(runInject(codexHome, ocxHome).status).toBe(0);
+      const config = readFileSync(join(codexHome, "config.toml"), "utf8");
+      expect(config).toContain(DESIGN_B_BLOCK);
+      const journal = JSON.parse(readFileSync(join(codexHome, "opencodex-journal.json"), "utf8"));
+      expect(journal.injectedOpenaiBaseUrl).toBe(proxyUrl);
+      expect(journal.injectedRealtimeWsBaseUrl).toBe(proxyUrl);
+
+      expect(runRestore(codexHome, ocxHome).status).toBe(0);
+      const restored = readFileSync(join(codexHome, "config.toml"), "utf8");
+      expect(restored).not.toContain("openai_base_url");
+      expect(restored).not.toContain("experimental_realtime_ws_base_url");
+      expect(restored).toContain('model = "gpt-5.5"');
+    });
+
+    test("a user-owned override survives injection and restore, even when it equals the proxy URL", () => {
+      const original = [
+        `experimental_realtime_ws_base_url = "${proxyUrl}"`,
+        'model = "gpt-5.5"',
+        "",
+      ].join("\n");
+      writeFileSync(join(codexHome, "config.toml"), original, "utf8");
+      expect(runInject(codexHome, ocxHome).status).toBe(0);
+      const config = readFileSync(join(codexHome, "config.toml"), "utf8");
+      expect(config).toContain(`openai_base_url = "${proxyUrl}"`);
+      expect(config.match(/experimental_realtime_ws_base_url/g)?.length).toBe(1);
+      const journal = JSON.parse(readFileSync(join(codexHome, "opencodex-journal.json"), "utf8"));
+      expect(journal.injectedOpenaiBaseUrl).toBe(proxyUrl);
+      expect(journal.injectedRealtimeWsBaseUrl).toBeNull();
+
+      // Simulate the Codex app reserializing config.toml (values kept, comments dropped) so
+      // restore has to rely on journaled value evidence: the routing URL is ours, the
+      // realtime override is not, even though the two strings are identical.
+      const rewritten = readFileSync(join(codexHome, "config.toml"), "utf8")
+        .split("\n").filter(line => !line.startsWith("#")).join("\n");
+      writeFileSync(join(codexHome, "config.toml"), rewritten, "utf8");
+      expect(runRestore(codexHome, ocxHome).status).toBe(0);
+      const restored = readFileSync(join(codexHome, "config.toml"), "utf8");
+      expect(restored).not.toContain("openai_base_url");
+      expect(restored).toContain(`experimental_realtime_ws_base_url = "${proxyUrl}"`);
+    });
+
+    test("an app-reserialized routed config is not mistaken for the user's native baseline on re-inject", () => {
+      writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
+      expect(runInject(codexHome, ocxHome).status).toBe(0);
+      const journalPath = join(codexHome, "opencodex-journal.json");
+      const firstSnapshot = JSON.parse(readFileSync(journalPath, "utf8")).originalConfig;
+
+      const rewritten = readFileSync(join(codexHome, "config.toml"), "utf8")
+        .split("\n").filter(line => !line.startsWith("#")).join("\n");
+      writeFileSync(join(codexHome, "config.toml"), rewritten, "utf8");
+      expect(runInject(codexHome, ocxHome).status).toBe(0);
+      expect(JSON.parse(readFileSync(journalPath, "utf8")).originalConfig).toBe(firstSnapshot);
+      const config = readFileSync(join(codexHome, "config.toml"), "utf8");
+      expect(config.match(/openai_base_url/g)?.length).toBe(1);
+      expect(config.match(/experimental_realtime_ws_base_url/g)?.length).toBe(1);
+
+      expect(runRestore(codexHome, ocxHome).status).toBe(0);
+      expect(readFileSync(join(codexHome, "config.toml"), "utf8")).toBe('model = "gpt-5.5"\n');
+    });
+
+    test("a user-owned openai_base_url means no realtime override is injected either", () => {
+      const original = 'openai_base_url = "https://my-own-gateway.example/v1"\nmodel = "gpt-5.5"\n';
+      writeFileSync(join(codexHome, "config.toml"), original, "utf8");
+      expect(runInject(codexHome, ocxHome).status).toBe(0);
+      expect(readFileSync(join(codexHome, "config.toml"), "utf8")).not.toContain("experimental_realtime_ws_base_url");
+    });
+
+    test("provider-table forms (non-loopback admission, authless Desktop) do not write it", () => {
+      writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
+      expect(runInject(codexHome, ocxHome, JSON.stringify({ hostname: "192.168.1.20" })).status).toBe(0);
+      expect(readFileSync(join(codexHome, "config.toml"), "utf8")).not.toContain("experimental_realtime_ws_base_url");
+      expect(runRestore(codexHome, ocxHome).status).toBe(0);
+
+      writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
+      expect(runInject(codexHome, ocxHome, JSON.stringify({ codexDesktopAuthless: true })).status).toBe(0);
+      expect(readFileSync(join(codexHome, "config.toml"), "utf8")).not.toContain("experimental_realtime_ws_base_url");
+    });
+
+    test("an app-reserialized Design B config switching to a provider-table form drops our root URLs", () => {
+      // Comment-dropping rewrite, then the operator turns on authless Desktop (provider-table
+      // form). Our old root URLs must not survive as if the user had written them.
+      writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
+      expect(runInject(codexHome, ocxHome).status).toBe(0);
+      const rewritten = readFileSync(join(codexHome, "config.toml"), "utf8")
+        .split("\n").filter(line => !line.startsWith("#")).join("\n");
+      writeFileSync(join(codexHome, "config.toml"), rewritten, "utf8");
+
+      expect(runInject(codexHome, ocxHome, JSON.stringify({ codexDesktopAuthless: true })).status).toBe(0);
+      const table = readFileSync(join(codexHome, "config.toml"), "utf8");
+      expect(table).toContain("requires_openai_auth = false");
+      expect(table).not.toContain("openai_base_url");
+      expect(table).not.toContain("experimental_realtime_ws_base_url");
+
+      expect(runRestore(codexHome, ocxHome).status).toBe(0);
+      expect(readFileSync(join(codexHome, "config.toml"), "utf8")).toBe('model = "gpt-5.5"\n');
+    });
+
+    test("CRLF config: re-inject keeps both keys single and CRLF-pure; restore removes both", () => {
+      writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\r\n\r\n[features]\r\nfast_mode = true\r\n', "utf8");
+      expect(runInject(codexHome, ocxHome).status).toBe(0);
+      expect(runInject(codexHome, ocxHome).status).toBe(0);
+      const config = readFileSync(join(codexHome, "config.toml"), "utf8");
+      expect(config).not.toContain("\n\n\n");
+      expect(config.match(/openai_base_url/g)?.length).toBe(1);
+      expect(config.match(/experimental_realtime_ws_base_url/g)?.length).toBe(1);
+      expect(config.match(/Auto-injected by opencodex/g)?.length).toBe(2);
+      expect(config).toContain('openai_base_url = "http://127.0.0.1:10100/v1"');
+      expect(config).toContain('experimental_realtime_ws_base_url = "http://127.0.0.1:10100/v1"');
+      expect(config.includes("\r\n")).toBe(true);
+      expect(config.replace(/\r\n/g, "").includes("\n")).toBe(false);
+
+      expect(runRestore(codexHome, ocxHome).status).toBe(0);
+      const restored = readFileSync(join(codexHome, "config.toml"), "utf8");
+      expect(restored).not.toContain("openai_base_url");
+      expect(restored).not.toContain("experimental_realtime_ws_base_url");
+      expect(restored).toContain("fast_mode = true");
+    });
   });
 
   test.each([
@@ -735,7 +869,8 @@ describe("injectCodexConfig integration (Design B)", () => {
     expect(back).toContain('openai_base_url = "http://127.0.0.1:10100/v1"');
     expect(back).not.toContain("[model_providers.opencodex]");
     expect(back).not.toContain('model_provider = "opencodex"');
-    expect(back.match(/Auto-injected by opencodex/g)?.length).toBe(1);
+    expect(back.match(/Auto-injected by opencodex/g)?.length).toBe(2);
+    expect(back).toContain(DESIGN_B_BLOCK);
 
     expect(runInject(codexHome, ocxHome, JSON.stringify({ codexDesktopAuthless: true })).status).toBe(0);
     expect(runRestore(codexHome, ocxHome).status).toBe(0);

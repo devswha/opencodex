@@ -31,7 +31,7 @@ import { redactSecretString } from "../../lib/redact";
 import upstreamModelsSnapshot from "../data/upstream-models.json";
 
 
-import { NATIVE_OPENAI_CONTEXT_OVERRIDES, SUPPORTED_NATIVE_OPENAI_SLUGS, UPSTREAM_NATIVE_ENTRIES, isNativeOpenAiCapabilityAliasModel, nativeMultiAgentVersion, nativeOpenAiAutoCompactTokenLimit, nativeOpenAiContextWindow, nativeOpenAiMaxInputTokens, type NativeContextLimitsInput } from "./metadata";
+import { NATIVE_OPENAI_CONTEXT_OVERRIDES, SUPPORTED_NATIVE_OPENAI_SLUGS, UPSTREAM_NATIVE_ENTRIES, hasNativeOpenAiCapabilityMetadata, nativeMultiAgentVersion, nativeOpenAiAutoCompactTokenLimit, nativeOpenAiContextWindow, nativeOpenAiMaxInputTokens, type NativeContextLimitsInput } from "./metadata";
 import { clampAutoCompactTokenLimit } from "../../providers/auto-compact-budget";
 import { trustedAccountBoundNativeCatalogSlug } from "./account-models";
 import { CODEX_NATIVE_ALIAS_CATALOG_KIND } from "./kinds";
@@ -526,7 +526,7 @@ export function catalogEntryIsNativeChatGpt(entry: RawEntry): boolean {
   if (
     entry.opencodex_catalog_kind === CODEX_CUSTOM_MODEL_CATALOG_KIND
     && entry.use_responses_lite === true
-    && isNativeOpenAiCapabilityAliasModel(routedNativeSlug)
+    && hasNativeOpenAiCapabilityMetadata(routedNativeSlug)
   ) return true;
   if (UPSTREAM_NATIVE_ENTRIES.has(slug) || SUPPORTED_NATIVE_OPENAI_SLUGS.has(slug)) return true;
   return false;
@@ -584,7 +584,7 @@ export function applyMultiAgentMode(
         : "";
       const codexForwardCapabilityAlias = entry.opencodex_catalog_kind === CODEX_CUSTOM_MODEL_CATALOG_KIND
         && entry.use_responses_lite === true
-        && isNativeOpenAiCapabilityAliasModel(routedNativeSlug)
+        && hasNativeOpenAiCapabilityMetadata(routedNativeSlug)
         ? routedNativeSlug
         : undefined;
       const upstreamPin = nativeAlias

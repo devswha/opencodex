@@ -274,6 +274,69 @@ function quotaForPlan<T extends Omit<StoredAccountQuota, "updatedAt"> | StoredAc
   } as T;
 }
 
+/**
+ * Last reset-credit count this process parsed for the main account, tagged with the
+ * physical ChatGPT account it was read from.
+ *
+ * It is deliberately memory-only. The quota store is keyed by the stable `__main__`
+ * ALIAS, and `~/.codex/auth.json` can be swapped for another account while the proxy is
+ * not running — `reconcileMainCodexAccountRuntimeState` only purges alias-keyed state
+ * when it observes the id CHANGE, and its first observation after a restart has nothing
+ * to compare against. A disk-hydrated `__main__` entry can therefore belong to the
+ * previous login, so filling the DTO from it would show one account's tickets on
+ * another's card. Pool accounts have no such hole because their store key IS the account
+ * id. Binding the value to `requestAccountId` keeps the fill honest: after a restart the
+ * badge simply waits for the first usage response that carries the summary.
+ */
+let mainResetCreditsProvenance: { accountId: string; credits: number } | null = null;
+
+function rememberMainResetCredits(accountId: string | null, credits: number | undefined): void {
+  if (accountId === null || credits === undefined) return;
+  mainResetCreditsProvenance = { accountId, credits };
+}
+
+/** Forget the remembered count when the physical main identity is no longer the same. */
+function mainResetCreditsForCurrentIdentity(): number | undefined {
+  if (!mainResetCreditsProvenance) return undefined;
+  const currentAccountId = getMainChatgptAccountId();
+  if (currentAccountId === null) return undefined;
+  if (currentAccountId !== mainResetCreditsProvenance.accountId) {
+    mainResetCreditsProvenance = null;
+    return undefined;
+  }
+  return mainResetCreditsProvenance.credits;
+}
+
+/**
+ * The main account is the only account whose DTO quota comes from the raw WHAM parse
+ * result instead of the merged store: `poolAccountDto` serializes what
+ * `commitPoolQuotaResponse` read back out of `getAccountQuota()`, while the main DTO
+ * spreads `mainInfo.quota` directly. `/wham/usage` carries `rate_limit_reset_credits`
+ * only intermittently, and the store exists to bridge that gap
+ * (`setAccountQuotaFromParsed` carries an existing `resetCredits` forward when the new
+ * snapshot omits it), so the main card lost its ticket badge on every response that
+ * happened to omit the summary while pool cards kept theirs.
+ *
+ * Only `resetCredits` is carried, deliberately, and only from an identity-tagged
+ * in-process observation rather than the alias-keyed store. The window fields have
+ * *clearing* semantics — a monthly-only snapshot must drop a stale weekly value (#382) —
+ * so reinstating the whole stored object would resurrect a window the parse meant to
+ * clear whenever the store write was refused by generation gating. A freshly parsed value
+ * always wins, including `0`: zero is defined, so it never takes the fill branch.
+ */
+function mainQuotaWithCarriedResetCredits(
+  parsed: Omit<StoredAccountQuota, "updatedAt">,
+): StoredAccountQuota {
+  const carried = parsed.resetCredits === undefined
+    ? mainResetCreditsForCurrentIdentity()
+    : undefined;
+  return {
+    ...parsed,
+    ...(carried !== undefined ? { resetCredits: carried } : {}),
+    updatedAt: getAccountQuota(MAIN_CODEX_ACCOUNT_ID)?.updatedAt ?? Date.now(),
+  };
+}
+
 function poolAccountDto(
   account: CodexAccount,
   quotaResult: PoolQuotaResult,
@@ -836,6 +899,9 @@ async function fetchMainAccountInfoWhileOwned(
     const plan = nonEmptyPlan(data.plan_type) ?? nonEmptyPlan(cached?.plan) ?? nonEmptyPlan(getMainAccountPlan());
     const quota = parseUsageQuota({ ...data, ...(plan ? { plan_type: plan } : {}) });
     const freshResetCredits = quota?.resetCredits;
+    // Tag the count with the identity it was read from, so a later response that omits the
+    // summary can restore the badge without ever crossing an account boundary.
+    rememberMainResetCredits(requestAccountId, freshResetCredits);
     const result = {
       email: data.email ?? null,
       plan,
@@ -1640,10 +1706,7 @@ export async function listCodexAuthAccountsSnapshot(
     hasCredential: hasMainCredential,
     needsReauth: mainNeedsReauth,
     quota: mainInfo.quota ? {
-      ...quotaForPlan({
-        ...mainInfo.quota,
-        updatedAt: getAccountQuota(MAIN_CODEX_ACCOUNT_ID)?.updatedAt ?? Date.now(),
-      }, mainInfo.plan),
+      ...quotaForPlan(mainQuotaWithCarriedResetCredits(mainInfo.quota), mainInfo.plan),
     } : null,
     ...oauthAccountHealthFields("codex", MAIN_CODEX_ACCOUNT_ID, mainHealth),
   };
@@ -2167,7 +2230,15 @@ export async function handleCodexAuthAPI(
   }
 
   if (url.pathname === "/api/codex-auth/login" && req.method === "POST") {
-    const body = (await req.json().catch(() => ({}))) as { id?: string; reauth?: boolean; openBrowser?: unknown };
+    const body = (await req.json().catch(() => ({}))) as {
+      id?: string;
+      reauth?: boolean;
+      openBrowser?: unknown;
+      device?: unknown;
+    };
+    // Device mode: no local browser, no loopback listener. The only way to add
+    // an account to a headless hub (#3366).
+    const useDeviceFlow = body.device === true;
     const requestedAccountId = body.id?.trim();
     const reauth = body.reauth === true;
     if (requestedAccountId && !isValidCodexAccountId(requestedAccountId)) {
@@ -2197,13 +2268,20 @@ export async function handleCodexAuthAPI(
     codexAuthLoginState.set(flowId, loginOwner);
     try {
       const { startLoginFlow, getLoginStatus, publicOAuthAuthenticationErrorMessage } = await import("../oauth");
-      const result = await startLoginFlow("chatgpt", { forceLogin: true });
+      const result = await startLoginFlow("chatgpt", {
+        forceLogin: true,
+        ...(useDeviceFlow ? { flow: "device" as const } : {}),
+      });
 
       // Open the browser server-side (same pattern as /api/oauth/login in management-api.ts).
       // The GUI's window.open is popup-blocked because it runs after an await, not a direct click.
       // Both login routes share one resolver so this surface cannot drift from the other.
       const { shouldOpenBrowserForLogin } = await import("../oauth/open-browser-choice");
-      if (result.url && shouldOpenBrowserForLogin(body.openBrowser, runtimeConfig)) {
+      // A device flow's URL is a verification page the user opens on ANOTHER
+      // machine. Opening it on the hub host is useless at best, and on a
+      // headless host it fails. `deviceCode` is the same signal the generic
+      // OAuth login route uses to make this decision.
+      if (result.url && !result.deviceCode && shouldOpenBrowserForLogin(body.openBrowser, runtimeConfig)) {
         const { openUrl } = await import("../lib/open-url");
         openUrl(result.url);
       }
@@ -2211,7 +2289,14 @@ export async function handleCodexAuthAPI(
       (async () => {
         try {
           let completed = false;
-          for (let i = 0; i < 150; i++) {
+          // The device grant lives 15 minutes and the whole point is that the
+          // user walks to another device to enter the code. A 5-minute server
+          // budget would kill the flow at minute five while the grant is still
+          // valid. The extra 30 attempts past 450 are settlement margin: a user
+          // who authorizes in the final seconds still needs the token exchange
+          // and credential write to land before this loop gives up.
+          const pollAttempts = useDeviceFlow ? 480 : 150;
+          for (let i = 0; i < pollAttempts; i++) {
             await new Promise(r => setTimeout(r, 2000));
             const st = getLoginStatus("chatgpt");
             if (st.done && st.loggedIn) {
@@ -2437,7 +2522,15 @@ export async function handleCodexAuthAPI(
       })();
 
       setCodexLoginState(flowId, { status: "pending" });
-      return jsonResponse({ ok: true, flowId, url: result.url, instructions: result.instructions });
+      return jsonResponse({
+        ok: true,
+        flowId,
+        url: result.url,
+        instructions: result.instructions,
+        // Dropped before #3366: every device-code surface renders this field,
+        // so withholding it left the GUI and CLI with no code to show.
+        ...(result.deviceCode ? { deviceCode: result.deviceCode } : {}),
+      });
     } catch (e) {
       if (codexAuthLoginState.get(flowId) === loginOwner) codexAuthLoginState.delete(flowId);
       const msg = e instanceof Error ? e.message : String(e);

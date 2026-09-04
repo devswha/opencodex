@@ -247,7 +247,7 @@ export const CAPABILITIES: readonly Capability[] = [
       "A bare invocation reads and never writes.",
       "The APPLIED value is echoed, not the requested one, so a server-side normalization stays visible.",
       "Values are not re-validated in the CLI: the server owns the strategy names and the 1-100 sticky bound.",
-      "`anthropic` is the only OAuth pool with this setting; other OAuth providers are refused without a round-trip.",
+      "`anthropic` owns the full pool contract. Other OAuth providers reach the same endpoint with a generic subset (enabled/strategy/autoSwitchThreshold) whose settings persist but do not yet steer selection; `sticky` and `quotaWindow` are refused for them.",
     ],
   },
   {
@@ -274,7 +274,7 @@ export const CAPABILITIES: readonly Capability[] = [
       { name: "--conversation", value: "string", summary: "Restrict to one conversation id (`--conversationId` is accepted too)." },
       { name: "--status", value: "string", summary: "An exact code (429) or a class (5xx)." },
       { name: "--limit", value: "number", summary: "Row cap; defaults to 200." },
-      { name: "--follow", value: "boolean", summary: "Stream new rows as JSONL; implies --jsonl." },
+      { name: "--follow", value: "boolean", summary: "Poll for new rows; add --jsonl to emit JSONL." },
       { name: "--json", value: "boolean", summary: "Emit the server payload as JSON." },
       { name: "--jsonl", value: "boolean", summary: "Emit one row per line." },
     ],

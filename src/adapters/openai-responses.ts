@@ -2075,11 +2075,26 @@ function usageFromResponsesPayload(payload: unknown): OcxUsage | undefined {
   const usage = payload.usage;
   const inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
   const outputTokens = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
-  if (inputTokens === 0 && outputTokens === 0) return undefined;
+  // openai/codex#41980: the raw usage object is wire data a rebuilt response.completed must keep —
+  // unknown keys (subscription metadata, future counters) ride along even when the token counts
+  // themselves are zero or absent (metadata-only usage).
+  const knownKeys = new Set(["input_tokens", "output_tokens", "total_tokens", "input_tokens_details", "output_tokens_details"]);
+  const hasExtras = Object.keys(usage).some(key => !knownKeys.has(key))
+    || (isPlainObject(usage.input_tokens_details)
+      && Object.keys(usage.input_tokens_details).some(key => key !== "cached_tokens" && key !== "cache_write_tokens"))
+    || (isPlainObject(usage.output_tokens_details)
+      && Object.keys(usage.output_tokens_details).some(key => key !== "reasoning_tokens"));
+  if (inputTokens === 0 && outputTokens === 0 && !hasExtras) return undefined;
+  const inputDetails = isPlainObject(usage.input_tokens_details) ? usage.input_tokens_details : undefined;
+  const outputDetails = isPlainObject(usage.output_tokens_details) ? usage.output_tokens_details : undefined;
   return {
     inputTokens,
     outputTokens,
     ...(typeof usage.total_tokens === "number" ? { totalTokens: usage.total_tokens } : {}),
+    ...(typeof inputDetails?.cached_tokens === "number" ? { cachedInputTokens: inputDetails.cached_tokens } : {}),
+    ...(typeof inputDetails?.cache_write_tokens === "number" ? { cacheCreationInputTokens: inputDetails.cache_write_tokens } : {}),
+    ...(typeof outputDetails?.reasoning_tokens === "number" ? { reasoningOutputTokens: outputDetails.reasoning_tokens } : {}),
+    ...(hasExtras ? { rawUsage: { ...usage } } : {}),
   };
 }
 
@@ -2391,7 +2406,26 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
               reservation.commitRetained();
               budget.releaseRetained(previousBytes, { kind: "retained_collectors" });
             }
-            usage = usageFromResponsesPayload(payload.response);
+            {
+              const nextUsage = usageFromResponsesPayload(payload.response);
+              // The attached raw usage object can be event-sized (unknown keys carry arbitrary
+              // values); it stays reachable until the terminal yields, so charge it like the
+              // adjacent retained collectors or it would defeat the per-request memory cap.
+              const previousRawBytes = usage?.rawUsage === undefined ? 0
+                : budgetEncoder.encode(JSON.stringify(usage.rawUsage)).byteLength;
+              const nextRawBytes = nextUsage?.rawUsage === undefined ? 0
+                : budgetEncoder.encode(JSON.stringify(nextUsage.rawUsage)).byteLength;
+              if (nextRawBytes > 0) {
+                const reservation = budget.reserveTransient(nextRawBytes, { kind: "retained_collectors" });
+                usage = nextUsage;
+                reservation.commitRetained();
+              } else {
+                usage = nextUsage;
+              }
+              if (previousRawBytes > 0) {
+                budget.releaseRetained(previousRawBytes, { kind: "retained_collectors" });
+              }
+            }
             break;
         }
       }
@@ -2399,7 +2433,13 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       // completed snapshot so text is never double-counted.
       const text = snapshot || doneText || deltas;
       if (text) yield { type: "text_delta", text };
-      budget.releaseRetained(budgetEncoder.encode(deltas).byteLength + budgetEncoder.encode(doneText).byteLength + budgetEncoder.encode(snapshot).byteLength, { kind: "retained_collectors" });
+      budget.releaseRetained(
+        budgetEncoder.encode(deltas).byteLength
+          + budgetEncoder.encode(doneText).byteLength
+          + budgetEncoder.encode(snapshot).byteLength
+          + (usage?.rawUsage === undefined ? 0 : budgetEncoder.encode(JSON.stringify(usage.rawUsage)).byteLength),
+        { kind: "retained_collectors" },
+      );
       yield {
         type: "done",
         ...(usage ? { usage } : {}),

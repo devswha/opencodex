@@ -450,6 +450,46 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 }
 .main-inner.main-inner--combos > .page-sub { margin-bottom: 10px; }
 
+/* Keep the Models tab strip border aligned with its tab buttons in the full-bleed layout. */
+.main-inner.main-inner--combos > .page-tabs {
+  margin-inline: 36px;
+  padding-inline: 0;
+}
+
+/*
+  Full-bleed is for the combos WORKSPACE grid only. Its loading and error fallbacks render
+  no `.combos-workspace-shell` (Combos.tsx returns a bare skeleton or an error notice), yet
+  `main-inner--combos` is applied on tab selection alone — so with no workspace to fill, the
+  lone subtitle/notice/retry stretched edge to edge (padding:0, max-width:none, flex column)
+  while every sibling Models tab stayed boxed. That is the "콤보만 영역이 이상해짐" report.
+
+  When no workspace shell is present, drop the full-bleed and box the page like the other
+  tabs: reset the container, its chrome inset, and the fill panel back to normal flow.
+*/
+/*
+  Each rule below is a SINGLE selector on purpose. Vite's Rolldown CSS minifier corrupts a
+  comma-separated selector list whose selectors carry `:not(:has(...))` — it emits a stray
+  `)` before the block and the browser then drops the whole rule. A single `:not(:has())`
+  selector minifies correctly, so the chrome inset is handled without a list: the container
+  drops its own horizontal padding and the page chrome keeps the 36px inline padding it
+  already gets above (`.main-inner--combos > .page-head` etc.), which the panel matches.
+*/
+.main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 32px 0 64px;
+  min-height: 0;
+  height: auto;
+  overflow: visible;
+  display: block;
+}
+.main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) > .models-tab-panel--fill:not([hidden]) {
+  flex: 0 1 auto;
+  height: auto;
+  display: block;
+  padding-inline: 36px;
+}
+
 /* ---- page header ---- */
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 6px; }
 .page-head h2 { font-size: var(--text-title); }
@@ -1885,13 +1925,18 @@ dialog.modal-overlay::backdrop {
 .codex-pool-strategy-card .card-sub { padding: 0; }
 /* Inline selection-order row on an account card: label and trigger share one line, and the
    trigger is scaled down to the card's hint text so it reads as part of the card, not a form. */
+/* Per-account ⋯: a labelled disclosure in the action row (no menu role). Its body sits on its
+   own line under the actions so the revealed controls keep DOM tab order. */
+.codex-account-more { display: inline-flex; flex-wrap: wrap; align-items: center; }
+.codex-account-more > summary { list-style: none; cursor: pointer; min-width: 28px; justify-content: center; }
+.codex-account-more > summary::-webkit-details-marker { display: none; }
+.codex-account-more-body { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex-basis: 100%; padding-top: 6px; }
 .codex-account-identity { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 16px 6px; min-width: 0; }
 .codex-account-identity-copy { font-size: var(--text-label); line-height: var(--leading-body); color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 .codex-account-priority { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0; min-width: 0; flex: 0 0 auto; }
 .codex-account-priority-label { font-size: var(--text-label); color: var(--muted); font-weight: var(--weight-medium); white-space: nowrap; }
 .codex-account-priority .select-trigger { max-width: 100%; padding: 4px 9px; font-size: var(--text-label); }
 
-.startup-page-sub { margin-bottom: 0; }
 .startup-page-head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .startup-runtime-notice-slot {
   margin-bottom: 12px;
@@ -1943,8 +1988,12 @@ dialog.modal-overlay::backdrop {
 .startup-hero-icon svg { width: 21px; height: 21px; }
 .startup-hero-copy h3 { margin: 10px 0 4px; font-size: var(--text-title); }
 .startup-hero-copy p { margin: 0; color: var(--muted); line-height: var(--leading-body); max-width: var(--prose-measure); }
-.startup-state-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
-.startup-state-grid .value { font-size: var(--text-subtitle); }
+.startup-state-line { margin: 8px 0 0; font-size: var(--text-control); }
+.startup-recovery-details > summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 6px; }
+.startup-recovery-details > summary::-webkit-details-marker { display: none; }
+.startup-recovery-details > summary::before { content: ""; width: 0; height: 0; border-left: 5px solid var(--muted); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform var(--motion-fast); }
+.startup-recovery-details[open] > summary::before { transform: rotate(90deg); }
+.startup-recovery-details[open] > summary { margin-bottom: 8px; }
 .startup-details, .startup-actions { margin-bottom: 16px; }
 .startup-actions .panel-head > svg { width: 18px; height: 18px; flex: 0 0 auto; }
 .startup-detail-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-top: 1px solid var(--border-soft); }
@@ -1962,7 +2011,6 @@ dialog.modal-overlay::backdrop {
 .startup-command-row code { color: var(--muted); font-size: var(--text-label); overflow-wrap: anywhere; }
 .startup-action-notice { margin: 14px 0 0; }
 @media (max-width: 700px) {
-  .startup-state-grid { grid-template-columns: 1fr; }
   .startup-command-row { align-items: flex-start; }
   .startup-detail-row { align-items: flex-start; }
   .startup-detail-row > .startup-detail-actions { flex-direction: column; align-items: flex-end; }
@@ -2006,12 +2054,22 @@ table.logs-table {
 .logs-table col.logs-col-duration { width: 8%; }
 .log-col-rate { min-width: 7ch; white-space: nowrap; }
 .log-col-cost { min-width: 10ch; white-space: nowrap; }
+/* table-layout: fixed sizes the columns but does not clip them: a cell whose content is wider
+   than its <col> paints straight over the neighbour (seen as "US$0.1401claude-fable-5-1" and a
+   "reasoning_effort=high" caption sitting under the provider name). Clip at the cell so an
+   overlong value truncates inside its own column instead. */
+.logs-table tbody td { overflow: hidden; }
+.log-reasoning-cell { overflow-wrap: anywhere; }
 .log-status-cell { display: inline-flex; flex-direction: column; align-items: flex-start; gap: var(--space-0-5); min-width: 7ch; line-height: var(--leading-tight); }
 .log-detail-btn {
   background: none; border: none; padding: 0; cursor: pointer;
   color: var(--accent-hover); font: inherit; font-size: var(--text-caption); text-decoration: underline;
-  white-space: nowrap;
+  /* Wraps rather than clips: with the cell now clipping overflow, a nowrap label such as
+     zh-TW's 檢視詳細資料 would lose its tail in the 8% status column. */
+  white-space: normal;
+  text-align: left;
 }
+.log-detail-btn:focus-visible { outline-offset: -2px; }
 
 /* Logs page layout rhythm — keep spacing in CSS so virtualized rows don't flood inline px. */
 .logs-auto-refresh {
@@ -2325,6 +2383,28 @@ button.prov-account-row.active { cursor: default; }
   .main-inner.main-inner--combos > .page-head,
   .main-inner.main-inner--combos > .page-tabs,
   .main-inner.main-inner--combos > .page-sub { padding-inline: 18px; }
+  .main-inner.main-inner--combos > .page-tabs {
+    margin-inline: 18px;
+    padding-inline: 0;
+  }
+  .main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) > .models-tab-panel--fill:not([hidden]) {
+    padding-inline: 0;
+  }
+  .main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) {
+    padding: 22px 18px 48px;
+  }
+  .main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) > .page-head {
+    padding-inline: 0;
+  }
+  .main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) > .page-tabs {
+    padding-inline: 0;
+  }
+  .main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) > .page-sub {
+    padding-inline: 0;
+  }
+  .main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) > .page-tabs {
+    margin-inline: 0;
+  }
   /* settings rows: copy takes the full width, controls drop underneath */
   .setting-row { flex-wrap: wrap; }
   .setting-row .setting-copy { flex: 1 1 100% !important; }

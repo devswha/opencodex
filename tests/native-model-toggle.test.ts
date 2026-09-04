@@ -25,7 +25,7 @@ import {
 } from "../src/codex/catalog";
 import { handleManagementAPI } from "../src/server/management-api";
 import { applyMultiAgentMode, applyNativeOpenAiContextOverride } from "../src/codex/catalog/parsing";
-import { NATIVE_GPT56_CONTEXT_WINDOW, NATIVE_GPT56_OPT_IN_CONTEXT_WINDOW, nativeOpenAiContextWindow } from "../src/codex/catalog";
+import { NATIVE_GPT56_CONTEXT_WINDOW, NATIVE_GPT56_OPT_IN_CONTEXT_WINDOW, nativeOpenAiContextTier, nativeOpenAiContextWindow } from "../src/codex/catalog";
 import type { OcxConfig } from "../src/types";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../src/codex/catalog/native-models";
 import {
@@ -92,7 +92,7 @@ describe("native GPT model toggles (bare slugs in disabledModels)", () => {
 
     seedCodexModelEntitlementsForTests(
       "main",
-      ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-daybreak-blue-latest"],
+      ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-daybreak-blue-latest", "gpt-6-astra"],
     );
     const confirmed = nativeModelRows({ disabledModels: ["gpt-5.6-sol"] });
     expect(confirmed.map(r => r.slug)).toEqual(NATIVE_OPENAI_MODELS);
@@ -103,6 +103,37 @@ describe("native GPT model toggles (bare slugs in disabledModels)", () => {
 
     expect(nativeModelRows({ disabledModels: [] }).map(row => row.slug))
       .toContain("gpt-daybreak-blue-latest");
+  });
+
+  test("gpt-6-astra lists without any roster so the request reaches upstream", () => {
+    // Owner decision (2026-09-04): the leaked slug appears on every install rather than waiting
+    // for an entitlement roster that does not carry it yet. With the cache reset there is no
+    // confirmed account at all, and the row must still be present and selectable.
+    resetCodexModelEntitlementCacheForTests();
+    expect(ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has("gpt-6-astra")).toBe(false);
+    expect(nativeModelRows({ disabledModels: [] }).map(row => row.slug)).toContain("gpt-6-astra");
+    expect(visibleNativeSlugs({ disabledModels: [] })).toContain("gpt-6-astra");
+    // The user visibility lever still owns hiding it; only entitlement gating was removed.
+    expect(visibleNativeSlugs({ disabledModels: ["gpt-6-astra"] })).not.toContain("gpt-6-astra");
+  });
+
+  test("the 1M opt-in raises gpt-6-astra to its own 872k ceiling, not the family's 922k", () => {
+    // The dashboard's native 1M toggle writes providerContextCaps.openai = 922_000 for the whole
+    // group. Raising a window only happens for slugs that HAVE an opt-in ceiling, which used to
+    // mean "member of NATIVE_GPT56_FAMILY". Astra ships its own 272k/872k pair and is not in that
+    // family, so the toggle moved every other native and left this one pinned at 272k.
+    const optIn = { cap: NATIVE_GPT56_OPT_IN_CONTEXT_WINDOW } as const;
+
+    expect(nativeOpenAiContextWindow("gpt-6-astra")).toBe(272_000);
+    // Raised to the model's OWN ceiling: the 922k lever must not advertise 922k on a 872k model.
+    expect(nativeOpenAiContextWindow("gpt-6-astra", optIn)).toBe(872_000);
+    // The family keeps its measured ceiling, so the shared lever is not degraded for anyone else.
+    expect(nativeOpenAiContextWindow("gpt-5.6-sol", optIn)).toBe(922_000);
+
+    // The tier pair is availability metadata and stays put either way — it is what told us the
+    // window SHOULD have moved while the window itself did not.
+    expect(nativeOpenAiContextTier("gpt-6-astra", optIn))
+      .toEqual({ defaultWindow: 272_000, longWindow: 872_000 });
   });
 
   test("Direct bare rows use only main entitlement while Pool may use any eligible account", () => {
