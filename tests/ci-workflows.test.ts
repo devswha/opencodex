@@ -104,6 +104,7 @@ describe("GitHub Actions hardening", () => {
     // Higher than the Linux shards on purpose: at 15 the Windows leg cancelled a
     // shard mid-suite, which reports as neither pass nor fail (#2152).
     expect(ci.jobs?.["platform-windows"]?.["timeout-minutes"]).toBe(25);
+    expect(ci.jobs?.["native-workspace-helper"]?.["timeout-minutes"]).toBe(8);
     expect(ci.jobs?.["keyring-smoke"]?.["timeout-minutes"]).toBe(8);
     expect(ci.jobs?.["npm-global-smoke"]?.["timeout-minutes"]).toBe(8);
     expect(ci.jobs?.ci?.["timeout-minutes"]).toBe(5);
@@ -123,6 +124,19 @@ describe("GitHub Actions hardening", () => {
       { name: "windows", runner: "windows-latest" },
       { name: "macos", runner: "macos-latest" },
     ]);
+    const nativeJob = ci.jobs?.["native-workspace-helper"] as {
+      "runs-on"?: string;
+      strategy?: { matrix?: { include?: Array<{ name: string; runner: string }> } };
+      steps?: Array<{ uses?: string; with?: Record<string, unknown>; run?: string }>;
+    } | undefined;
+    expect(nativeJob?.["runs-on"]).toBe("${{ matrix.runner }}");
+    expect(nativeJob?.strategy?.matrix?.include).toEqual([
+      { name: "macos", runner: "macos-latest" },
+      { name: "windows", runner: "windows-latest" },
+    ]);
+    const nativeRun = nativeJob?.steps?.find(step => step.run)?.run;
+    expect(nativeRun).toBe("cargo test --locked --release --manifest-path native/remote-workspace-helper/Cargo.toml");
+    expect(nativeRun).not.toContain("${{");
     expectSecureLinuxKeyringBootstrap(workflow);
     // Every job must stay bounded — an unbounded job can hang a queue for hours.
     // Asserted structurally rather than by counting the string: a count passes if
@@ -437,6 +451,7 @@ describe("GitHub Actions hardening", () => {
       "bin/**",
       "bun.lock",
       "gui/**",
+      "native/**",
       "package.json",
       "scripts/**",
       "src/**",
@@ -482,7 +497,7 @@ describe("GitHub Actions hardening", () => {
     expect(scopeIndex).toBeGreaterThan(filterIndex);
 
     const scopedCondition = "github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'";
-    for (const jobName of ["test", "storage-policy", "gates", "platform-macos", "keyring-smoke"]) {
+    for (const jobName of ["test", "storage-policy", "gates", "platform-macos", "native-workspace-helper", "keyring-smoke"]) {
       const job = ci.jobs?.[jobName] as { needs?: string; if?: string } | undefined;
       expect(`${jobName}:${job?.needs}`).toBe(`${jobName}:changes`);
       expect(`${jobName}:${job?.if}`).toBe(`${jobName}:${scopedCondition}`);
@@ -548,6 +563,7 @@ describe("GitHub Actions hardening", () => {
       "bin/**",
       "bun.lock",
       "gui/**",
+      "native/**",
       "package.json",
       "scripts/prepare-package.ts",
       "src/**",
