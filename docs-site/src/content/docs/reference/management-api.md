@@ -101,8 +101,11 @@ For the concepts behind the model roster and encrypted worker-task behavior, see
 Executor enrollment exchanges a one-use code at `POST /remote-workspace/pair` and then opens
 `/remote-workspace/agent` as a bearer-authenticated outbound WebSocket. Those two machine endpoints
 are not general management API authority. The bearer is device-scoped, and each work session adds a
-signed E2EE handshake. See [Remote Workspace](/guides/remote-workspace/) for the end-user flow and
-trust boundaries.
+signed E2EE handshake. Ten failed pairing codes from one kernel-observed peer return `429` with
+`Retry-After` for the remainder of the fixed ten-minute window. Tailscale Serve clients share the
+management listener's loopback peer bucket; the identity header is not used for throttling because
+a direct local process could forge it. See [Remote Workspace](/guides/remote-workspace/) for the
+end-user flow and trust boundaries.
 
 Session snapshots include `resumable`. It becomes true only after the selected coding-agent runtime
 has durable history; notably, a new Claude Code session remains false until its first prompt

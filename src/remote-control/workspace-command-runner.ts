@@ -6,13 +6,14 @@ import {
   existsSync,
   fstatSync,
   lstatSync,
+  opendirSync,
   openSync,
   readSync,
   realpathSync,
   statSync,
 } from "node:fs";
 import { arch } from "node:os";
-import { dirname, isAbsolute, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type {
   RemoteWorkspaceCommandRequest,
   RemoteWorkspaceCommandResult,
@@ -24,6 +25,7 @@ const NATIVE_HELPER_PROTOCOL_VERSION = 1;
 const MAX_NATIVE_HELPER_BYTES = 64 * 1024 * 1024;
 const MAX_NATIVE_HELPER_ERROR_CHARS = 512;
 const MAX_NATIVE_HELPER_STDERR_BYTES = 16 * 1024;
+const MAX_WORKSPACE_PREFLIGHT_ENTRIES = 250_000;
 const SANDBOX_BUN_PATH = "/ocx-runtime/bin/bun";
 const READABLE_SYSTEM_PATHS = [
   "/usr",
@@ -51,6 +53,8 @@ export interface LinuxRemoteWorkspaceCommandRunnerOptions {
   toolchainRoots?: readonly string[];
   /** Exact Bun executable used by OCX; mounted as one file rather than exposing its host directory. */
   runtimeExecutablePath?: string;
+  /** Writable roots inspected before command capability is advertised. */
+  writableRoots?: readonly string[];
   spawn?: typeof Bun.spawn;
   /** Cross-platform test seam for the real namespace capability probe. */
   probe?: (argv: readonly string[]) => boolean;
@@ -82,6 +86,8 @@ interface NativeHelperProbeResponse {
 export interface NativeRemoteWorkspaceCommandRunnerOptions {
   helper: RemoteWorkspaceNativeHelperDescriptor;
   toolchainRoots?: readonly string[];
+  /** Writable workspace roots that must never contain the executable enforcing their sandbox. */
+  writableRoots: readonly string[];
   networkAccess?: boolean;
   platform?: NodeJS.Platform;
   spawn?: typeof Bun.spawn;
@@ -247,6 +253,33 @@ function assertNativeHelperIntegrity(value: RemoteWorkspaceNativeHelperDescripto
   return helper;
 }
 
+function assertNativeHelperOutsideWritableRoots(
+  helper: RemoteWorkspaceNativeHelperDescriptor,
+  roots: readonly string[],
+): string[] {
+  if (roots.length < 1 || roots.length > 32) {
+    throw new Error("remote workspace native runner needs one to 32 writable roots");
+  }
+  const canonicalRoots: string[] = [];
+  for (const root of roots) {
+    if (!isAbsolute(root) || root.includes("\0")) {
+      throw new Error("remote workspace writable root must be an absolute path");
+    }
+    const canonicalRoot = realpathSync(root);
+    if (canonicalRoots.includes(canonicalRoot)) {
+      throw new Error("remote workspace native runner received a duplicate writable root");
+    }
+    if (inside(canonicalRoot, helper.path)) {
+      // A sandboxed command can write anywhere below its approved root. Executing the sandbox
+      // helper from that same tree would turn the hash-then-spawn pathname into a writable trust
+      // anchor, especially if a detached macOS descendant survives after the command returns.
+      throw new Error("remote workspace native helper must be outside every writable workspace root");
+    }
+    canonicalRoots.push(canonicalRoot);
+  }
+  return canonicalRoots;
+}
+
 function nativeHelperEnvironment(platform: NodeJS.Platform): Record<string, string> {
   const result: Record<string, string> = {};
   const names = platform === "win32"
@@ -262,6 +295,41 @@ function nativeHelperEnvironment(platform: NodeJS.Platform): Record<string, stri
 function inside(root: string, candidate: string): boolean {
   const rel = relative(root, candidate);
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function assertWorkspaceHasNoExternalHardlinkAliases(root: string): void {
+  const canonicalRoot = realpathSync(root);
+  const pending = [canonicalRoot];
+  let entries = 0;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    const directory = opendirSync(current);
+    try {
+      for (;;) {
+        const entry = directory.readSync();
+        if (!entry) break;
+        entries += 1;
+        if (entries > MAX_WORKSPACE_PREFLIGHT_ENTRIES) {
+          throw new Error("remote workspace is too large for safe command preflight");
+        }
+        const target = join(current, entry.name);
+        const metadata = lstatSync(target);
+        if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+          pending.push(target);
+        } else if (!metadata.isDirectory() && metadata.nlink > 1) {
+          // A bind mount or Seatbelt path rule cannot distinguish two names for one inode. Reject
+          // rather than let a workspace alias read or mutate a file whose other name is outside.
+          throw new Error("remote workspace command root contains a hard-linked file");
+        }
+      }
+    } finally {
+      directory.closeSync();
+    }
+  }
+}
+
+function assertCommandRootsSafe(roots: readonly string[]): void {
+  for (const root of roots) assertWorkspaceHasNoExternalHardlinkAliases(root);
 }
 
 function sandboxPath(root: string, cwd: string): string {
@@ -383,6 +451,7 @@ export function createLinuxRemoteWorkspaceCommandRunner(
   const spawn = options.spawn ?? Bun.spawn;
   return {
     async run(request): Promise<RemoteWorkspaceCommandResult> {
+      assertWorkspaceHasNoExternalHardlinkAliases(request.root);
       const argv = linuxRemoteWorkspaceCommandArgv(request, options);
       const child = spawn(argv, {
         cwd: request.root,
@@ -475,6 +544,12 @@ export function createNativeRemoteWorkspaceCommandRunner(
   return {
     async run(request): Promise<RemoteWorkspaceCommandResult> {
       const helper = assertNativeHelperIntegrity(options.helper);
+      const writableRoots = assertNativeHelperOutsideWritableRoots(helper, options.writableRoots);
+      const requestRoot = realpathSync(request.root);
+      if (!writableRoots.includes(requestRoot)) {
+        throw new Error("remote workspace command root is outside the native runner grant");
+      }
+      assertWorkspaceHasNoExternalHardlinkAliases(requestRoot);
       const body = JSON.stringify(nativeHelperRequest(options, request));
       if (Buffer.byteLength(body, "utf8") > 64 * 1024) {
         throw new Error("remote workspace native helper request is too large");
@@ -556,6 +631,8 @@ export function nativeRemoteWorkspaceCommandRunnerAvailable(
   if (platform !== "darwin" && platform !== "win32") return false;
   try {
     const helper = assertNativeHelperIntegrity(options.helper);
+    const writableRoots = assertNativeHelperOutsideWritableRoots(helper, options.writableRoots);
+    assertCommandRootsSafe(writableRoots);
     const request: NativeHelperRequest = { version: NATIVE_HELPER_PROTOCOL_VERSION, operation: "probe" };
     const raw = options.probe
       ? options.probe(request)
@@ -612,6 +689,7 @@ export function linuxRemoteWorkspaceCommandRunnerAvailable(
   if (!isAbsolute(path) || !existsSync(path)) return false;
   try {
     accessSync(path, constants.X_OK);
+    if (options.writableRoots) assertCommandRootsSafe(options.writableRoots);
   } catch {
     return false;
   }

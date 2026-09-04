@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   RemoteWorkspaceHub,
   connectRemoteWorkspaceAgent,
+  generateRemoteControlIdentityKeyPair,
   pairRemoteWorkspaceDevice,
   type RemoteWorkspaceDeviceState,
   type RemoteWorkspaceDeviceStateStore,
@@ -174,6 +175,115 @@ describe("Remote Workspace hub HTTP and WebSocket integration", () => {
         body: "{}",
       });
       expect(response.status).toBe(403);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("rate-limits repeated pairing guesses before parsing more bodies and recovers after expiry", async () => {
+    writeTestConfig(config());
+    let now = Date.parse("2026-09-04T00:00:00.000Z");
+    const hub = new RemoteWorkspaceHub(new HubStore(), () => now);
+    const server = startServer(0, {
+      managementAuthState: managementAuth(),
+      managementApi: { remoteWorkspaceHub: hub },
+    });
+    const identity = generateRemoteControlIdentityKeyPair();
+    const body = {
+      code: "AAAA-BBBB-CCCC",
+      name: "Computer 2",
+      platform: "linux-x64",
+      publicKey: identity.publicKey,
+      roots: [{ id: crypto.randomUUID(), label: "Project" }],
+    };
+    try {
+      for (let attempt = 1; attempt < 10; attempt += 1) {
+        const response = await fetch(new URL("/remote-workspace/pair", server.url), {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            // None of these caller-controlled identities may choose a public-listener bucket.
+            "x-forwarded-for": `192.0.2.${attempt}`,
+            "cf-connecting-ip": `198.51.100.${attempt}`,
+            "tailscale-user-login": `spoof-${attempt}@example.test`,
+          },
+          body: JSON.stringify(body),
+        });
+        expect(response.status).toBe(401);
+      }
+      const limited = await fetch(new URL("/remote-workspace/pair", server.url), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "203.0.113.250",
+          "cf-connecting-ip": "203.0.113.251",
+          "tailscale-user-login": "last-spoof@example.test",
+        },
+        body: JSON.stringify(body),
+      });
+      expect(limited.status).toBe(429);
+      expect(limited.headers.get("retry-after")).toBe("600");
+      expect(limited.headers.get("cache-control")).toBe("no-store");
+      expect(await limited.json()).toEqual({
+        error: "Remote Workspace pairing is temporarily rate limited.",
+      });
+
+      const blockedBeforeParse = await fetch(new URL("/remote-workspace/pair", server.url), {
+        method: "POST",
+        body: "not-json",
+      });
+      expect(blockedBeforeParse.status).toBe(429);
+
+      now += 10 * 60_000 + 1;
+      const grant = hub.createPairingGrant();
+      const paired = await fetch(new URL("/remote-workspace/pair", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...body, code: grant.code }),
+      });
+      expect(paired.status).toBe(201);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("does not let management-ingress callers rotate Tailscale headers around the peer bucket", async () => {
+    const managementPort = await findAvailablePort(0, "127.0.0.1");
+    writeTestConfig({
+      ...config(),
+      hub: {
+        managementPublicOrigin: "https://hub.example.test",
+        managementIngress: { enabled: true, port: managementPort },
+      },
+    });
+    const hub = new RemoteWorkspaceHub(new HubStore());
+    const server = startServer(0, {
+      managementAuthState: managementAuth(),
+      managementApi: { remoteWorkspaceHub: hub },
+    });
+    const body = JSON.stringify({
+      code: "AAAA-BBBB-CCCC",
+      name: "Computer 2",
+      platform: "linux-x64",
+      publicKey: generateRemoteControlIdentityKeyPair().publicKey,
+      roots: [{ id: crypto.randomUUID(), label: "Project" }],
+    });
+    const attempt = async (identity: string): Promise<Response> => await fetch(
+      `http://127.0.0.1:${managementPort}/remote-workspace/pair`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "tailscale-user-login": identity,
+        },
+        body,
+      },
+    );
+    try {
+      for (let count = 1; count < 10; count += 1) {
+        expect((await attempt(`rotated-${count}@example.test`)).status).toBe(401);
+      }
+      expect((await attempt("another-identity@example.test")).status).toBe(429);
     } finally {
       await server.stop(true);
     }

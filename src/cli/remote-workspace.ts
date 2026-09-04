@@ -49,8 +49,15 @@ function publicStatus(state: RemoteWorkspaceDeviceState | null): Record<string, 
   if (!state) return { paired: false };
   const capabilities = remoteWorkspaceCapabilitiesForCommandRunner(
     createPlatformRemoteWorkspaceCommandRunner({
-      linux: { toolchainRoots: state.toolchainRoots },
-      ...(state.nativeHelper ? { native: { helper: state.nativeHelper, toolchainRoots: state.toolchainRoots } } : {}),
+      linux: {
+        toolchainRoots: state.toolchainRoots,
+        writableRoots: state.roots.map(root => root.path),
+      },
+      ...(state.nativeHelper ? { native: {
+        helper: state.nativeHelper,
+        toolchainRoots: state.toolchainRoots,
+        writableRoots: state.roots.map(root => root.path),
+      } } : {}),
     }),
     state.capabilities,
   );

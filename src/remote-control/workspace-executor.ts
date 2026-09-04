@@ -172,6 +172,9 @@ function decodeUtf8(value: Uint8Array): string {
 function assertOpenedRegularFile(root: string, target: string, descriptor: number, maximum: number) {
   const opened = fstatSync(descriptor);
   const linked = lstatSync(target);
+  if (opened.isFile() && linked.isFile() && (opened.nlink !== 1 || linked.nlink !== 1)) {
+    throw new Error("remote workspace hard-linked files are not allowed");
+  }
   if (!opened.isFile() || !linked.isFile() || linked.isSymbolicLink()
     || opened.dev !== linked.dev || opened.ino !== linked.ino
     || opened.birthtimeMs !== linked.birthtimeMs) {

@@ -147,6 +147,10 @@ socket and stops sessions bound to it.
 
 - Provider credentials and coding-agent history remain on the Hub.
 - Executor private keys, device bearer, and real root paths remain in its owner-only OCX state.
+- Pairing-code failures are limited per kernel-observed peer on every listener. Ten failed codes in
+  ten minutes return a generic `429` with `Retry-After`; the Hub retains only bounded, expiring
+  hashes of those source identities. Tailscale Serve users share the management listener's loopback
+  bucket because a direct local caller could forge its identity header.
 - Each work session uses an Ed25519-signed ephemeral P-256 ECDH handshake and ordered
   AES-256-GCM messages.
 - A socket is not shown as online until both sides agree on its current capability manifest.
@@ -158,18 +162,31 @@ socket and stops sessions bound to it.
 - Executor operations are serialized, opened file identities are rechecked, and write hashes are
   checked again immediately before atomic replacement. Replacing an approved root requires pairing
   it again, and toolchain roots are revalidated before each command.
+- File reads/writes reject hard-linked files. Before command execution, OCX scans at most 250,000
+  workspace entries and disables the command path if any non-directory entry has multiple links;
+  path sandboxes cannot prove whether the other name for that inode is outside the approved root.
 - Linux commands run through bubblewrap with one writable workspace, cleared environment, private
   process namespaces, the current OCX Bun executable as one read-only file, bounded output
-  and timeout, and network disabled by default.
+  and timeout, and network disabled by default. Hosted CI also cancels a detached-background-process
+  attempt and verifies that it cannot write after cancellation.
 - macOS commands run through the Rust helper and a per-command Seatbelt profile. Only system runtime
   files, explicitly approved read-only toolchains, and the writable workspace are visible; the
-  process group, output, temporary directory, and deadline all have explicit owners.
-- Windows commands run in a capability-free AppContainer attached at process creation to a
-  kill-on-close Job Object. A unique AppContainer SID receives temporary modify access only to the
-  workspace and read/execute access to approved toolchains; OCX removes those grants after the job.
-- The native probe must write inside a disposable workspace while failing to read or write an
-  adjacent sentinel and failing to reach a live loopback listener. Binary existence alone never
-  enables `workspace.exec`.
+  process group, output, temporary directory, and deadline all have explicit owners. Because macOS
+  has no unprivileged Job Object or cgroup equivalent, the profile denies `fork` and ordinary
+  subprocess creation so a child cannot detach with `setsid()` and keep writing after revocation.
+  Commands that require subprocesses are therefore unavailable on the current macOS helper.
+- Windows commands start suspended in a capability-free AppContainer and are attached to a
+  kill-on-close Job Object before the first instruction is resumed. A unique AppContainer SID
+  receives temporary modify access only to the workspace and read/execute access to approved
+  toolchains; the sanitized environment maps writable profile paths into the workspace, and OCX
+  removes those grants after the job.
+- The native probe must write inside a disposable workspace, read and modify a pre-existing nested
+  workspace file, fail to read or write an adjacent sentinel, and fail to reach a live loopback
+  listener. On macOS it must also prove that direct `fork` and ordinary subprocess creation are
+  denied. Binary existence alone never enables `workspace.exec`.
+- The pinned native helper must be outside every approved writable workspace. OCX checks this both
+  before advertising command support and immediately before each command, so workspace code cannot
+  replace the binary that enforces its next sandbox.
 - Stopping a session cancels an active Executor command and cleans up the Hub model process and
   loopback tool bridge. Windows stops the owned npm-wrapper process tree rather than leaving its
   Node child behind; Linux and macOS force-stop a CLI only if it ignores the graceful stop window.

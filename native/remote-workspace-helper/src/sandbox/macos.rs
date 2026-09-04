@@ -11,7 +11,6 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const PROFILE: &str = r#"
 (version 1)
 (deny default)
-(allow process-fork)
 (allow process-exec)
 (allow process-info* (target self))
 (allow signal (target self))
@@ -167,11 +166,20 @@ pub fn run(request: &HelperRequest) -> Result<CommandOutcome, String> {
 
 pub fn probe() -> Result<(), String> {
     let parent = temporary_workspace()?;
-    let workspace = parent.join("workspace");
-    let outside_file = parent.join("outside-secret");
-    let outside_write = parent.join("outside-write");
-    fs::create_dir(&workspace)
+    // macOS exposes /var as a symlink to /private/var. Seatbelt receives canonical parameters,
+    // so the probe child must receive the same spelling; otherwise a safe sandbox can deny the
+    // intended workspace write before any escape assertion is exercised.
+    let canonical_parent = fs::canonicalize(&parent)
+        .map_err(|_| "could not canonicalize confinement probe directory".to_owned())?;
+    let workspace = canonical_parent.join("workspace");
+    let nested_workspace = workspace.join("src");
+    let existing_workspace_file = nested_workspace.join("existing.txt");
+    let outside_file = canonical_parent.join("outside-secret");
+    let outside_write = canonical_parent.join("outside-write");
+    fs::create_dir_all(&nested_workspace)
         .map_err(|_| "could not create confinement probe workspace".to_owned())?;
+    fs::write(&existing_workspace_file, b"existing")
+        .map_err(|_| "could not create confinement probe workspace fixture".to_owned())?;
     fs::write(&outside_file, b"must-not-be-visible")
         .map_err(|_| "could not create confinement probe sentinel".to_owned())?;
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -196,6 +204,7 @@ pub fn probe() -> Result<(), String> {
             string_path(&outside_file, "probe sentinel")?,
             string_path(&outside_write, "probe escape target")?,
             listener_address.to_string(),
+            string_path(&existing_workspace_file, "probe workspace fixture")?,
         ],
         toolchain_roots: vec![string_path(helper_parent, "native helper directory")?],
         timeout_ms: 5_000,
@@ -208,14 +217,42 @@ pub fn probe() -> Result<(), String> {
         fs::read(workspace.join("probe-marker")),
         Ok(value) if value == b"sandboxed"
     );
+    let existing_workspace_ok = matches!(
+        fs::read(&existing_workspace_file),
+        Ok(value) if value == b"updated"
+    );
     let outside_ok = matches!(
         fs::read(&outside_file),
         Ok(value) if value == b"must-not-be-visible"
     ) && !outside_write.exists();
-    let cleanup = fs::remove_dir_all(&parent);
+    let cleanup = fs::remove_dir_all(&canonical_parent);
     let outcome = result?;
-    if cleanup.is_err() || !marker_ok || !outside_ok || outcome.exit_code != 0 {
-        return Err("macOS confinement probe failed".to_owned());
+    if !marker_ok || outcome.exit_code == 25 {
+        return Err("macOS confinement probe denied workspace write".to_owned());
+    }
+    if !existing_workspace_ok || outcome.exit_code == 29 {
+        return Err("macOS confinement probe denied existing workspace access".to_owned());
+    }
+    if outcome.exit_code == 26 {
+        return Err("macOS confinement probe allowed adjacent host read".to_owned());
+    }
+    if outcome.exit_code == 27 || !outside_ok {
+        return Err("macOS confinement probe allowed adjacent host write".to_owned());
+    }
+    if outcome.exit_code == 28 {
+        return Err("macOS confinement probe allowed loopback network access".to_owned());
+    }
+    if outcome.exit_code == 30 {
+        return Err("macOS confinement probe allowed subprocess creation".to_owned());
+    }
+    if outcome.exit_code != 0 {
+        return Err(format!(
+            "macOS confinement probe child failed with code {}",
+            outcome.exit_code
+        ));
+    }
+    if cleanup.is_err() {
+        return Err("macOS confinement probe cleanup failed".to_owned());
     }
     Ok(())
 }

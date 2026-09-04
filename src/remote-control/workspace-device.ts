@@ -291,8 +291,12 @@ export async function pairRemoteWorkspaceDevice(options: PairRemoteWorkspaceDevi
     ? pinRemoteWorkspaceNativeHelper(options.nativeHelperPath)
     : discoverRemoteWorkspaceNativeHelper();
   const commandRunner = createPlatformRemoteWorkspaceCommandRunner({
-    linux: { toolchainRoots },
-    ...(nativeHelper ? { native: { helper: nativeHelper, toolchainRoots } } : {}),
+    linux: { toolchainRoots, writableRoots: roots.map(root => root.path) },
+    ...(nativeHelper ? { native: {
+      helper: nativeHelper,
+      toolchainRoots,
+      writableRoots: roots.map(root => root.path),
+    } } : {}),
   });
   const capabilities = remoteWorkspaceCapabilitiesForCommandRunner(commandRunner, options.capabilities);
   const deviceIdentity = generateRemoteControlIdentityKeyPair();
@@ -388,8 +392,15 @@ export function connectRemoteWorkspaceAgent(options: {
   const state = parseRemoteWorkspaceDeviceState(options.state);
   const commandRunner = options.commandRunner === undefined
     ? createPlatformRemoteWorkspaceCommandRunner({
-      linux: { toolchainRoots: state.toolchainRoots },
-      ...(state.nativeHelper ? { native: { helper: state.nativeHelper, toolchainRoots: state.toolchainRoots } } : {}),
+      linux: {
+        toolchainRoots: state.toolchainRoots,
+        writableRoots: state.roots.map(root => root.path),
+      },
+      ...(state.nativeHelper ? { native: {
+        helper: state.nativeHelper,
+        toolchainRoots: state.toolchainRoots,
+        writableRoots: state.roots.map(root => root.path),
+      } } : {}),
     })
     : options.commandRunner ?? undefined;
   const capabilities = remoteWorkspaceCapabilitiesForCommandRunner(commandRunner, state.capabilities);

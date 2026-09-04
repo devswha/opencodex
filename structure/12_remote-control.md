@@ -78,6 +78,10 @@ a CLI that ignores termination cannot keep a stopped Hub session alive indefinit
 
 - A GUI session creates a ten-minute, one-use pairing code.
 - The Executor creates its Ed25519 key locally and exchanges the code for a random device bearer.
+- The unauthenticated exchange is limited per kernel-observed peer on every listener: the tenth
+  failed code in ten minutes receives a generic 429. Tailscale Serve users deliberately share the
+  loopback peer bucket because a direct local process could forge its identity header. Only hashed
+  source identities are retained, and the in-memory table is capped at 1,024 entries.
 - The Hub stores only the bearer hash. A valid code is consumed even when submitted metadata is
   rejected, preventing repeated enrollment attempts with one copied secret.
 - After WSS upgrade, the Executor sends its current capability manifest and waits for the Hub's
@@ -119,15 +123,31 @@ session aborts active command processes rather than leaving them until timeout.
 Additional user-installed toolchain directories are visible only when the Executor owner explicitly
 adds `--toolchain-root` during local pairing; those real paths remain in device-local state.
 Merely finding the `bwrap` file is not sufficient: enrollment runs a bounded namespace probe. A
-Linux host whose kernel/container policy rejects that probe advertises file tools only.
+Linux host whose kernel/container policy rejects that probe advertises file tools only. The hosted
+Linux lane drives the production factory and exact mounted Bun through workspace-write, adjacent
+read/write denial, live loopback denial, and cancellation of a detached-background-process attempt.
 
 The native helper applies the same rule. Its probe must write within a disposable workspace while
-failing to read or write an adjacent sentinel and failing to connect to a live loopback listener.
+reading and modifying a pre-existing nested workspace file, failing to read or write an adjacent
+sentinel, and failing to connect to a live loopback listener.
 macOS launches the command under a per-command Seatbelt profile and owns the complete process group.
-Windows creates a capability-free AppContainer, attaches it to a non-breakaway kill-on-close Job
-Object at process creation, temporarily grants that unique SID access to the workspace and approved
-toolchains, and allowlists only the three standard handles for inheritance. It never passes command
-argv or root paths on the helper command line; the bounded protocol travels over stdin.
+Windows creates a capability-free AppContainer suspended, attaches it to a non-breakaway
+kill-on-close Job Object before its first instruction can run, then resumes it. The helper
+temporarily grants that unique SID access to the workspace and approved toolchains, builds a
+secret-free Windows environment whose writable profile paths stay inside the workspace, and
+allowlists only the three standard handles for inheritance. It never passes command argv or root
+paths on the helper command line; the bounded protocol travels over stdin.
+
+macOS has no unprivileged Job Object or cgroup equivalent, and a forked child can otherwise call
+`setsid()` to leave the helper's process group. The Seatbelt profile therefore denies subprocess
+creation. Its live probe must observe both `fork` and the ordinary `posix_spawn` path failing before
+OCX advertises command execution. macOS Remote Workspace commands are consequently single-process;
+commands that need child processes fail closed instead of leaving a writer alive after revocation.
+
+The native helper is a trust anchor, not a workspace artifact. OCX refuses to advertise native
+command execution when the pinned helper is below any approved writable root, and repeats that
+check immediately before every command. This keeps a workspace process from replacing the binary
+that is supposed to enforce its next sandbox.
 
 File operations are serialized per Executor so a parallel command cannot replace a checked path
 with a symlink or junction mid-operation. Reads bind the opened descriptor back to the current
@@ -136,6 +156,13 @@ immediately before an atomic replace; Windows retries only short `EBUSY`/`EPERM`
 holds. The approved root identity is pinned for the lifetime of the Executor, and toolchain roots
 are revalidated before every command. Windows device names, alternate data streams, and
 trailing-dot/space aliases are rejected.
+
+Hard links need a separate rule: a path sandbox cannot tell whether another name for the same inode
+is outside the approved root. File reads and writes reject multi-link entries directly. Before any
+command, OCX performs a bounded 250,000-entry root scan and fails closed on a multi-link
+non-directory entry or an oversized tree. This costs one metadata walk per command, but avoids
+claiming path isolation while allowing an inode alias to mutate an adjacent host file.
+
 The capability manifest is the intersection of the pairing-time grant and what the current host can
 actually enforce. Reconnecting can remove a capability when its sandbox disappears, but can never
 silently add authority that the owner did not grant while pairing.
@@ -193,6 +220,8 @@ a `CONNECTING` socket.
 7. Provider credentials and coding-agent history never move to an Executor.
 8. Payload, output, event, process, session, device, and reconnect limits apply before unbounded
    allocation or forwarding.
+9. Pairing failures are source-throttled with bounded, expiring, hashed state; forwarded IP headers
+   never choose a public-listener bucket.
 
 ## Resource and native-code boundary
 
@@ -242,7 +271,25 @@ for every native allocation and handle. No N-API ABI or long-lived native heap i
   and sandbox boundary that actually needs OS APIs.
 - 장점, 단점 및 영향: Idle and adversarial paths retain bounded memory and fewer transient copies;
   native command containment is now implemented, while signed/notarized binary distribution and
-  exact-binary native CI remain release work.
+exact-binary native CI remain release work.
+
+[Decision Log]
+- 목적과 의도: Keep the unauthenticated one-time pairing exchange from becoming a public scanning
+  or resource-noise surface without pretending rate limiting protects a code that was already
+  disclosed.
+- 기존 구현 및 제약 조건: Pairing codes carry 60 bits of entropy, expire after ten minutes, and
+  are one-use, but every well-formed guess still reached the grant lookup. Public listeners see a
+  kernel peer, while a Tailscale Serve management ingress deliberately terminates on loopback.
+- 검토한 주요 대안: Rely on code entropy alone, trust forwarding headers, persist IP addresses,
+  globally limit all clients, or apply a bounded per-source failure window.
+- 선택한 방식: Hash the kernel-observed peer on every listener, block the tenth failed code for the
+  remainder of a fixed ten-minute window, cap state at 1,024 sources, and return a generic 429 with
+  Retry-After before parsing later bodies.
+- 다른 대안 대신 이 방식을 선택한 이유: It follows the existing GUI-pairing boundary, does not
+  persist network identity, cannot grow without bound, and does not weaken one-use grant handling.
+- 장점, 단점 및 영향: Internet noise is bounded and legitimate successful pairing clears its
+  source record. Clients sharing a proxy also share its kernel-peer bucket, which is the fail-closed
+  tradeoff for refusing spoofable forwarded identities.
 
 ## Known release boundary
 

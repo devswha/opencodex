@@ -34,6 +34,9 @@ const MAX_PAIRING_GRANTS = 16;
 const MAX_HUB_STATE_BYTES = 1024 * 1024;
 const TOKEN_PREFIX = "ocxrw_";
 const PAIRING_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+const PAIRING_SOURCE_WINDOW_MS = 10 * 60_000;
+const PAIRING_SOURCE_FAILURE_LIMIT = 10;
+const PAIRING_SOURCE_LIMIT = 1_024;
 
 export interface RemoteWorkspaceRootAdvertisement {
   id: string;
@@ -97,6 +100,21 @@ export interface RemoteWorkspacePairDeviceResult {
 interface PendingPairingGrant {
   hash: Buffer;
   expiresAt: number;
+}
+
+interface PairingSourceFailureRecord {
+  failures: number;
+  windowStartedAt: number;
+}
+
+export class RemoteWorkspacePairingRateLimitError extends Error {
+  constructor(
+    readonly retryAfterSeconds: number,
+    readonly reason: "source" | "capacity",
+  ) {
+    super("remote workspace pairing rate limit exceeded");
+    this.name = "RemoteWorkspacePairingRateLimitError";
+  }
 }
 
 function sha256(value: string): Buffer {
@@ -275,6 +293,7 @@ export class RemoteWorkspaceHubFileStore implements RemoteWorkspaceHubStateStore
 export class RemoteWorkspaceHub {
   private state: RemoteWorkspaceHubState;
   private readonly grants = new Map<string, PendingPairingGrant>();
+  private readonly pairingSourceFailures = new Map<string, PairingSourceFailureRecord>();
   private readonly connections = new Map<string, RemoteWorkspaceHubAgentConnection>();
 
   constructor(
@@ -308,19 +327,72 @@ export class RemoteWorkspaceHub {
     return { code, expiresAt: new Date(expiresAt).toISOString() };
   }
 
-  pairDevice(input: unknown): RemoteWorkspacePairDeviceResult {
+  private pairingSourceKey(source: string): string {
+    return encodeHash(sha256(`remote-workspace-pairing-source\0${source}`));
+  }
+
+  private prunePairingSourceFailures(now: number): void {
+    // Records never extend their original fixed window, so insertion order is expiry order. Stop
+    // at the first live entry instead of making every unauthenticated request scan the full cap.
+    for (const [key, record] of this.pairingSourceFailures) {
+      if (record.windowStartedAt + PAIRING_SOURCE_WINDOW_MS > now) break;
+      this.pairingSourceFailures.delete(key);
+    }
+  }
+
+  private pairingSourceRecord(source: string, now: number): [string, PairingSourceFailureRecord | undefined] {
+    this.prunePairingSourceFailures(now);
+    const key = this.pairingSourceKey(source);
+    return [key, this.pairingSourceFailures.get(key)];
+  }
+
+  private admitPairingSource(source: string, now: number): string {
+    const [key, record] = this.pairingSourceRecord(source, now);
+    if (record && record.failures >= PAIRING_SOURCE_FAILURE_LIMIT) {
+      const remaining = Math.max(1, record.windowStartedAt + PAIRING_SOURCE_WINDOW_MS - now);
+      throw new RemoteWorkspacePairingRateLimitError(Math.ceil(remaining / 1000), "source");
+    }
+    return key;
+  }
+
+  assertPairingSourceAllowed(source = "anonymous"): void {
+    this.admitPairingSource(source, this.now());
+  }
+
+  private recordPairingSourceFailure(key: string, now: number): void {
+    let record = this.pairingSourceFailures.get(key);
+    if (!record) {
+      if (this.pairingSourceFailures.size >= PAIRING_SOURCE_LIMIT) {
+        throw new RemoteWorkspacePairingRateLimitError(1, "capacity");
+      }
+      record = { failures: 0, windowStartedAt: now };
+      this.pairingSourceFailures.set(key, record);
+    }
+    record.failures += 1;
+    if (record.failures >= PAIRING_SOURCE_FAILURE_LIMIT) {
+      const remaining = Math.max(1, record.windowStartedAt + PAIRING_SOURCE_WINDOW_MS - now);
+      throw new RemoteWorkspacePairingRateLimitError(Math.ceil(remaining / 1000), "source");
+    }
+  }
+
+  pairDevice(input: unknown, source = "anonymous"): RemoteWorkspacePairDeviceResult {
     this.pruneGrants();
+    const nowMs = this.now();
+    const sourceKey = this.admitPairingSource(source, nowMs);
     const raw = objectRecord(input);
     const normalizedCode = normalizeCode(typeof raw.code === "string" ? raw.code : "");
     if (normalizedCode.length !== 12 || ![...normalizedCode].every(character => PAIRING_ALPHABET.includes(character))) {
+      this.recordPairingSourceFailure(sourceKey, nowMs);
       throw new Error("invalid or expired remote workspace pairing code");
     }
     const digest = sha256(normalizedCode);
     const key = encodeHash(digest);
     const grant = this.grants.get(key);
-    if (!grant || grant.expiresAt <= this.now() || !timingSafeEqual(grant.hash, digest)) {
+    if (!grant || grant.expiresAt <= nowMs || !timingSafeEqual(grant.hash, digest)) {
+      this.recordPairingSourceFailure(sourceKey, nowMs);
       throw new Error("invalid or expired remote workspace pairing code");
     }
+    this.pairingSourceFailures.delete(sourceKey);
     // A valid grant is one-shot even when the submitted device metadata is rejected. Keeping it
     // alive after a conflict would let the same copied secret authorize repeated enrollment tries.
     this.grants.delete(key);
@@ -331,7 +403,7 @@ export class RemoteWorkspaceHub {
     if (this.state.devices.some(device => device.name.toLocaleLowerCase("en-US") === folded)) {
       throw new Error("remote workspace device name is already in use");
     }
-    const now = new Date(this.now()).toISOString();
+    const now = new Date(nowMs).toISOString();
     const token = `${TOKEN_PREFIX}${randomBytes(32).toString("base64url")}`;
     const device: RemoteWorkspaceStoredDevice = {
       id: randomUUID(),

@@ -427,7 +427,8 @@ Linux private dogfood의 양쪽 실행 경계는 구현됐다. 컴1 Codex에는 
 않으면 실행은 fail closed한다.
 
 Windows/macOS의 동등한 command sandbox는 좁은 Rust helper로 구현했다. macOS는 per-command Seatbelt,
-Windows는 capability 없는 AppContainer와 creation-time Job Object를 사용한다. 두 플랫폼 모두 실제
+Windows는 capability 없는 AppContainer를 suspended 상태로 만들고 첫 instruction 전에 Job Object에
+붙인 뒤 resume한다. 두 플랫폼 모두 실제
 workspace 쓰기는 성공하고 인접 파일 read/write와 live loopback 연결은 실패해야만 exec capability를
 광고한다. helper binary는 pairing 때 SHA-256을 고정하고 command마다 다시 확인한다.
 
@@ -442,15 +443,21 @@ current `dev` rebase와 실제 세 대의 컴퓨터 acceptance를 끝내기 전�
   종료하며, 임시 폴더 삭제는 AV/indexer의 짧은 lock을 bounded retry한다.
 - macOS Hub: 실행 argv를 shell 없이 그대로 유지하고 deny-local profile에는 macOS 최소 PATH를 쓴다.
 - macOS Executor: digest-pinned Rust helper가 Seatbelt default-deny profile에서 writable workspace,
-  read-only system/toolchain paths만 노출하고 전용 process group 전체를 deadline/cancel 때 정리한다.
+  read-only system/toolchain paths만 노출한다. macOS에는 unprivileged Job Object/cgroup 동등물이
+  없고 fork된 자식은 `setsid()`로 process group을 벗어날 수 있으므로, 현재 helper는 subprocess
+  생성을 거부한다. 따라서 deadline/cancel 뒤 workspace writer가 남지 않지만, 자식 프로세스가 필요한
+  명령은 fail closed한다.
 - Windows Executor: 고유 AppContainer SID에 workspace modify와 toolchain read/execute ACL만 임시로
-  부여한다. non-breakaway kill-on-close Job을 process 생성 시 붙이고 stdin/stdout/stderr 세 handle만
-  명시적으로 상속하며, command가 끝나면 Job, SID profile, ACL을 정리한다.
+  부여한다. non-breakaway kill-on-close Job을 primary thread가 suspended인 동안 붙이고
+  stdin/stdout/stderr 세 handle만 명시적으로 상속하며, command가 끝나면 Job, SID profile, ACL을
+  정리한다. writable profile environment는 workspace-owned temporary directory만 가리킨다.
 - Linux Hub/Executor: Hub argv는 shell 없이 유지한다. Executor는 `bwrap` 파일 존재가 아니라 실제
   PID/IPC/UTS/network namespace probe가 성공할 때만 `workspace.exec`를 광고한다.
 - 모든 Executor: 한 기기의 file/exec 작업을 직렬화하고, 열린 파일 descriptor와 현재 path identity를
   I/O 전후 비교하며, write hash를 atomic replace 직전에 다시 확인한다. 승인된 root filesystem
-  identity를 고정하고 toolchain root는 command마다 symlink 여부를 다시 확인한다.
+  identity를 고정하고 toolchain root는 command마다 symlink 여부를 다시 확인한다. hardlink는 다른
+  path의 동일 inode를 path sandbox가 구분할 수 없으므로 file read/write에서 거부하고, command 전에는
+  최대 250,000개 entry를 검사해 multi-link 항목이 있으면 exec를 fail closed한다.
 - 재연결 capability는 페어링 당시 grant와 현재 OS sandbox 지원의 교집합만 광고한다. sandbox가
   사라지면 권한을 줄일 수 있지만, 재연결만으로 사용자가 승인하지 않은 exec 권한을 늘리지 않는다.
 - Windows 파일 경계: `NUL`, `CON`, `COM1` 같은 device 이름, NTFS ADS, trailing dot/space alias를
@@ -461,11 +468,13 @@ current `dev` rebase와 실제 세 대의 컴퓨터 acceptance를 끝내기 전�
   자체적으로 settle되어 reconnect loop나 종료를 붙잡지 않는다. Linux/macOS CLI는 SIGTERM grace
   뒤에도 남아 있으면 해당 자식에만 SIGKILL을 보내 Hub session 밖으로 고아가 되지 않게 한다.
 
-현재 Linux VM은 외부 실행 환경의 network namespace 제한 때문에 bubblewrap 실제 probe가 실패한다.
-따라서 이 장비에서 `workspace.exec`는 의도대로 광고되지 않고 파일 도구만 제공된다. 이는 기능 실패를
-숨기는 fallback이 아니라 capability fail-closed 동작이다. Rust source의 Linux unit test와
-macOS/Windows cross-target typecheck는 통과했지만, 실제 Windows/macOS confinement probe와
-3-computer acceptance 전에는 세 OS production-ready라고 주장하지 않는다.
+일부 Linux VM/컨테이너는 외부 실행 환경의 network namespace 제한 때문에 bubblewrap 실제 probe가
+실패한다. 그런 장비에서는 `workspace.exec`가 의도대로 광고되지 않고 파일 도구만 제공된다. 이는 기능
+실패를 숨기는 fallback이 아니라 capability fail-closed 동작이다. PR CI의 별도 Ubuntu hosted lane은
+bubblewrap을 명시적으로 설치하고 production runner/Bun mount, workspace write, adjacent read/write와
+hardlink denial, live loopback denial, cancel 뒤 detached child 미생존을 실행 증명한다. 실제
+Windows/macOS confinement probe와 3-computer acceptance까지 통과하기 전에는 세 OS production-ready라고
+주장하지 않는다.
 
 [Decision Log]
 - 목적과 의도: 세 OS에서 지원되는 기능만 정확히 광고하면서 Hub CLI와 Executor 파일 경계가 OS별

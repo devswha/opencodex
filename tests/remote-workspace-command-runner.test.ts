@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -104,6 +104,7 @@ describe("remote workspace Linux command sandbox", () => {
     expect(nativeRemoteWorkspaceCommandRunnerAvailable({
       helper,
       platform: "darwin",
+      writableRoots: [state.workspace],
       probe(request) {
         probeRequest = request;
         return { version: 1, ok: true, probe: true };
@@ -112,12 +113,17 @@ describe("remote workspace Linux command sandbox", () => {
     expect(probeRequest).toEqual({ version: 1, operation: "probe" });
     expect(createPlatformRemoteWorkspaceCommandRunner({
       platform: "win32",
-      native: { helper, probe: () => ({ version: 1, ok: false, error: "not confined" }) },
+      native: {
+        helper,
+        writableRoots: [state.workspace],
+        probe: () => ({ version: 1, ok: false, error: "not confined" }),
+      },
     })).toBeUndefined();
     writeFileSync(helper.path, "replaced", { mode: 0o700 });
     expect(nativeRemoteWorkspaceCommandRunnerAvailable({
       helper,
       platform: "darwin",
+      writableRoots: [state.workspace],
       probe: () => ({ version: 1, ok: true, probe: true }),
     })).toBe(false);
   });
@@ -135,6 +141,7 @@ describe("remote workspace Linux command sandbox", () => {
     const runner = createNativeRemoteWorkspaceCommandRunner({
       helper,
       platform: "darwin",
+      writableRoots: [state.workspace],
       probe: () => ({ version: 1, ok: true, probe: true }),
     });
     const result = await runner.run({
@@ -172,6 +179,7 @@ describe("remote workspace Linux command sandbox", () => {
     const runner = createNativeRemoteWorkspaceCommandRunner({
       helper,
       platform: "win32",
+      writableRoots: [state.workspace],
       probe: () => ({ version: 1, ok: true, probe: true }),
     });
     await expect(runner.run({
@@ -181,6 +189,52 @@ describe("remote workspace Linux command sandbox", () => {
       timeoutMs: 5_000,
       maxOutputBytes: 4_096,
     })).rejects.toThrow("invalid stdout");
+  });
+
+  test("never advertises or invokes a native helper from inside a writable workspace", async () => {
+    const state = fixture();
+    const helper = fakeNativeHelper(state.workspace, {
+      version: 1,
+      ok: true,
+      exitCode: 0,
+      stdoutBase64: "",
+      stderrBase64: "",
+    });
+    expect(createPlatformRemoteWorkspaceCommandRunner({
+      platform: "darwin",
+      native: {
+        helper,
+        writableRoots: [state.workspace],
+        probe: () => ({ version: 1, ok: true, probe: true }),
+      },
+    })).toBeUndefined();
+
+  });
+
+  test("binds every native command to the runner's construction-time writable roots", async () => {
+    const state = fixture();
+    const other = join(state.root, "other-workspace");
+    mkdirSync(other);
+    const helper = fakeNativeHelper(state.root, {
+      version: 1,
+      ok: true,
+      exitCode: 0,
+      stdoutBase64: "",
+      stderrBase64: "",
+    });
+    const runner = createNativeRemoteWorkspaceCommandRunner({
+      helper,
+      platform: "darwin",
+      writableRoots: [state.workspace],
+      probe: () => ({ version: 1, ok: true, probe: true }),
+    });
+    await expect(runner.run({
+      command: ["/usr/bin/true"],
+      root: other,
+      cwd: other,
+      timeoutMs: 5_000,
+      maxOutputBytes: 4_096,
+    })).rejects.toThrow("outside the native runner grant");
   });
 
   test("revalidates approved toolchain roots and rejects a later symlink substitution", () => {
@@ -199,6 +253,23 @@ describe("remote workspace Linux command sandbox", () => {
       bubblewrapPath: process.execPath,
       toolchainRoots: [substituted],
     })).toThrow("remain a real directory");
+  });
+
+  test("rejects a pre-existing hardlink before starting a workspace command", async () => {
+    const state = fixture();
+    linkSync(state.outside, join(state.workspace, "outside-alias"));
+    const runner = createLinuxRemoteWorkspaceCommandRunner({
+      bubblewrapPath: process.execPath,
+      spawn: (() => { throw new Error("sandbox spawn must not be reached"); }) as typeof Bun.spawn,
+    });
+    await expect(runner.run({
+      command: ["/bin/true"],
+      root: state.workspace,
+      cwd: state.workspace,
+      timeoutMs: 1_000,
+      maxOutputBytes: 4_096,
+    })).rejects.toThrow("hard-linked file");
+    expect(readFileSync(state.outside, "utf8")).toBe("must-not-be-visible");
   });
 
   test("the production Linux runner exposes only the current OCX Bun file, not its host directory", async () => {

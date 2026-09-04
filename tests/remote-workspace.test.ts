@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdirSync,
+  linkSync,
   mkdtempSync,
   readFileSync,
   renameSync,
@@ -263,6 +264,26 @@ describe("remote workspace coordinator and executor", () => {
     expect(symlink.ok).toBe(false);
     expect(symlink.error).toContain("symlink");
     expect(readFileSync(join(state.main, "project", "marker.txt"), "utf8")).toBe("main-only");
+  });
+
+  test("rejects hardlink aliases for both file reads and writes", async () => {
+    const state = fixture();
+    const outside = join(state.main, "project", "marker.txt");
+    linkSync(outside, join(state.executorRoot, "project", "outside-alias.txt"));
+    const read = responseValue(await state.coordinator.handle(state.request("read_file", {
+      path: "project/outside-alias.txt",
+    })));
+    expect(read.ok).toBe(false);
+    expect(read.error).toContain("hard-linked");
+
+    const write = responseValue(await state.coordinator.handle(state.request("write_file", {
+      path: "project/outside-alias.txt",
+      content: "escaped",
+      expectedSha256: sha256("main-only"),
+    })));
+    expect(write.ok).toBe(false);
+    expect(write.error).toContain("hard-linked");
+    expect(readFileSync(outside, "utf8")).toBe("main-only");
   });
 
   test("rejects a workspace root replaced after local approval", async () => {

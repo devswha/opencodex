@@ -10,6 +10,8 @@ use crate::protocol::{CommandOutcome, HelperRequest};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::net::TcpStream;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 #[cfg(target_os = "macos")]
 pub use macos::{probe, run};
@@ -40,6 +42,9 @@ pub fn run_probe_child() -> i32 {
     let Some(listener_address) = args.next() else {
         return 23;
     };
+    let Some(existing_workspace_file) = args.next() else {
+        return 24;
+    };
     if args.next().is_some() {
         return 24;
     }
@@ -47,6 +52,11 @@ pub fn run_probe_child() -> i32 {
     let marker = std::path::Path::new(&workspace).join("probe-marker");
     if fs::write(&marker, b"sandboxed").is_err() {
         return 25;
+    }
+    if !matches!(fs::read(&existing_workspace_file), Ok(value) if value == b"existing")
+        || fs::write(&existing_workspace_file, b"updated").is_err()
+    {
+        return 29;
     }
     let mut outside = Vec::new();
     if OpenOptions::new()
@@ -62,6 +72,28 @@ pub fn run_probe_child() -> i32 {
     }
     if TcpStream::connect(listener_address).is_ok() {
         return 28;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // A macOS process group cannot contain a descendant that calls setsid(). Seatbelt must
+        // therefore deny both direct fork and the ordinary posix_spawn path; otherwise a command
+        // could retain workspace-write authority after its Remote Workspace session is stopped.
+        // SAFETY: the probe performs no allocation or lock-sensitive work in the child before
+        // immediately calling _exit; the parent synchronously reaps it when the sandbox regresses.
+        let forked = unsafe { libc::fork() };
+        if forked == 0 {
+            // SAFETY: this is the post-fork probe child and must not run Rust destructors.
+            unsafe { libc::_exit(0) };
+        }
+        if forked > 0 {
+            let mut status = 0;
+            // SAFETY: forked is the positive PID returned to this parent and status is writable.
+            unsafe { libc::waitpid(forked, &mut status, 0) };
+            return 30;
+        }
+        if Command::new("/usr/bin/true").status().is_ok() {
+            return 30;
+        }
     }
     0
 }

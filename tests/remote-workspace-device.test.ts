@@ -75,8 +75,8 @@ describe("remote workspace device enrollment", () => {
       agentUrl: "wss://hub.example.test/remote-workspace/agent",
       deviceName: "Computer 2",
       devicePlatform: "linux-x64",
-      roots: [{ label: "Main project", path: workspace }],
-      toolchainRoots: [toolchain],
+      roots: [{ label: "Main project", path: realpathSync(workspace) }],
+      toolchainRoots: [realpathSync(toolchain)],
     });
     expect(state.nativeHelper?.path).toBe(realpathSync(nativeHelper));
     expect(state.nativeHelper?.sha256).toMatch(/^[0-9a-f]{64}$/);

@@ -1139,6 +1139,37 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             headers: { "cache-control": "no-store" },
           });
         }
+        const [{ remoteWorkspaceHubForConfig }, { RemoteWorkspacePairingRateLimitError }] = await Promise.all([
+          import("../remote-control/workspace-runtime"),
+          import("../remote-control/workspace-hub"),
+        ]);
+        const hub = deps.managementApi?.remoteWorkspaceHub ?? remoteWorkspaceHubForConfig(config);
+        // A loopback socket alone cannot prove that Tailscale Serve supplied its identity header:
+        // another local process can connect directly and forge it. Pairing therefore uses only the
+        // kernel-observed peer on every listener; proxied management users intentionally share the
+        // loopback bucket rather than gaining a header-rotation bypass.
+        const peer = requestServer.requestIP(req)?.address ?? "unknown";
+        const pairingSource = `${ingress}:${peer}`;
+        const rateLimitResponse = (error: unknown): Response | null => {
+          if (!(error instanceof RemoteWorkspacePairingRateLimitError)) return null;
+          return Response.json({ error: "Remote Workspace pairing is temporarily rate limited." }, {
+            status: 429,
+            headers: {
+              "cache-control": "no-store",
+              "retry-after": String(error.retryAfterSeconds),
+            },
+          });
+        };
+        try {
+          // Check the existing source block before reading or parsing an attacker-controlled body.
+          // pairDevice checks again after the await and records only code-shaped authentication
+          // failures, so malformed JSON cannot allocate one limiter entry per request.
+          hub.assertPairingSourceAllowed(pairingSource);
+        } catch (error) {
+          const limited = rateLimitResponse(error);
+          if (limited) return limited;
+          throw error;
+        }
         const declaredLength = Number(req.headers.get("content-length") ?? "0");
         if (!Number.isFinite(declaredLength) || declaredLength > REMOTE_WORKSPACE_PAIRING_BODY_LIMIT) {
           return Response.json({ error: "Remote Workspace pairing body is too large." }, { status: 413 });
@@ -1159,11 +1190,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           return Response.json({ error: "Invalid Remote Workspace pairing request." }, { status: 400 });
         }
         try {
-          const { remoteWorkspaceHubForConfig } = await import("../remote-control/workspace-runtime");
-          const hub = deps.managementApi?.remoteWorkspaceHub ?? remoteWorkspaceHubForConfig(config);
-          const paired = hub.pairDevice(record);
+          const paired = hub.pairDevice(record, pairingSource);
           return Response.json(paired, { status: 201, headers: { "cache-control": "no-store" } });
         } catch (error) {
+          const limited = rateLimitResponse(error);
+          if (limited) return limited;
           const message = error instanceof Error ? error.message : "Remote Workspace pairing failed.";
           const conflict = /already in use|limit reached/i.test(message);
           return Response.json({ error: message }, {

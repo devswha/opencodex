@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   RemoteWorkspaceHub,
   RemoteWorkspaceHubAgentConnection,
+  RemoteWorkspacePairingRateLimitError,
   REMOTE_WORKSPACE_AGENT_PROTOCOL_VERSION,
   generateRemoteControlIdentityKeyPair,
   parseRemoteWorkspaceHubState,
@@ -82,6 +83,54 @@ describe("remote workspace hub registry", () => {
       publicKey: generateRemoteControlIdentityKeyPair().publicKey,
       roots: [{ id: randomUUID(), label: "Other" }],
     })).toThrow("invalid or expired");
+  });
+
+  test("bounds invalid pairing attempts by hashed source, expiry, and map capacity", () => {
+    let now = Date.parse("2026-09-03T12:00:00.000Z");
+    const hub = new RemoteWorkspaceHub(new MemoryStore(), () => now);
+    const invalid = (source: string) => hub.pairDevice({ code: "AAAA-BBBB-CCCC" }, source);
+    for (let attempt = 1; attempt < 10; attempt += 1) {
+      expect(() => invalid("peer:192.0.2.10")).toThrow("invalid or expired");
+    }
+    let limited: unknown;
+    try { invalid("peer:192.0.2.10"); } catch (error) { limited = error; }
+    expect(limited).toBeInstanceOf(RemoteWorkspacePairingRateLimitError);
+    expect(limited).toMatchObject({ reason: "source", retryAfterSeconds: 600 });
+
+    for (let attempt = 1; attempt < 10; attempt += 1) {
+      expect(() => invalid("peer:192.0.2.11")).toThrow("invalid or expired");
+    }
+    const identity = generateRemoteControlIdentityKeyPair();
+    const grant = hub.createPairingGrant();
+    expect(hub.pairDevice({
+      code: grant.code,
+      name: "Computer 2",
+      platform: "linux-x64",
+      publicKey: identity.publicKey,
+      roots: [{ id: randomUUID(), label: "Project" }],
+    }, "peer:192.0.2.11").device.name).toBe("Computer 2");
+    expect(() => invalid("peer:192.0.2.11")).toThrow("invalid or expired");
+
+    now += 10 * 60_000 + 1;
+    const afterExpiry = hub.createPairingGrant();
+    expect(hub.pairDevice({
+      code: afterExpiry.code,
+      name: "Computer 3",
+      platform: "linux-x64",
+      publicKey: generateRemoteControlIdentityKeyPair().publicKey,
+      roots: [{ id: randomUUID(), label: "Other" }],
+    }, "peer:192.0.2.10").device.name).toBe("Computer 3");
+
+    const capped = new RemoteWorkspaceHub(new MemoryStore(), () => now);
+    for (let source = 0; source < 1_024; source += 1) {
+      expect(() => capped.pairDevice({ code: "AAAA-BBBB-CCCC" }, `peer:${source}`))
+        .toThrow("invalid or expired");
+    }
+    let capacity: unknown;
+    try { capped.pairDevice({ code: "AAAA-BBBB-CCCC" }, "peer:overflow"); }
+    catch (error) { capacity = error; }
+    expect(capacity).toBeInstanceOf(RemoteWorkspacePairingRateLimitError);
+    expect(capacity).toMatchObject({ reason: "capacity", retryAfterSeconds: 1 });
   });
 
   test("tracks online presence, replaces reconnects, and revokes the device", () => {

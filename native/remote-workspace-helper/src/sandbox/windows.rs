@@ -22,17 +22,18 @@ use windows_sys::Win32::Security::Isolation::{
 };
 use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES};
 use windows_sys::Win32::System::JobObjects::{
-    CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForSingleObject,
 };
 
 const MAX_JOB_PROCESSES: u32 = 256;
@@ -445,7 +446,22 @@ fn invocation(
     }
 }
 
-fn environment(paths: &CanonicalPaths, system32: &Path, temporary: &Path) -> Vec<u16> {
+fn ordinary_windows_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    value
+        .strip_prefix(r"\\?\")
+        .unwrap_or(value.as_ref())
+        .to_owned()
+}
+
+fn environment(
+    paths: &CanonicalPaths,
+    system32: &Path,
+    temporary: &Path,
+) -> Result<Vec<u16>, String> {
     let path = paths
         .toolchain_roots
         .iter()
@@ -456,29 +472,45 @@ fn environment(paths: &CanonicalPaths, system32: &Path, temporary: &Path) -> Vec
             ]
             .iter(),
         )
-        .map(|value| value.to_string_lossy())
+        .map(|value| ordinary_windows_path(value))
         .collect::<Vec<_>>()
         .join(";");
-    let root = paths.root.to_string_lossy();
-    let temporary = temporary.to_string_lossy();
-    let windows = system32.parent().unwrap_or(system32).to_string_lossy();
-    let values = [
-        format!("ComSpec={}\\cmd.exe", system32.to_string_lossy()),
+    let root = ordinary_windows_path(&paths.root);
+    let temporary = ordinary_windows_path(temporary);
+    let windows = ordinary_windows_path(system32.parent().unwrap_or(system32));
+    let system_drive = windows
+        .get(..2)
+        .filter(|value| value.as_bytes().get(1) == Some(&b':'))
+        .ok_or_else(|| "Windows system drive is unavailable".to_owned())?;
+    let mut values = vec![
+        format!("APPDATA={temporary}"),
+        format!("ComSpec={}\\cmd.exe", ordinary_windows_path(system32)),
         format!("HOME={root}"),
         "LANG=C.UTF-8".to_owned(),
+        format!("LOCALAPPDATA={temporary}"),
         format!("PATH={path}"),
         "PATHEXT=.COM;.EXE;.BAT;.CMD".to_owned(),
+        format!("SystemDrive={system_drive}"),
         format!("SystemRoot={windows}"),
         format!("TEMP={temporary}"),
         format!("TMP={temporary}"),
         format!("USERPROFILE={root}"),
         format!("WINDIR={windows}"),
     ];
-    values
+    // CreateProcessW requires a case-insensitively sorted Unicode environment block. Build only
+    // the OS values needed to start a process and point every user-writable location at the
+    // workspace-owned temporary directory; inheriting the helper environment would expose tokens.
+    values.sort_by_key(|value| {
+        value
+            .split_once('=')
+            .map_or("", |entry| entry.0)
+            .to_ascii_uppercase()
+    });
+    Ok(values
         .iter()
         .flat_map(|value| value.encode_utf16().chain([0]))
         .chain([0])
-        .collect()
+        .collect())
 }
 
 struct WorkspaceTemporaryDirectory(PathBuf);
@@ -627,7 +659,6 @@ fn run_with_paths(
         CapabilityCount: 0,
         Reserved: 0,
     };
-    let job_handle = job.raw();
     let stdout = pipe()?;
     let stderr = pipe()?;
     let stdin = fs::File::open("NUL").map_err(|_| "could not open null input".to_owned())?;
@@ -639,12 +670,11 @@ fn run_with_paths(
         return Err(last_error("could not inherit null input"));
     }
     let inherited_handles = [stdin_handle, stdout.write.raw(), stderr.write.raw()];
-    let mut attributes = AttributeList::create(3)?;
+    let mut attributes = AttributeList::create(2)?;
     attributes.update(
         PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
         &security,
     )?;
-    attributes.update(PROC_THREAD_ATTRIBUTE_JOB_LIST as usize, &job_handle)?;
     attributes.update_slice(
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
         &inherited_handles,
@@ -659,7 +689,7 @@ fn run_with_paths(
     let mut information = PROCESS_INFORMATION::default();
     let application = wide(executable.as_os_str());
     let cwd = wide(paths.cwd.as_os_str());
-    let environment = environment(&paths, &system32, &temporary.0);
+    let environment = environment(&paths, &system32, &temporary.0)?;
     // SAFETY: every pointer references initialized, live, NUL-terminated storage. Inherited handles
     // are limited to the three standard handles, and both process attributes stay alive for the call.
     let created = unsafe {
@@ -669,7 +699,10 @@ fn run_with_paths(
             null(),
             null(),
             1,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+            EXTENDED_STARTUPINFO_PRESENT
+                | CREATE_UNICODE_ENVIRONMENT
+                | CREATE_NO_WINDOW
+                | CREATE_SUSPENDED,
             environment.as_ptr().cast(),
             cwd.as_ptr(),
             &startup.StartupInfo as *const _,
@@ -681,6 +714,25 @@ fn run_with_paths(
     }
     let process = OwnedHandle::new(information.hProcess, "invalid command process handle")?;
     let thread_handle = OwnedHandle::new(information.hThread, "invalid command thread handle")?;
+    // Assign while the primary thread is still suspended. No command instruction can run outside
+    // the non-breakaway, kill-on-close job, while this path remains compatible with hosted Windows
+    // environments that reject PROC_THREAD_ATTRIBUTE_JOB_LIST during CreateProcessW.
+    if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
+        let error = last_error("could not assign AppContainer command to its job");
+        // SAFETY: the process is still suspended and owned by this helper.
+        unsafe {
+            TerminateProcess(process.raw(), 1);
+            WaitForSingleObject(process.raw(), 2_000);
+        }
+        return Err(error);
+    }
+    // SAFETY: thread_handle owns the suspended primary thread created above.
+    if unsafe { ResumeThread(thread_handle.raw()) } == u32::MAX {
+        let error = last_error("could not resume AppContainer command");
+        // SAFETY: the job owns the process and is configured to contain every descendant.
+        unsafe { TerminateJobObject(job.raw(), 1) };
+        return Err(error);
+    }
     drop(thread_handle);
     drop(stdout.write);
     drop(stderr.write);
@@ -723,7 +775,8 @@ fn run_with_paths(
             }
         }
     }
-    // The job is creation-time attached, cannot break away, and is kill-on-close. Terminating it
+    // The job was attached before the primary thread resumed, cannot break away, and is
+    // kill-on-close. Terminating it
     // also closes pipes held by background descendants before collector threads are joined.
     // SAFETY: job is a valid handle owned by this helper.
     let terminated = unsafe { TerminateJobObject(job.raw(), 1) } != 0;
@@ -776,10 +829,14 @@ pub fn probe() -> Result<(), String> {
     let parent =
         std::env::temp_dir().join(format!("ocx-remote-probe-{}-{nonce}", std::process::id()));
     let workspace = parent.join("workspace");
+    let nested_workspace = workspace.join("src");
+    let existing_workspace_file = nested_workspace.join("existing.txt");
     let outside_file = parent.join("outside-secret");
     let outside_write = parent.join("outside-write");
-    fs::create_dir_all(&workspace)
+    fs::create_dir_all(&nested_workspace)
         .map_err(|_| "could not create confinement probe workspace".to_owned())?;
+    fs::write(&existing_workspace_file, b"existing")
+        .map_err(|_| "could not create confinement probe workspace fixture".to_owned())?;
     fs::write(&outside_file, b"must-not-be-visible")
         .map_err(|_| "could not create confinement probe sentinel".to_owned())?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
@@ -810,6 +867,7 @@ pub fn probe() -> Result<(), String> {
             to_string(&outside_file)?,
             to_string(&outside_write)?,
             address.to_string(),
+            to_string(&existing_workspace_file)?,
         ],
         toolchain_roots: vec![to_string(helper_parent)?],
         timeout_ms: 5_000,
@@ -822,14 +880,84 @@ pub fn probe() -> Result<(), String> {
         fs::read(workspace.join("probe-marker")),
         Ok(value) if value == b"sandboxed"
     );
+    let existing_workspace_ok = matches!(
+        fs::read(&existing_workspace_file),
+        Ok(value) if value == b"updated"
+    );
     let outside_ok = matches!(
         fs::read(&outside_file),
         Ok(value) if value == b"must-not-be-visible"
     ) && !outside_write.exists();
     let cleanup = fs::remove_dir_all(&parent);
     let outcome = result?;
-    if cleanup.is_err() || !marker_ok || !outside_ok || outcome.exit_code != 0 {
+    if cleanup.is_err()
+        || !marker_ok
+        || !existing_workspace_ok
+        || !outside_ok
+        || outcome.exit_code != 0
+    {
         return Err("Windows AppContainer confinement probe failed".to_owned());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn environment_strings(block: &[u16]) -> Vec<String> {
+        block
+            .split(|value| *value == 0)
+            .take_while(|value| !value.is_empty())
+            .map(|value| String::from_utf16(value).expect("environment fixture is UTF-16"))
+            .collect()
+    }
+
+    #[test]
+    fn sanitized_environment_is_sorted_complete_and_never_inherits_secrets() {
+        let paths = CanonicalPaths {
+            root: PathBuf::from(r"\\?\C:\workspace"),
+            cwd: PathBuf::from(r"\\?\C:\workspace\project"),
+            toolchain_roots: vec![PathBuf::from(r"\\?\D:\toolchain")],
+        };
+        let block = environment(
+            &paths,
+            Path::new(r"\\?\C:\Windows\System32"),
+            Path::new(r"\\?\C:\workspace\.tmp"),
+        )
+        .expect("environment should be representable");
+        assert!(block.ends_with(&[0, 0]));
+        let values = environment_strings(&block);
+        let mut sorted = values.clone();
+        sorted.sort_by_key(|value| {
+            value
+                .split_once('=')
+                .map_or("", |entry| entry.0)
+                .to_ascii_uppercase()
+        });
+        assert_eq!(values, sorted);
+        assert!(values.contains(&"APPDATA=C:\\workspace\\.tmp".to_owned()));
+        assert!(values.contains(&"LOCALAPPDATA=C:\\workspace\\.tmp".to_owned()));
+        assert!(values.contains(&"SystemDrive=C:".to_owned()));
+        assert!(values.contains(&"SystemRoot=C:\\Windows".to_owned()));
+        assert!(values.contains(&"ComSpec=C:\\Windows\\System32\\cmd.exe".to_owned()));
+        assert!(values.iter().all(|value| !value.contains(r"\\?\")));
+        assert!(values.iter().all(|value| !value.contains("OPENAI_API_KEY")));
+    }
+
+    #[test]
+    fn ordinary_windows_paths_remove_only_verbatim_transport_prefixes() {
+        assert_eq!(
+            ordinary_windows_path(Path::new(r"\\?\C:\workspace")),
+            r"C:\workspace",
+        );
+        assert_eq!(
+            ordinary_windows_path(Path::new(r"\\?\UNC\server\share\workspace")),
+            r"\\server\share\workspace",
+        );
+        assert_eq!(
+            ordinary_windows_path(Path::new(r"C:\workspace")),
+            r"C:\workspace",
+        );
+    }
 }
