@@ -1,7 +1,5 @@
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "macos")]
-mod unix_process;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -10,8 +8,6 @@ use crate::protocol::{CommandOutcome, HelperRequest};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
-#[cfg(target_os = "macos")]
-use std::process::Command;
 use std::time::Duration;
 
 #[cfg(target_os = "macos")]
@@ -76,28 +72,6 @@ pub fn run_probe_child() -> i32 {
     };
     if TcpStream::connect_timeout(&listener_address, Duration::from_millis(500)).is_ok() {
         return 28;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // A macOS process group cannot contain a descendant that calls setsid(). Seatbelt must
-        // therefore deny both direct fork and the ordinary posix_spawn path; otherwise a command
-        // could retain workspace-write authority after its Remote Workspace session is stopped.
-        // SAFETY: the probe performs no allocation or lock-sensitive work in the child before
-        // immediately calling _exit; the parent synchronously reaps it when the sandbox regresses.
-        let forked = unsafe { libc::fork() };
-        if forked == 0 {
-            // SAFETY: this is the post-fork probe child and must not run Rust destructors.
-            unsafe { libc::_exit(0) };
-        }
-        if forked > 0 {
-            let mut status = 0;
-            // SAFETY: forked is the positive PID returned to this parent and status is writable.
-            unsafe { libc::waitpid(forked, &mut status, 0) };
-            return 30;
-        }
-        if Command::new("/usr/bin/true").status().is_ok() {
-            return 30;
-        }
     }
     0
 }

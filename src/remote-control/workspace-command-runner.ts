@@ -272,7 +272,7 @@ function assertNativeHelperOutsideWritableRoots(
     if (inside(canonicalRoot, helper.path)) {
       // A sandboxed command can write anywhere below its approved root. Executing the sandbox
       // helper from that same tree would turn the hash-then-spawn pathname into a writable trust
-      // anchor, especially if a detached macOS descendant survives after the command returns.
+      // anchor that a workspace command can replace before a later invocation.
       throw new Error("remote workspace native helper must be outside every writable workspace root");
     }
     canonicalRoots.push(canonicalRoot);

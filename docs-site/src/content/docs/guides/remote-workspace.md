@@ -20,9 +20,11 @@ router port-forward.
 :::caution[Private dogfood]
 Remote Workspace is currently implemented on its feature branch and is not yet part of a stable
 release. Linux supports file tools and conditionally supports sandboxed commands. macOS and Windows
-use the separately built Rust Executor helper described below. On every platform, commands are
-advertised only after a real confinement probe succeeds. Missing helpers, replaced helper bytes,
-unsupported OS policy, and restricted containers degrade to file tools only.
+have file tools, while Windows additionally uses the separately built Rust Executor helper described
+below for sandboxed commands. macOS command execution is deliberately disabled until OCX can revoke
+every descendant without importing a broad Seatbelt system profile. On supported command platforms,
+commands are advertised only after a real confinement probe succeeds. Missing helpers, replaced
+helper bytes, unsupported OS policy, and restricted containers degrade to file tools only.
 :::
 
 ## Set up the Hub
@@ -81,7 +83,7 @@ printf '%s\n' 'ONE-TIME-CODE' | ocx remote-workspace pair 'https://your-hub.exam
   --toolchain-root "$HOME/.nvm/versions/node/v24/bin"
 ```
 
-For private dogfood on macOS or Windows, build the memory-safe native Executor helper once from the
+For private dogfood on Windows, build the memory-safe native Executor helper once from the
 checked-out OpenCodex source:
 
 ```bash
@@ -92,7 +94,7 @@ The ordinary pair command discovers that release build automatically. An explici
 at another location can be selected with `--executor-helper <absolute-file>`. OCX stores its SHA-256
 digest in the local device record and verifies the bytes again before every probe and command; after
 rebuilding or updating the helper, pair the Executor again. The helper is not uploaded to the Hub.
-Official packages must use the signed/notarized release helper rather than asking end users to build
+Official packages must use the signed Windows release helper rather than asking end users to build
 Rust source; that distribution step remains a release gate for this feature branch.
 
 The one-time code is read from standard input, not command-line arguments. Pairing creates a local
@@ -169,21 +171,19 @@ socket and stops sessions bound to it.
   process namespaces, the current OCX Bun executable as one read-only file, bounded output
   and timeout, and network disabled by default. Hosted CI also cancels a detached-background-process
   attempt and verifies that it cannot write after cancellation.
-- macOS commands run through the Rust helper and a per-command Seatbelt profile. Only system runtime
-  files, explicitly approved read-only toolchains, and the writable workspace are visible; the
-  process group, output, temporary directory, and deadline all have explicit owners. Because macOS
-  has no unprivileged Job Object or cgroup equivalent, the profile denies `fork` and ordinary
-  subprocess creation so a child cannot detach with `setsid()` and keep writing after revocation.
-  Commands that require subprocesses are therefore unavailable on the current macOS helper.
+- macOS advertises file tools only. A process group cannot contain a descendant after it calls
+  `setsid()`, and importing a broad Apple Seatbelt system profile merely to start a command would
+  expose unrelated host-service authority. The native helper therefore rejects both its probe and
+  direct command requests until OCX has a narrow, revocable descendant-containment owner.
 - Windows commands start suspended in a capability-free AppContainer and are attached to a
   kill-on-close Job Object before the first instruction is resumed. A unique AppContainer SID
   receives temporary modify access only to the workspace and read/execute access to approved
   toolchains; the sanitized environment maps writable profile paths into the workspace, and OCX
   removes those grants after the job.
-- The native probe must write inside a disposable workspace, read and modify a pre-existing nested
+- The Windows native probe must write inside a disposable workspace, read and modify a pre-existing nested
   workspace file, fail to read or write an adjacent sentinel, and fail to reach a live loopback
-  listener. On macOS it must also prove that direct `fork` and ordinary subprocess creation are
-  denied. Binary existence alone never enables `workspace.exec`.
+  listener. The macOS hosted probe instead proves that command execution remains explicitly
+  unavailable. Binary existence alone never enables `workspace.exec`.
 - The pinned native helper must be outside every approved writable workspace. OCX checks this both
   before advertising command support and immediately before each command, so workspace code cannot
   replace the binary that enforces its next sandbox.
@@ -199,5 +199,5 @@ blind to its own model conversation.
 
 Remote Workspace does not copy or synchronize credentials to other computers. It is separate from
 Remote Hub provider routing and from any future hosted compute or Super Sync product. A production
-release still requires signed/notarized helper packaging, native CI proof on the exact binaries,
+release still requires signed Windows helper packaging, native CI proof on the exact binaries,
 independent maintainer review, and a real three-computer acceptance run.

@@ -357,8 +357,9 @@ tools가 컴1 사용자 filesystem을 볼 수 없는 OS sandbox가 증명된다.
 - [x] OCX-native dynamic tool executor
 - [x] command/process cancellation
 - [x] Linux/macOS/Windows Hub CLI 실행/종료 lifecycle abstraction (`.cmd` 및 Windows process tree 포함)
-- [x] Executor command sandbox 구현 (Linux bubblewrap, macOS Seatbelt, Windows AppContainer+Job)
-- [ ] exact signed macOS/Windows release binary에서 native confinement probe CI 통과
+- [x] Executor command sandbox 구현 (Linux bubblewrap, Windows AppContainer+Job; macOS file-only)
+- [x] hosted Linux/Windows confinement과 macOS direct-run fail-closed CI
+- [ ] exact signed Windows release binary에서 native confinement probe 통과
 - [ ] signed background-agent artifact/update policy (현재 foreground agent는 자동 재연결)
 
 ### Phase 3 — 컴1 Coordinator
@@ -410,7 +411,7 @@ tools가 컴1 사용자 filesystem을 볼 수 없는 OS sandbox가 증명된다.
 - remote thread가 컴1 local tools로 fallback 가능
 - 컴2 root escape 또는 device/session identity confusion
 - browser/Executor E2EE interop 미검증
-- Windows/macOS/Linux 중 하나라도 lifecycle/PTY cleanup 미검증
+- 지원되는 Windows/Linux command lifecycle 또는 PTY cleanup 미검증
 - config 또는 credentials가 컴2로 복제됨
 - real three-computer acceptance 미완료
 
@@ -426,15 +427,17 @@ Linux private dogfood의 양쪽 실행 경계는 구현됐다. 컴1 Codex에는 
 소유자가 pairing 때 명시해야 한다. command runner가 없거나 capability acknowledgement가 끝나지
 않으면 실행은 fail closed한다.
 
-Windows/macOS의 동등한 command sandbox는 좁은 Rust helper로 구현했다. macOS는 per-command Seatbelt,
-Windows는 capability 없는 AppContainer를 suspended 상태로 만들고 첫 instruction 전에 Job Object에
-붙인 뒤 resume한다. 두 플랫폼 모두 실제
-workspace 쓰기는 성공하고 인접 파일 read/write와 live loopback 연결은 실패해야만 exec capability를
-광고한다. helper binary는 pairing 때 SHA-256을 고정하고 command마다 다시 확인한다.
+Windows command sandbox는 좁은 Rust helper로 구현했다. capability 없는 AppContainer를 suspended
+상태로 만들고 첫 instruction 전에 Job Object에 붙인 뒤 resume한다. 실제 workspace 쓰기는 성공하고
+인접 파일 read/write와 live loopback 연결은 실패해야만 exec capability를 광고한다. helper binary는
+pairing 때 SHA-256을 고정하고 command마다 다시 확인한다. macOS는 모든 descendant를 회수할 좁은
+native owner가 아직 없고 넓은 Seatbelt system profile import는 host service 권한을 늘리므로, 현재
+helper가 probe와 direct run을 모두 거부해 file-only로 fail closed한다.
 
-남은 blocker는 핵심 데이터 흐름의 미구현이 아니라 출시 공정이다. signed/notarized helper 설치와
-업데이트, exact release binary native CI, 선택한 public HTTPS identity, 독립 maintainer review,
-current `dev` rebase와 실제 세 대의 컴퓨터 acceptance를 끝내기 전에는 stable 기능으로 표시하지 않는다.
+남은 blocker는 핵심 데이터 흐름의 미구현이 아니라 출시 공정이다. signed Windows helper 설치와
+업데이트, exact release binary native CI, macOS의 revocable descendant containment, 선택한 public HTTPS
+identity, 독립 maintainer review, current `dev` rebase와 실제 세 대의 컴퓨터 acceptance를 끝내기 전에는
+stable 기능으로 표시하지 않는다.
 
 ## 17. 최종 Windows / macOS / Linux 감사
 
@@ -442,11 +445,9 @@ current `dev` rebase와 실제 세 대의 컴퓨터 acceptance를 끝내기 전�
   `ComSpec`으로 실행한다. Stop은 신뢰된 System32 `taskkill /T /F`로 OCX가 띄운 wrapper tree만
   종료하며, 임시 폴더 삭제는 AV/indexer의 짧은 lock을 bounded retry한다.
 - macOS Hub: 실행 argv를 shell 없이 그대로 유지하고 deny-local profile에는 macOS 최소 PATH를 쓴다.
-- macOS Executor: digest-pinned Rust helper가 Seatbelt default-deny profile에서 writable workspace,
-  read-only system/toolchain paths만 노출한다. macOS에는 unprivileged Job Object/cgroup 동등물이
-  없고 fork된 자식은 `setsid()`로 process group을 벗어날 수 있으므로, 현재 helper는 subprocess
-  생성을 거부한다. 따라서 deadline/cancel 뒤 workspace writer가 남지 않지만, 자식 프로세스가 필요한
-  명령은 fail closed한다.
+- macOS Executor: file tools만 광고한다. unprivileged Job Object/cgroup 동등물이 없고 fork된 자식은
+  `setsid()`로 process group을 벗어날 수 있다. 넓은 Apple system profile을 import해 command를 억지로
+  시작하지 않고 helper의 probe/direct run 양쪽을 거부하므로, deadline/cancel 뒤 남는 writer도 없다.
 - Windows Executor: 고유 AppContainer SID에 workspace modify와 toolchain read/execute ACL만 임시로
   부여한다. non-breakaway kill-on-close Job을 primary thread가 suspended인 동안 붙이고
   stdin/stdout/stderr 세 handle만 명시적으로 상속하며, command가 끝나면 Job, SID profile, ACL을
@@ -472,9 +473,9 @@ current `dev` rebase와 실제 세 대의 컴퓨터 acceptance를 끝내기 전�
 실패한다. 그런 장비에서는 `workspace.exec`가 의도대로 광고되지 않고 파일 도구만 제공된다. 이는 기능
 실패를 숨기는 fallback이 아니라 capability fail-closed 동작이다. PR CI의 별도 Ubuntu hosted lane은
 bubblewrap을 명시적으로 설치하고 production runner/Bun mount, workspace write, adjacent read/write와
-hardlink denial, live loopback denial, cancel 뒤 detached child 미생존을 실행 증명한다. 실제
-Windows/macOS confinement probe와 3-computer acceptance까지 통과하기 전에는 세 OS production-ready라고
-주장하지 않는다.
+hardlink denial, live loopback denial, cancel 뒤 detached child 미생존을 실행 증명한다. 실제 Windows
+confinement probe, macOS file-only fail-closed probe와 3-computer acceptance까지 통과하기 전에는 세 OS
+production-ready라고 주장하지 않는다.
 
 [Decision Log]
 - 목적과 의도: 세 OS에서 지원되는 기능만 정확히 광고하면서 Hub CLI와 Executor 파일 경계가 OS별
@@ -526,5 +527,6 @@ Windows/macOS confinement probe와 3-computer acceptance까지 통과하기 전�
 - [x] Rust native Executor helper에 64 KiB request, 256 KiB combined output, 60초 timeout,
   Windows 256-process Job 상한과 RAII native handle/ACL/profile cleanup 적용
 - [x] macOS/Windows helper source의 cross-target compile과 common Rust unit tests
-- [ ] signed/notarized helper artifact pipeline 및 exact-binary macOS/Windows live probe
+- [ ] signed Windows helper artifact pipeline 및 exact-binary live probe
+- [ ] macOS command execution용 revocable descendant containment 설계와 native proof
 - [ ] PTY streaming은 command RPC와 별도 protocol/backpressure 설계 후 도입

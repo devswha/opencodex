@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 use std::path::PathBuf;
 
 pub const PROTOCOL_VERSION: u8 = 1;
@@ -91,7 +91,7 @@ impl HelperRequest {
         Ok(())
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     pub fn canonical_paths(&self) -> Result<CanonicalPaths, String> {
         let root = canonical_directory(&self.root, "workspace root")?;
         let cwd = canonical_directory(&self.cwd, "command cwd")?;
@@ -120,7 +120,7 @@ fn validate_path(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 fn canonical_directory(value: &str, label: &str) -> Result<PathBuf, String> {
     let original = Path::new(value);
     let metadata =
@@ -133,7 +133,7 @@ fn canonical_directory(value: &str, label: &str) -> Result<PathBuf, String> {
         .map_err(|_| format!("{label} is unavailable"))
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 #[derive(Debug)]
 pub struct CanonicalPaths {
     pub root: PathBuf,

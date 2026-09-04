@@ -103,12 +103,17 @@ blind to the model conversation it intentionally runs.
 | --- | --- | --- |
 | `workspace.read` | all supported OCX Executors | `list_directory`, `read_file` |
 | `workspace.write` | all supported OCX Executors | `write_file` |
-| `workspace.exec` | Linux bubblewrap, macOS Seatbelt, or Windows AppContainer after a real confinement probe succeeds | `exec` |
+| `workspace.exec` | Linux bubblewrap or Windows AppContainer after a real confinement probe succeeds | `exec` |
 
-macOS and Windows command execution is owned by the separately built Rust Executor helper. OCX pins
+Windows command execution is owned by the separately built Rust Executor helper. OCX pins
 that helper's SHA-256 digest at pairing and rechecks it before probes and commands. The GUI displays
 the exact capability instead of claiming builds work when the helper is absent, replaced, or blocked
 by local OS policy.
+
+macOS deliberately advertises file tools only. Its process groups cannot revoke a descendant after
+`setsid()`, while importing a broad Apple Seatbelt system profile to make the command runtime start
+would widen unrelated host-service authority. The helper therefore rejects both probe and direct
+run requests until a narrow native owner can contain and revoke the complete descendant tree.
 
 A new GUI session defaults to **read only**. Choosing **Edit files and run commands** is the explicit
 session-scoped grant for the selected computer and root. This avoids prompting for every ordinary
@@ -127,22 +132,15 @@ Linux host whose kernel/container policy rejects that probe advertises file tool
 Linux lane drives the production factory and exact mounted Bun through workspace-write, adjacent
 read/write denial, live loopback denial, and cancellation of a detached-background-process attempt.
 
-The native helper applies the same rule. Its probe must write within a disposable workspace while
+The Windows native helper applies the same rule. Its probe must write within a disposable workspace while
 reading and modifying a pre-existing nested workspace file, failing to read or write an adjacent
 sentinel, and failing to connect to a live loopback listener.
-macOS launches the command under a per-command Seatbelt profile and owns the complete process group.
 Windows creates a capability-free AppContainer suspended, attaches it to a non-breakaway
 kill-on-close Job Object before its first instruction can run, then resumes it. The helper
 temporarily grants that unique SID access to the workspace and approved toolchains, builds a
 secret-free Windows environment whose writable profile paths stay inside the workspace, and
 allowlists only the three standard handles for inheritance. It never passes command argv or root
 paths on the helper command line; the bounded protocol travels over stdin.
-
-macOS has no unprivileged Job Object or cgroup equivalent, and a forked child can otherwise call
-`setsid()` to leave the helper's process group. The Seatbelt profile therefore denies subprocess
-creation. Its live probe must observe both `fork` and the ordinary `posix_spawn` path failing before
-OCX advertises command execution. macOS Remote Workspace commands are consequently single-process;
-commands that need child processes fail closed instead of leaving a writer alive after revocation.
 
 The native helper is a trust anchor, not a workspace artifact. OCX refuses to advertise native
 command execution when the pinned helper is below any approved writable root, and repeats that
@@ -270,8 +268,8 @@ for every native allocation and handle. No N-API ABI or long-lived native heap i
   ABI, installer, updater, and three-OS artifact supply chain. Native code is reserved for the PTY
   and sandbox boundary that actually needs OS APIs.
 - 장점, 단점 및 영향: Idle and adversarial paths retain bounded memory and fewer transient copies;
-  native command containment is now implemented, while signed/notarized binary distribution and
-exact-binary native CI remain release work.
+  Linux/Windows command containment is implemented, macOS stays file-only, and signed Windows binary
+  distribution plus exact-binary CI remain release work.
 
 [Decision Log]
 - 목적과 의도: Keep the unauthenticated one-time pairing exchange from becoming a public scanning
@@ -294,29 +292,29 @@ exact-binary native CI remain release work.
 ## Known release boundary
 
 The implementation is suitable for branch-level private dogfood, not a claim of a finished hosted
-product. Linux-host tests and cross-target compilation cover the common contract, but they are not a
-substitute for executing the confinement probe on native macOS and Windows runners. Before release
-it still needs independent maintainer review, current-`dev` rebase, exact-binary native CI, a real
-three-computer acceptance run, signed/notarized background-agent packaging, and the chosen HTTPS
-identity frontend. A centrally hosted paid Coordinator/Executor remains a separate deliverable.
+product. Hosted Linux and Windows prove supported command confinement, while hosted macOS proves the
+helper rejects command authority and keeps the Executor file-only. Before release it still needs
+independent maintainer review, current-`dev` rebase, exact signed-Windows-binary CI, a real
+three-computer acceptance run, signed background-agent packaging, and the chosen HTTPS identity
+frontend. A centrally hosted paid Coordinator/Executor remains a separate deliverable.
 Super Sync and credential replication remain out of scope.
 
 [Decision Log]
-- 목적과 의도: Enable real Executor-side builds on Windows and macOS without turning a remote
-  command into access to the Executor user's whole account.
+- 목적과 의도: Enable real Executor-side builds on Windows without turning a remote command into
+  access to the Executor user's whole account, while keeping unsupported macOS execution fail-closed.
 - 기존 구현 및 제약 조건: Bun could bound a child but could not create AppContainer security
   capabilities or reliably own native process trees, and cwd alone is not a filesystem boundary.
 - 검토한 주요 대안: Direct spawn, Windows Job Object alone, Docker/Podman as a mandatory runtime,
   one native rewrite of the entire Executor, or a narrow per-command Rust helper.
-- 선택한 방식: Keep file/RPC/control logic in strict TypeScript and use a digest-pinned helper only
-  for macOS Seatbelt and Windows AppContainer plus Job Object. Advertise exec only after an active
-  positive/negative confinement probe.
+- 선택한 방식: Keep file/RPC/control logic in strict TypeScript and use a digest-pinned helper for
+  Windows AppContainer plus Job Object. Advertise exec only after an active positive/negative
+  confinement probe; make both macOS probe and direct run return unavailable.
 - 다른 대안 대신 이 방식을 선택한 이유: Job Objects solve lifetime but not filesystem access;
   containers add a large user dependency; a narrow helper gives the OS boundary without duplicating
   pairing, transport, encryption, or filesystem logic.
-- 장점, 단점 및 영향: The helper's native memory and handles have deterministic owners and command
-  resources remain bounded. Release packaging now needs platform signing/notarization and native
-  probe evidence; unsupported machines safely retain read/write file tools without exec.
+- 장점, 단점 및 영향: The Windows helper's native memory and handles have deterministic owners and
+  command resources remain bounded. Release packaging needs Windows signing and native probe
+  evidence; macOS and other unsupported machines safely retain read/write file tools without exec.
 
 [Decision Log]
 - 목적과 의도: Let a phone or third computer control a Hub-owned coding-agent session whose actual
