@@ -699,6 +699,49 @@ jobs:
       - name: Build and run native confinement probe
         run: cargo test --locked --release --manifest-path native/remote-workspace-helper/Cargo.toml
 
+  # Unlike the Rust helpers, Linux confinement lives in the production TypeScript runner. Make
+  # bubblewrap absence fatal in this dedicated hosted lane and exercise the real write/read/network
+  # boundary instead of treating an argv-shape unit test as sandbox evidence.
+  linux-workspace-confinement:
+    name: Linux workspace confinement
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          fetch-tags: true
+
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install bubblewrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bubblewrap
+
+      - name: Prove Linux confinement boundary
+        shell: bash
+        env:
+          OCX_REQUIRE_LINUX_REMOTE_WORKSPACE_CONFINEMENT: "1"
+        run: |
+          set -euo pipefail
+          isolated_root="$(mktemp -d)"
+          mkdir -p "$isolated_root/home" "$isolated_root/opencodex" "$isolated_root/codex" "$isolated_root/paseo"
+          HOME="$isolated_root/home" \
+            OPENCODEX_HOME="$isolated_root/opencodex" \
+            CODEX_HOME="$isolated_root/codex" \
+            PASEO_HOME="$isolated_root/paseo" \
+            bun test --isolate tests/remote-workspace-linux-confinement.test.ts
+
   # Keep every OS credential-store check on a disposable GitHub-hosted machine.
   # A force-cancelled process cannot run its in-process finally cleanup, so no
   # keyring matrix leg may use the persistent self-hosted Windows runner.
@@ -768,14 +811,20 @@ jobs:
     needs: changes
     if: needs.changes.outputs.packaging == 'true'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 8
+    # 8 minutes was too tight for the Windows leg: dependency installation alone takes
+    # about 7 there, leaving under a minute for pack, verify, global install, and the
+    # help smoke. The job was cancelled at the wall rather than failing, so whichever
+    # step happened to be running was reported `cancelled` — observed on step 8 four
+    # times and on step 7 once, which is what made it read as a flaky global install
+    # instead of a budget that one OS cannot meet (#3441).
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         # Deliberately NOT routed to the self-hosted box. This job runs
         # `npm install -g`, which writes into the machine's global prefix and
         # would leave an `ocx` on a maintainer's personal PATH. It is an
-        # 8-minute job, so there is nothing to win by moving it.
+        # short job on Linux and macOS, so there is nothing to win by moving it.
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout
@@ -835,7 +884,7 @@ jobs:
     # direct dependencies only, so a failing `select-windows-runner` would
     # otherwise reach this gate as nothing at all while its dependents report
     # `skipped` — which the gate is required to read as a deliberate skip.
-    needs: [changes, select-windows-runner, test, storage-policy, api-usage, gates, platform-macos, platform-windows, native-workspace-helper, keyring-smoke, npm-global-smoke]
+    needs: [changes, select-windows-runner, test, storage-policy, api-usage, gates, platform-macos, platform-windows, native-workspace-helper, linux-workspace-confinement, keyring-smoke, npm-global-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
