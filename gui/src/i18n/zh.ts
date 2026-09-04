@@ -1019,6 +1019,8 @@ export const zh: Record<TKey, string> = {
   "codexSet.base.externalBlocked": "model_instructions_file 已指向 {path}，且不是 opencodex 写的。请先自行清除，再在此处选择。",
   "nav.openMenu": "打开菜单",
   "nav.closeMenu": "关闭菜单",
+  "nav.goHome": "前往仪表板",
+  "pws.refreshAllQuotas": "刷新全部额度",
   "integrations.subtitle": "将客户端连接到 opencodex，管理凭据并恢复客户端配置。",
   "integrations.tabsLabel": "集成页面",
   "integrations.tab.overview": "概览",

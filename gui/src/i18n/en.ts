@@ -1503,6 +1503,8 @@ export const en = {
   "nav.integrations": "Integrations",
   "nav.openMenu": "Open menu",
   "nav.closeMenu": "Close menu",
+  "nav.goHome": "Go to dashboard",
+  "pws.refreshAllQuotas": "Refresh all quotas",
   "integrations.subtitle": "Connect clients to opencodex, manage credentials, and restore client configuration.",
   "integrations.tabsLabel": "Integration surfaces",
   "integrations.tab.overview": "Overview",

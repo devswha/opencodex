@@ -254,6 +254,19 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   -webkit-backdrop-filter: var(--glass-blur);
 }
 .brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 14px; }
+/* The brand is a <button> (go home), and this stylesheet has no global button reset —
+   every control resets itself locally, the way .nav-item does. Without this the UA
+   defaults land: a grey buttonface plate, a 2px border that breaks the measured 320px
+   topbar row budget, a non-inheriting font, buttontext instead of --text on .name,
+   center text-align that shows up once .name ellipsizes, and -webkit-appearance:button
+   overriding the first two in WebKit. Layout stays with .brand; this rule only undoes
+   what the element type added. */
+.brand-home {
+  appearance: none; -webkit-appearance: none;
+  background: none; border: none;
+  font: inherit; color: inherit; text-align: left;
+  cursor: pointer;
+}
 /* logo is a white-on-transparent silhouette → recolor via mask with the theme text color so it
    stays visible in BOTH light and dark (a plain <img> was invisible white-on-white in light). */
 .brand-logo { width: 26px; height: 26px; flex-shrink: 0; background: var(--text);

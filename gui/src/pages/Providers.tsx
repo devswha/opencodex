@@ -229,6 +229,22 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     return settled;
   }, [fetchAccountSets, fetchProviderQuotas]);
 
+  /**
+   * Force a fresh read of EVERY provider's quota, for the overview where no provider
+   * is selected.
+   *
+   * Deliberately without `fetchAccountSets`: that is the per-account enrichment read
+   * the account panels use, it costs two upstream requests per OAuth provider, and the
+   * overview renders provider-level bars from `quotaReports` rather than account sets.
+   * `/api/provider-quotas?refresh=1` already fans out across every configured provider
+   * server-side, so this is one request that answers exactly what the overview shows.
+   */
+  const refreshAllProviderQuotas = useCallback((): Promise<boolean> => {
+    const settled = new Promise<boolean>(resolve => { quotaRefreshWaiters.current.push(resolve); });
+    void fetchProviderQuotas(true);
+    return settled;
+  }, [fetchProviderQuotas]);
+
   useEffect(() => {
     // Deferred by a microtask, not a timer. A timer had to be cancelled in cleanup, so navigating
     // away within the same tick dropped both requests with nothing to retry them and the page came
@@ -378,6 +394,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         quotaRefreshEpoch={quotaRefresh.epoch}
         quotaForceRefresh={quotaRefresh.force}
         onQuotaRefreshSettled={settleQuotaRefresh}
+        onRefreshAllQuotas={refreshAllProviderQuotas}
         detail={(item, data) => {
           const loginStatus = accountLoginStatus[item.name] ?? oauthStatus[item.name];
           return (

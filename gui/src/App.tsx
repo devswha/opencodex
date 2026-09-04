@@ -243,12 +243,30 @@ export default function App() {
     else alert(t("connection.sessionLogoutFailed"));
   };
 
+  /*
+   * The brand is the control users reach for first when they want out of a deep page,
+   * and it used to be an inert <div>: clicking the logo did nothing, so a user on
+   * #providers had no obvious way back to the first screen. It is a button now.
+   *
+   * One node, two mount points (mobile topbar and drawer head), so both become
+   * interactive from this single definition. `navigateToPage` is the deliberate-
+   * navigation helper the nav rows use — it pushes a history entry, so Back still
+   * returns to where the user came from — and closing the drawer is required because
+   * the second mount lives inside it.
+   */
   const brand = (
-    <div className="brand">
+    <button
+      type="button"
+      className="brand brand-home"
+      onClick={() => { navigateToPage("dashboard"); setNavOpen(false); }}
+      aria-label={t("nav.goHome")}
+      title={t("nav.goHome")}
+      {...(page === "dashboard" ? { "aria-current": "page" as const } : {})}
+    >
       <span className="brand-logo" role="img" aria-label={t("app.logoAria")} />
       <span className="name">opencodex</span>
       <span className="ver">v{displayedVersion}</span>
-    </div>
+    </button>
   );
 
   return (

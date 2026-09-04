@@ -1487,6 +1487,8 @@ export const ru: Record<TKey, string> = {
   "nav.integrations": "Интеграции",
   "nav.openMenu": "Открыть меню",
   "nav.closeMenu": "Закрыть меню",
+  "nav.goHome": "Перейти к панели",
+  "pws.refreshAllQuotas": "Обновить все квоты",
   "integrations.subtitle": "Подключайте клиенты к opencodex, управляйте учётными данными и восстанавливайте конфигурацию клиентов.",
   "integrations.tabsLabel": "Разделы интеграций",
   "integrations.tab.overview": "Обзор",

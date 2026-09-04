@@ -1026,6 +1026,8 @@ export const ko: Record<TKey, string> = {
   "codexSet.base.externalBlocked": "model_instructions_file이 이미 {path}를 가리키고 있고, opencodex가 쓴 값이 아닙니다. 직접 지운 뒤 여기서 선택하세요.",
   "nav.openMenu": "메뉴 열기",
   "nav.closeMenu": "메뉴 닫기",
+  "nav.goHome": "대시보드로 이동",
+  "pws.refreshAllQuotas": "전체 할당량 갱신",
   "integrations.subtitle": "클라이언트를 opencodex에 연결하고 자격 증명과 설정 복원을 관리합니다.",
   "integrations.tabsLabel": "연동 화면",
   "integrations.tab.overview": "개요",

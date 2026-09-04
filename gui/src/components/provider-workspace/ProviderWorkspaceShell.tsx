@@ -83,6 +83,7 @@ export default function ProviderWorkspaceShell({
   quotaRefreshEpoch = 0,
   quotaForceRefresh = false,
   onQuotaRefreshSettled,
+  onRefreshAllQuotas,
   detail,
 }: {
   providers: Record<string, WorkspaceProvider>;
@@ -116,6 +117,11 @@ export default function ProviderWorkspaceShell({
   onQuotaRefreshSettled?: (ok: boolean) => void;
   /** True when the bump came from a mutation that needs the server to bypass its TTL. */
   quotaForceRefresh?: boolean;
+  /**
+   * Force a fresh read of every provider's quota from the aggregate overview.
+   * Omitted when the page cannot drive one, which is what hides the control.
+   */
+  onRefreshAllQuotas?: () => Promise<boolean>;
   /** Detail body for the selected provider (WP090); a placeholder renders when absent. */
   detail?: (item: WorkspaceItem, data: DetailSlotData) => ReactNode;
 }) {
@@ -570,6 +576,7 @@ export default function ProviderWorkspaceShell({
             quotasLoading={quotasLoading}
             onSelectProvider={(name) => onSelect(name)}
             onEditConfig={onEditConfig}
+            {...(onRefreshAllQuotas ? { onRefreshAllQuotas } : {})}
           />
         )}
         </main>

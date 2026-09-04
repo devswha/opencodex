@@ -1436,6 +1436,8 @@ export const ja: Record<TKey, string> = {
   "nav.integrations": "連携",
   "nav.openMenu": "メニューを開く",
   "nav.closeMenu": "メニューを閉じる",
+  "nav.goHome": "ダッシュボードへ移動",
+  "pws.refreshAllQuotas": "すべてのクォータを更新",
   "integrations.subtitle": "クライアントを opencodex に接続し、認証情報の管理とクライアント設定の復元を行います。",
   "integrations.tabsLabel": "連携画面",
   "integrations.tab.overview": "概要",

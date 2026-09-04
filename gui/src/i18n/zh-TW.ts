@@ -1267,6 +1267,8 @@ export const zhTW: Record<TKey, string> = {
   "nav.api": "API",
   "nav.openMenu": "開啟選單",
   "nav.closeMenu": "關閉選單",
+  "nav.goHome": "前往儀表板",
+  "pws.refreshAllQuotas": "重新整理所有額度",
   "codexAuth.mainAccount": "主帳號",
   "codexAuth.codexApp": "Codex App",
   "codexAuth.logLabel": "日誌標籤",

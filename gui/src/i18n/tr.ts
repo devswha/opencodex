@@ -1494,6 +1494,8 @@ export const tr: Record<TKey, string> = {
   "nav.integrations": "Entegrasyonlar",
   "nav.openMenu": "Menüyü aç",
   "nav.closeMenu": "Menüyü kapat",
+  "nav.goHome": "Panoya git",
+  "pws.refreshAllQuotas": "Tüm kotaları yenile",
   "integrations.subtitle": "İstemcileri opencodex'e bağlayın, kimlik bilgilerini yönetin.",
   "integrations.tabsLabel": "Entegrasyon yüzeyleri",
   "integrations.tab.overview": "Genel Bakış",
