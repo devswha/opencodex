@@ -451,6 +451,33 @@ describe("provider registry parity", () => {
     expect(KEY_LOGIN_PROVIDERS["anthropic-apikey"].modelContextWindows).toEqual(anthropicOauth?.modelContextWindows);
   });
 
+  test("Anthropic providers advertise an effort ladder for every model on both auth flows", () => {
+    const anthropicOauth = PROVIDER_REGISTRY.find(entry => entry.id === "anthropic");
+    const apiKey = KEY_LOGIN_PROVIDERS["anthropic-apikey"];
+    // The ladder is what every client keys its effort control off. Without it Aside and the
+    // other Pi-shaped exports wrote these models with no control at all, while the same
+    // Claude models routed through cursor/google-antigravity had one.
+    for (const modelId of anthropicOauth?.models ?? []) {
+      expect(anthropicOauth?.modelReasoningEfforts?.[modelId]).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    }
+    // Both entries or neither: the effort control must not depend on whether the user signed
+    // in with OAuth or an API key.
+    expect(apiKey.modelReasoningEfforts).toEqual(anthropicOauth?.modelReasoningEfforts);
+  });
+
+  test("the Anthropic ladder omits rungs the adapter cannot honor distinctly", () => {
+    const anthropicOauth = PROVIDER_REGISTRY.find(entry => entry.id === "anthropic");
+    for (const efforts of Object.values(anthropicOauth?.modelReasoningEfforts ?? {})) {
+      // minimal is rewritten to low by adaptiveEffort (the adaptive wire 400s on it), none is
+      // only accepted by sonnet>=5 and rejected outright by Fable, and ultra is degraded to
+      // max at the request boundary. Advertising any of them offers a control that does not
+      // do what it says.
+      expect(efforts).not.toContain("minimal");
+      expect(efforts).not.toContain("none");
+      expect(efforts).not.toContain("ultra");
+    }
+  });
+
   test("Kimi coding aliases preserve model context and capability parity", () => {
     const codingModels = [
       "k3",

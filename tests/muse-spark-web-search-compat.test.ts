@@ -7,11 +7,33 @@ import { withTestTranslatorBudget } from "./helpers/translator-budget";
 const createResponsesPassthroughAdapter = (...args: Parameters<typeof createResponsesPassthroughAdapterProduction>) =>
   withTestTranslatorBudget(createResponsesPassthroughAdapterProduction(...args));
 
-const PROVIDER = {
+const ZEN_PROVIDER = {
   adapter: "openai-responses",
   baseUrl: "https://opencode.ai/zen/v1",
   apiKey: "test-key",
 } as unknown as OcxProviderConfig;
+
+const ZEN_GO_PROVIDER = {
+  ...ZEN_PROVIDER,
+  baseUrl: "https://opencode.ai/zen/go/v1",
+};
+
+const ZEN_PATH_PROVIDER = {
+  ...ZEN_PROVIDER,
+  baseUrl: "https://opencode.ai",
+  responsesPath: "/zen/v1/responses",
+};
+
+const ZEN_GO_PATH_PROVIDER = {
+  ...ZEN_PROVIDER,
+  baseUrl: "https://opencode.ai",
+  responsesPath: "/zen/go/v1/responses",
+};
+
+const META_PROVIDER = {
+  ...ZEN_PROVIDER,
+  baseUrl: "https://api.meta.ai/v1",
+};
 
 /** A Codex web_search declaration exactly as `hosted_spec.rs` emits it for TextAndImage. */
 function webSearchTool(): Record<string, unknown> {
@@ -23,8 +45,13 @@ function webSearchTool(): Record<string, unknown> {
   };
 }
 
-function build(modelId: string, rawBody: Record<string, unknown>): Record<string, unknown> {
-  const request = createResponsesPassthroughAdapter(PROVIDER).buildRequest({
+/** Build one passthrough request for an explicit Responses provider fixture. */
+function buildForProvider(
+  provider: OcxProviderConfig,
+  modelId: string,
+  rawBody: Record<string, unknown>,
+): Record<string, unknown> {
+  const request = createResponsesPassthroughAdapter(provider).buildRequest({
     modelId,
     context: { messages: [] },
     stream: true,
@@ -32,6 +59,11 @@ function build(modelId: string, rawBody: Record<string, unknown>): Record<string
     _rawBody: { model: modelId, input: "ping", ...rawBody },
   }, { headers: new Headers() });
   return JSON.parse(request.body) as Record<string, unknown>;
+}
+
+/** Build with the default OpenCode Zen fixture used by the original regressions. */
+function build(modelId: string, rawBody: Record<string, unknown>): Record<string, unknown> {
+  return buildForProvider(ZEN_PROVIDER, modelId, rawBody);
 }
 
 const toolsOf = (body: Record<string, unknown>) => body.tools as Array<Record<string, unknown>>;
@@ -124,5 +156,39 @@ describe("#2617/#3378 Muse Spark web_search compatibility", () => {
     expect(nested.type).toBe("web_search");
     expect(Object.hasOwn(nested, "search_content_types")).toBe(false);
     expect(Object.hasOwn(nested, "indexed_web_access")).toBe(false);
+  });
+
+  test("OpenCode Go applies the same Muse compatibility guard", () => {
+    const body = buildForProvider(ZEN_GO_PROVIDER, "muse-spark-1.3-contributor", {
+      tools: [webSearchTool()],
+    });
+    const tool = toolsOf(body)[0]!;
+    expect(Object.hasOwn(tool, "search_content_types")).toBe(false);
+    expect(Object.hasOwn(tool, "indexed_web_access")).toBe(false);
+  });
+
+  test("split baseUrl and responsesPath configurations derive both strict destinations", () => {
+    for (const provider of [ZEN_PATH_PROVIDER, ZEN_GO_PATH_PROVIDER]) {
+      const body = buildForProvider(provider, "muse-spark-1.3-contributor", {
+        tools: [webSearchTool()],
+      });
+      const tool = toolsOf(body)[0]!;
+      expect(Object.hasOwn(tool, "search_content_types")).toBe(false);
+      expect(Object.hasOwn(tool, "indexed_web_access")).toBe(false);
+    }
+  });
+
+  test("direct Meta preserves its web_search fields at both tool positions", () => {
+    const body = buildForProvider(META_PROVIDER, "muse-spark-1.3-contributor", {
+      tools: [webSearchTool()],
+      input: [{ type: "additional_tools", tools: [webSearchTool()] }],
+    });
+    const tool = toolsOf(body)[0]!;
+    const item = (body.input as Array<Record<string, unknown>>)[0]!;
+    const nested = (item.tools as Array<Record<string, unknown>>)[0]!;
+    for (const declaration of [tool, nested]) {
+      expect(declaration.search_content_types).toEqual(["text", "image"]);
+      expect(declaration.indexed_web_access).toBe(true);
+    }
   });
 });

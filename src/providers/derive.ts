@@ -490,7 +490,14 @@ export function enrichProviderFromRegistry(name: string, prov: OcxProviderConfig
   if ((!prov.reasoningEfforts || hasLegacyClinePassReasoningEfforts(name, prov)) && seed.reasoningEfforts) {
     prov.reasoningEfforts = [...seed.reasoningEfforts];
   }
-  if (!prov.modelReasoningEfforts && seed.modelReasoningEfforts) prov.modelReasoningEfforts = cloneRecordOfArrays(seed.modelReasoningEfforts);
+  // Per-model fill for the same reason as modelInputModalities above: an all-or-nothing
+  // copy let ONE customized model hide the registry's ladder for every other model on the
+  // provider. That split the two planes apart — routing merges these maps per key
+  // (mergeRecordFill in src/router.ts), so the wire honored the effort while /v1/models and
+  // every client export showed no effort control at all.
+  if (seed.modelReasoningEfforts) {
+    prov.modelReasoningEfforts = fillRecordOfArrays(seed.modelReasoningEfforts, prov.modelReasoningEfforts);
+  }
   if (!prov.modelDefaultReasoningEfforts && seed.modelDefaultReasoningEfforts) prov.modelDefaultReasoningEfforts = { ...seed.modelDefaultReasoningEfforts };
   if (!prov.reasoningEffortMap && seed.reasoningEffortMap) prov.reasoningEffortMap = { ...seed.reasoningEffortMap };
   if (!prov.modelReasoningEffortMap && seed.modelReasoningEffortMap) prov.modelReasoningEffortMap = cloneNestedRecord(seed.modelReasoningEffortMap);

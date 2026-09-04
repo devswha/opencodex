@@ -28,6 +28,37 @@ describe("static provider model discovery policy", () => {
     }
   });
 
+  test("a partial persisted effort map does not suppress the registry ladder", () => {
+    // Per-model fill, not all-or-nothing. An operator who pinned ONE Anthropic model used to
+    // hide the registry ladder for every other model on the provider, which split the two
+    // planes apart: routedProviderConfig merges these maps per key, so the WIRE honored the
+    // effort while /v1/models and every client export showed no effort control at all.
+    const config = provider({
+      adapter: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      authMode: "oauth",
+      modelReasoningEfforts: { "claude-opus-5": ["low", "high"] },
+    });
+
+    enrichProviderFromRegistry("anthropic", config);
+
+    // The pinned model keeps the operator's value.
+    expect(config.modelReasoningEfforts?.["claude-opus-5"]).toEqual(["low", "high"]);
+    // Every untouched model still inherits the registry ladder.
+    expect(config.modelReasoningEfforts?.["claude-fable-5-1"]).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(config.modelReasoningEfforts?.["claude-haiku-4-5"]).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
+  test("native Anthropic models reach an enriched provider with an effort ladder", () => {
+    // The advertisement itself: without it the Aside/Pi exports wrote these models with no
+    // effort control, while the same Claude models via cursor/google-antigravity had one.
+    const config = provider({ adapter: "anthropic", baseUrl: "https://api.anthropic.com", authMode: "oauth" });
+    enrichProviderFromRegistry("anthropic", config);
+    for (const modelId of config.models ?? []) {
+      expect(config.modelReasoningEfforts?.[modelId]).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    }
+  });
+
   test("stale canonical ClinePass discovery is disabled without replacing saved models", () => {
     const savedModels = ["cline-pass/kimi-k3", "saved-selector"];
     const config = provider({

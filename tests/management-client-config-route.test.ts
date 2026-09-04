@@ -8,6 +8,7 @@ import {
   seedCodexModelEntitlementsForTests,
 } from "../src/codex/model-entitlements";
 import { handleManagementAPI } from "../src/server/management-api";
+import { loadExportModels } from "../src/server/management/model-rows";
 import {
   OPENCODE_API_KEY_ENV,
   OPENCODE_CONFIG_SCHEMA,
@@ -157,6 +158,60 @@ function toExportModel(row: ModelRow): ExportModel {
   };
 }
 
+
+describe("native Anthropic effort ladder reaches the Aside document", () => {
+  /**
+   * The end-to-end guard for the defect: native Anthropic rows used to reach Aside with no
+   * effort control, while the SAME Claude models routed through cursor or google-antigravity
+   * had one. Every other test for this fix starts from a hand-built ExportModel or registry
+   * lookup, so all of them would stay green if enrichment, CatalogModel, ManagementModelRow
+   * or toExportModel dropped the field tomorrow. This one starts from a bare PROVIDER CONFIG
+   * and asserts the emitted document, so it covers the whole chain:
+   *
+   *   registry -> enrichProviderFromRegistry -> CatalogModel -> ManagementModelRow
+   *   -> toExportModel -> buildClientConfig("aside")
+   *
+   * It calls the production loader directly rather than the ?client=aside route, because that
+   * route resolves ~/.aside/accounts.json for its destination and this must not depend on the
+   * developer's real Aside install.
+   */
+  test("a bare Anthropic provider config emits reasoning and a thinkingLevelMap", async () => {
+    const config = {
+      port: 10100,
+      hostname: "127.0.0.1",
+      defaultProvider: "anthropic",
+      providers: {
+        anthropic: {
+          adapter: "anthropic",
+          baseUrl: "https://api.anthropic.com",
+          authMode: "oauth",
+          liveModels: false,
+        },
+      },
+    } as unknown as OcxConfig;
+
+    const models = await loadExportModels(config);
+    const document = buildClientConfig("aside", {
+      baseUrl: "http://127.0.0.1:10100/v1",
+      config,
+      models,
+    }) as PiGeneratedConfig;
+
+    const rows = document.providers[OPENCODE_PROVIDER_ID]!.models
+      .filter(model => model.id.startsWith("anthropic/claude-"));
+    expect(rows.length).toBeGreaterThan(0);
+
+    for (const row of rows) {
+      expect(row.reasoning).toBe(true);
+      expect(row.thinkingLevelMap!.low).toBe("low");
+      expect(row.thinkingLevelMap!.high).toBe("high");
+      expect(row.thinkingLevelMap!.max).toBe("max");
+      // The ladder declares neither sentinel, so neither is offered as a selectable level.
+      expect(row.thinkingLevelMap!.off).toBeNull();
+      expect(row.thinkingLevelMap!.minimal).toBeNull();
+    }
+  });
+});
 describe("GET /api/client-config", () => {
   test("opencode envelope carries the shared builder's exact bytes", async () => {
     const config = baseConfig();

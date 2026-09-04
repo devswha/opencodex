@@ -349,6 +349,34 @@ export type ProviderConfigSeed = Pick<
 // always on, per the official models overview and pricing page (platform.claude.com).
 const ANTHROPIC_MODELS = ["claude-fable-5-1", "claude-fable-5", "claude-sonnet-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"];
 const ANTHROPIC_MODEL_CONTEXT_WINDOWS: Record<string, number> = { "claude-fable-5-1": 1_000_000, "claude-sonnet-5": 1_000_000, "claude-fable-5": 1_000_000, "claude-opus-5": 1_000_000, "claude-opus-4-8": 1_000_000, "claude-opus-4-7": 1_000_000, "claude-opus-4-6": 1_000_000, "claude-sonnet-4-6": 1_000_000, "claude-haiku-4-5": 200_000 };
+/**
+ * The effort rungs opencodex exposes for native Anthropic models. Without this the
+ * providers advertised no ladder at all, so every client that keys its effort control off
+ * `reasoningEfforts` — Aside and the rest of the Pi-shaped exports — wrote these models
+ * with no control, while the SAME Claude models routed through `cursor` or
+ * `google-antigravity` had one.
+ *
+ * This is an opencodex ladder, not a claim that each model takes `output_config.effort`.
+ * The adapter serves two wire shapes (src/adapters/anthropic.ts): adaptive families
+ * (fable, sonnet >= 5, opus >= 4.7) send the effort directly, while opus 4.6, sonnet 4.6
+ * and haiku 4.5 take the legacy path where `reasoningBudget` TRANSLATES each rung into
+ * `thinking.budget_tokens`. Anthropic documents `low|medium|high|max` for the 4.6 models
+ * and no effort parameter at all for haiku 4.5; the budget translation is what makes five
+ * rungs meaningful there, and it clamps below `max_tokens` so none of them 400.
+ *
+ * Deliberately excluded, each because advertising it would offer a control that does not
+ * do what it says:
+ * - `minimal`: `adaptiveEffort` rewrites it to `low` (the adaptive wire 400s on it), so
+ *   it is not a distinct setting.
+ * - `none`: only sonnet >= 5 accepts an explicit thinking disable
+ *   (`EXPLICIT_THINKING_DISABLE_FAMILY_MINIMUMS`); Fable rejects one outright.
+ * - `ultra`: not an Anthropic concept, and it is degraded to `max` at the request
+ *   boundary anyway (src/responses/parser.ts).
+ */
+const ANTHROPIC_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const ANTHROPIC_MODEL_REASONING_EFFORTS: Record<string, string[]> = Object.fromEntries(
+  ANTHROPIC_MODELS.map(id => [id, [...ANTHROPIC_REASONING_EFFORTS]]),
+);
 
 // 260814 GLM-5.3 is registered pre-emptively alongside 5.2 everywhere 5.2 appears. Z.AI's
 // devpack "How to Switch Models" page (docs.z.ai/devpack/latest-model) lists glm-5.3 and
@@ -1340,6 +1368,7 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     note: "Log in with your Claude account",
     models: [...ANTHROPIC_MODELS],
     modelContextWindows: { ...ANTHROPIC_MODEL_CONTEXT_WINDOWS },
+    modelReasoningEfforts: { ...ANTHROPIC_MODEL_REASONING_EFFORTS },
     defaultModel: "claude-sonnet-5",
   },
   {
@@ -1356,6 +1385,7 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     models: [...ANTHROPIC_MODELS],
     liveModels: true,
     modelContextWindows: { ...ANTHROPIC_MODEL_CONTEXT_WINDOWS },
+    modelReasoningEfforts: { ...ANTHROPIC_MODEL_REASONING_EFFORTS },
     defaultModel: "claude-sonnet-5",
   },
   {

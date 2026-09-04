@@ -98,6 +98,48 @@ describe("Aside client config", () => {
     expect(unknown.maxTokens).toBeUndefined();
   });
 
+  /**
+   * The defect this client existed to expose: native Anthropic rows reached Aside with no
+   * effort control at all, while the SAME Claude models routed through cursor or
+   * google-antigravity had one. The serializer was never wrong — it emits the control only
+   * for a non-empty ladder, and the providers advertised none.
+   *
+   * This is the SERIALIZER half of the contract. It starts from a hand-built ExportModel, so
+   * it would stay green if enrichment or the catalog dropped the ladder upstream; the
+   * end-to-end guard for that seam lives in tests/management-client-config-route.test.ts.
+   */
+  test("an Anthropic row with a ladder gets an effort control, one without stays bare", () => {
+    const withLadder = buildClientConfig("aside", {
+      baseUrl: "http://127.0.0.1:10100/v1",
+      config: CONFIG,
+      models: [
+        {
+          namespaced: "anthropic/claude-opus-5",
+          provider: "anthropic",
+          id: "claude-opus-5",
+          contextWindow: 1_000_000,
+          reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+        },
+      ],
+    }) as PiGeneratedConfig;
+
+    const claude = withLadder.providers[OPENCODE_PROVIDER_ID]!.models[0]!;
+    expect(claude.reasoning).toBe(true);
+    expect(claude.thinkingLevelMap!.low).toBe("low");
+    expect(claude.thinkingLevelMap!.max).toBe("max");
+    // The ladder declares neither, so neither is offered as a selectable level.
+    expect(claude.thinkingLevelMap!.off).toBeNull();
+    expect(claude.thinkingLevelMap!.minimal).toBeNull();
+
+    // Negative control: the fixture's ladderless Anthropic row still gets no control, so this
+    // fails if anyone makes `reasoning: true` unconditional.
+    const bare = buildClientConfig("aside", context()) as PiGeneratedConfig;
+    const bareClaude = bare.providers[OPENCODE_PROVIDER_ID]!.models
+      .find(model => model.id === "anthropic/claude-opus-5")!;
+    expect(bareClaude.reasoning).toBeUndefined();
+    expect(bareClaude.thinkingLevelMap).toBeUndefined();
+  });
+
   test("native JSON round-trips and never carries a credential", () => {
     const sentinel = ["sk", "live", "aside", "sentinel"].join("-");
     const withKey = { ...CONFIG, apiKeys: [{ key: sentinel }] } as OcxConfig;

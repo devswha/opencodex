@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { candidateCapabilityEvidence } from "../src/routing/capability";
+import { evaluatePolicyProfile } from "../src/routing/evaluator";
 import { PROVIDER_REGISTRY } from "../src/providers/registry";
 import { modelRecordValue } from "../src/reasoning-effort";
 import { isModelTextOnly } from "../src/vision";
@@ -78,6 +79,75 @@ describe("candidateCapabilityEvidence model matching", () => {
     );
     expect(evidence.contextWindow).toBe(8_000);
     expect(evidence.reasoningEfforts).toBeUndefined();
+  });
+
+  test("noReasoningModels reports an EMPTY ladder, not an absent one", () => {
+    // Every other consumer treats noReasoningModels as a positive "no effort control":
+    // configuredReasoningEfforts (reasoning-effort.ts), supportedLadderFor
+    // (server/effort-policy.ts) and the compatibility fingerprint all check it first.
+    // Evidence must agree, and the difference between [] and absent is load-bearing:
+    // absent makes the evaluator record "unknown", which is permissive.
+    const provider = {
+      ...providerWithFamilyEntries(),
+      noReasoningModels: ["gpt-oss:120b"],
+    } as unknown as OcxProviderConfig;
+
+    const evidence = candidateCapabilityEvidence(configFor(provider), "custom", "gpt-oss:120b");
+    expect(evidence.reasoningEfforts).toEqual([]);
+
+    // The sibling that is NOT disabled still inherits the family ladder.
+    const sibling = candidateCapabilityEvidence(configFor(provider), "custom", "gpt-oss:20b");
+    expect(sibling.reasoningEfforts).toEqual(["low", "high"]);
+  });
+
+  test("a disabled model is capability-unsatisfied for an effort requirement, not unknown", () => {
+    // The observable consequence of the case above. With an ABSENT ladder the evaluator took
+    // its non-array branch and emitted `unknown-capability`, which an "allow" profile lets
+    // through — so a model the operator explicitly disabled reasoning for could still
+    // satisfy a reasoning-effort requirement.
+    function configWithProfile(noReasoning: boolean): OcxConfig {
+      return {
+        providers: {
+          custom: {
+            adapter: "openai-chat",
+            baseUrl: "https://example.test/v1",
+            models: ["gpt-oss:120b"],
+            modelReasoningEfforts: { "gpt-oss": ["low", "high"] },
+            ...(noReasoning ? { noReasoningModels: ["gpt-oss:120b"] } : {}),
+          },
+        },
+        routingProfiles: {
+          effort: {
+            candidates: [{ provider: "custom", model: "gpt-oss:120b" }],
+            require: { reasoningEffort: "high" },
+            unknownEvidence: { capability: "allow", health: "allow", quota: "allow", cost: "allow" },
+          },
+        },
+      } as unknown as OcxConfig;
+    }
+
+    const disabled = configWithProfile(true);
+    const result = evaluatePolicyProfile(disabled, "effort", {}, [
+      {
+        provider: "custom",
+        model: "gpt-oss:120b",
+        capability: candidateCapabilityEvidence(disabled, "custom", "gpt-oss:120b"),
+      },
+    ]);
+    const candidate = result.candidates[0]!;
+    expect(candidate.exclusions.some(e => e.code === "capability-unsatisfied" && e.detail === "reasoning-effort")).toBe(true);
+    expect(candidate.exclusions.some(e => e.code === "unknown-capability")).toBe(false);
+
+    // Control: the same profile without noReasoningModels is satisfied by the ladder.
+    const enabled = configWithProfile(false);
+    const allowed = evaluatePolicyProfile(enabled, "effort", {}, [
+      {
+        provider: "custom",
+        model: "gpt-oss:120b",
+        capability: candidateCapabilityEvidence(enabled, "custom", "gpt-oss:120b"),
+      },
+    ]);
+    expect(allowed.candidates[0]!.exclusions).toEqual([]);
   });
 
   test("a registry entry covers its tagged siblings with no provider configured", () => {
