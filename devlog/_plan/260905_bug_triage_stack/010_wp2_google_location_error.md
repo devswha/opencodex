@@ -209,3 +209,17 @@ Co-authored-by: agentHits <zvercombat26rus@icloud.com>
   stacks 050 on top of it (see 040 amendment at wp5's P). No carry exists yet for #3469
   or #3407.
 
+
+## wp2 audit round 1 — GO-WITH-FIXES (1 blocker, folded)
+
+Blocker: message-only adapter paths (`inferHttpStatusFromAdapterMessage`, `src/lib/errors.ts:~360`)
+would infer **502** for the new `… location not supported: …` message (no `invalid`/`unsupported`
+cue), while classified envelopes infer **403** via `permission_error`.
+
+Decision: a location denial is a permission-class rejection. `inferHttpStatusFromAdapterMessage`
+returns **403** when `isLocationUnsupportedMessage(lower)` — placed directly after the
+authentication check so 401 still wins — making message-only and envelope paths agree.
+Docs wording: "direct upstream HTTP status is preserved (400); message-only/terminal paths
+classify it as 403 permission." Tests: `adapterFailureFromMessage` + `httpStatusFromError`
+cases added to error-fidelity.
+
