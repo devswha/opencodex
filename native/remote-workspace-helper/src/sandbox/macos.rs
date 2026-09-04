@@ -239,11 +239,23 @@ pub fn probe() -> Result<(), String> {
     ) && !outside_write.exists();
     let cleanup = fs::remove_dir_all(&canonical_parent);
     let outcome = result?;
-    if !marker_ok || outcome.exit_code == 25 {
+    if outcome.exit_code == 25 {
         return Err("macOS confinement probe denied workspace write".to_owned());
     }
-    if !existing_workspace_ok || outcome.exit_code == 29 {
+    if !marker_ok {
+        return Err(format!(
+            "macOS confinement probe child stopped before the workspace marker with code {}",
+            outcome.exit_code
+        ));
+    }
+    if outcome.exit_code == 29 {
         return Err("macOS confinement probe denied existing workspace access".to_owned());
+    }
+    if !existing_workspace_ok {
+        return Err(format!(
+            "macOS confinement probe did not preserve existing workspace access after code {}",
+            outcome.exit_code
+        ));
     }
     if outcome.exit_code == 26 {
         return Err("macOS confinement probe allowed adjacent host read".to_owned());
