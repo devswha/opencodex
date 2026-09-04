@@ -21,9 +21,11 @@ const en = await Bun.file(new URL("../src/i18n/en.ts", import.meta.url)).text();
 const brand = src.slice(src.indexOf("const brand = ("), src.indexOf("</button>", src.indexOf("const brand = (")));
 
 test("the brand is an interactive control, not an inert div", () => {
-  expect(brand).toContain("<button");
+  // Bound to the brand NODE itself, not to "a button exists somewhere inside": a
+  // regression that wrapped a button in <div className="brand brand-home"> would pass
+  // a looser check while the brand stayed an inert div.
+  expect(brand).toMatch(/^const brand = \(\s*<button\b[^>]*\bclassName="brand brand-home"/);
   expect(brand).toContain('type="button"');
-  expect(brand).not.toContain('<div className="brand"');
 });
 
 test("activating the brand navigates to the dashboard", () => {

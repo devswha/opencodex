@@ -23,7 +23,7 @@ Captured through the in-app browser against the running proxy on port 10100
 `.mobile-topbar` (<=760px) and in the sidebar `.drawer-head`. Probing the live
 DOM:
 
-```
+```json
 { "brandTag": "DIV", "brandCls": "brand", "brandClickable": false }
 ```
 
@@ -36,7 +36,7 @@ universal "go home" convention on the web, and on this dashboard it is dead.
 Worth recording because it rules out the obvious first hypothesis. The sidebar
 is `position: sticky; top: 0` and stays pinned:
 
-```
+```text
 before: { pos: "sticky", top: 0, navTop: 68, innerH: 1425 }
 after 10 scroll pages: { sbTop: 0, navTop: 68, navVisible: true }
 ```

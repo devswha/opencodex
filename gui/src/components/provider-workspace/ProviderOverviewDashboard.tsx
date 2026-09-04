@@ -68,7 +68,15 @@ export default function ProviderOverviewDashboard({
     setRefreshResult(null);
     try {
       const ok = await onRefreshAllQuotas();
-      setRefreshResult({ ok, text: t(ok ? "codexAuth.quotaRefreshed" : "codexAuth.quotaRefreshFailed") });
+      /*
+       * "Quota check complete", not "Quotas refreshed". The boolean reports whether the
+       * READ succeeded, and the server answers 200 even when an individual upstream probe
+       * failed: fetchProviderQuotaReports keeps that provider's last-good row rather than
+       * dropping it. Claiming every number is fresh would be exactly the lie this control
+       * was built to avoid. Each row carries its own age, which is where per-provider
+       * staleness is already visible.
+       */
+      setRefreshResult({ ok, text: t(ok ? "pws.quotaRefreshDone" : "codexAuth.quotaRefreshFailed") });
     } catch {
       setRefreshResult({ ok: false, text: t("codexAuth.quotaRefreshFailed") });
     } finally {

@@ -1004,6 +1004,7 @@ export const de: Record<TKey, string> = {
   "nav.closeMenu": "Menü schließen",
   "nav.goHome": "Zum Dashboard",
   "pws.refreshAllQuotas": "Alle Kontingente aktualisieren",
+  "pws.quotaRefreshDone": "Kontingentprüfung abgeschlossen",
   "integrations.subtitle": "Clients mit opencodex verbinden, Zugangsdaten verwalten und Client-Konfigurationen wiederherstellen.",
   "integrations.tabsLabel": "Integrationsbereiche",
   "integrations.tab.overview": "Übersicht",

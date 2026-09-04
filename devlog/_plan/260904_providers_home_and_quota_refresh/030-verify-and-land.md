@@ -32,7 +32,7 @@ attach both.
 
 Merge with admin, then prove it:
 
-```
+```bash
 git fetch origin dev
 git merge-base --is-ancestor <merge-sha> FETCH_HEAD
 ```

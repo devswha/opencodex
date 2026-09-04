@@ -1489,6 +1489,7 @@ export const ru: Record<TKey, string> = {
   "nav.closeMenu": "Закрыть меню",
   "nav.goHome": "Перейти к панели",
   "pws.refreshAllQuotas": "Обновить все квоты",
+  "pws.quotaRefreshDone": "Проверка квот завершена",
   "integrations.subtitle": "Подключайте клиенты к opencodex, управляйте учётными данными и восстанавливайте конфигурацию клиентов.",
   "integrations.tabsLabel": "Разделы интеграций",
   "integrations.tab.overview": "Обзор",

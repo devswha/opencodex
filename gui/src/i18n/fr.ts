@@ -1478,6 +1478,7 @@ export const fr: Record<TKey, string> = {
   "nav.closeMenu": "Fermer le menu",
   "nav.goHome": "Aller au tableau de bord",
   "pws.refreshAllQuotas": "Actualiser tous les quotas",
+  "pws.quotaRefreshDone": "Vérification des quotas terminée",
   "integrations.subtitle": "Connectez des clients à opencodex, gérez les identifiants et restaurez la configuration des clients.",
   "integrations.tabsLabel": "Surfaces d’intégration",
   "integrations.tab.overview": "Vue d’ensemble",

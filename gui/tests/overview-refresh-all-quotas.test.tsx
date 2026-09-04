@@ -125,7 +125,11 @@ test("the control stays disabled until the read settles, then reports success", 
   expect(refreshButton(host).disabled).toBe(false);
   const status = host.querySelector('[role="status"]');
   expect(status?.className).toContain("pws-status-ok");
-  expect(status?.textContent ?? "").toContain("refreshed");
+  // Deliberately "complete", not "refreshed": the server answers 200 even when one
+  // upstream probe failed and its provider kept a last-good row, so claiming every
+  // number is fresh would overstate what the read actually proved.
+  expect(status?.textContent ?? "").toContain("complete");
+  expect(status?.textContent ?? "").not.toContain("refreshed");
 });
 
 test("a failed read is reported as a failure, not silence", async () => {

@@ -1496,6 +1496,7 @@ export const tr: Record<TKey, string> = {
   "nav.closeMenu": "Menüyü kapat",
   "nav.goHome": "Panoya git",
   "pws.refreshAllQuotas": "Tüm kotaları yenile",
+  "pws.quotaRefreshDone": "Kota kontrolü tamamlandı",
   "integrations.subtitle": "İstemcileri opencodex'e bağlayın, kimlik bilgilerini yönetin.",
   "integrations.tabsLabel": "Entegrasyon yüzeyleri",
   "integrations.tab.overview": "Genel Bakış",

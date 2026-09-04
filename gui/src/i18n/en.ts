@@ -1505,6 +1505,7 @@ export const en = {
   "nav.closeMenu": "Close menu",
   "nav.goHome": "Go to dashboard",
   "pws.refreshAllQuotas": "Refresh all quotas",
+  "pws.quotaRefreshDone": "Quota check complete",
   "integrations.subtitle": "Connect clients to opencodex, manage credentials, and restore client configuration.",
   "integrations.tabsLabel": "Integration surfaces",
   "integrations.tab.overview": "Overview",
