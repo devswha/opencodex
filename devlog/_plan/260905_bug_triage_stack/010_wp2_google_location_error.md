@@ -192,3 +192,20 @@ Co-authored-by: agentHits <zvercombat26rus@icloud.com>
 - Parent must refresh the integration SHA before implementation; `origin/dev` moved during triage. No Git writes, GitHub comments, or file edits performed.
 
 
+
+## wp2 P stale-check (2026-09-04T22:50Z, origin/dev 980a9fbed)
+
+- `src/adapters/google-errors.ts` `classifyGoogle` and `src/lib/errors.ts` `classifyError`
+  unchanged vs the lane snapshot (verified by re-reading lines 58-79 / 240-290).
+- PR #3469's own diff places the location branch *directly after* the quota-exhausted check,
+  i.e. before rate-limit and auth — exactly the precedence defect audit blocker 1 named.
+  The carry therefore moves the branch to after the 403/access-denied branch (before 503),
+  and in `classifyError` keeps it after the auth block but *before* the subscription /
+  permission blocks so `location_not_supported` wins over generic `permission_denied`.
+- Drop the `google-http.ts` console.warn (unproven VPN/TUN advice) and the alias re-exports.
+- Parallel-task note: a separate maintainer session opened carry PRs #3539-#3546 against
+  `dev` while this loop ran; **#3542 is a carry of #3525** (this unit's 040 / wp5). wp5
+  will therefore not open a duplicate PR — its cycle re-verifies #3542's exact head and
+  stacks 050 on top of it (see 040 amendment at wp5's P). No carry exists yet for #3469
+  or #3407.
+
