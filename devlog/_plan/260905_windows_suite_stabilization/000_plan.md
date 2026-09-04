@@ -19,36 +19,42 @@ mistake was made once, cost ~70 minutes, and is recorded in `001`.
 
 ## Baseline
 
-| shard | pass | skip | fail | wall |
-|---|---|---|---|---|
-| 1/4 | 4459 | 39 | 2 | 971s |
-| 2/4 | 4606 | 16 | 22 | 1147s |
-| 3/4 | 4305 | 11 | 1 | 1274s |
-| 4/4 | 4413 | 12 | 0 | 888s |
-| total | **17783** | 78 | **25** | 4280s |
+| shard | pass | skip | fail | wall | note |
+|---|---|---|---|---|---|
+| 1/4 | 4459 | 39 | 2 | 971s | |
+| 2/4 | 4606 | 16 | 22 | 1147s | **contaminated** — 22 → 0 on a clean tree, see `007` |
+| 3/4 | 4305 | 11 | 1 | 1274s | |
+| 4/4 | 4413 | 12 | 0 | 888s | |
 
-25 failures, three defects, all in test-harness code. No product defect
-identified.
+**Three real failures, two defects**, both in test-harness code. No product
+defect identified.
+
+Shard 2's 22 were contamination I created: a `kill -9` on the wedged 1.3.14
+shard left a Windows handle on `tests/.tmp-oauth-store-multi-test`, so every
+later teardown in that fixture hit EPERM. Clean, the file is 22 pass in 1.4s.
+`007_acl_defect_retracted.md` has the falsification probe and the diagnosis it
+destroyed. That count was measured after the kill, so the confirmation run
+re-measures it.
+
+**Before any measurement a conclusion depends on**, clear what a killed run
+leaves behind:
+
+```bash
+cd /c/ocxwin/repo && ls -d tests/.tmp-* 2>/dev/null; ps | grep bun
+```
 
 ## Work phases
 
-Three, **independent** — disjoint write sets, no shared API. Any stacking is for
-review convenience, ordered by size.
+Two, **independent** — disjoint write sets, no shared API.
 
 | phase | doc | defect | failures | write set |
 |---|---|---|---|---|
-| wp-acl | `010_defect_acl_seam.md` | the ACL stub seam can be installed half-way, so a real `icacls.exe` outlives teardown | 22 | `tests/helpers/windows-secret-acl-stubs.ts` (new), `tests/oauth-store-multi.test.ts` |
 | wp-argv | `020_defect_launcher_argv.md` | a test reads the `cmd.exe` launcher's argument grammar as its mock API | 2 | `tests/multi-agent-keep-native-v1.test.ts` |
 | wp-cwd | `030_defect_unlinked_cwd.md` | the test needs a POSIX unlinked cwd, which Windows cannot produce | 1 | `tests/update-notify.test.ts` |
 
-One follow-up phase, which unlike the three above is **dependent**:
-
-| phase | doc | purpose | depends on |
-|---|---|---|---|
-| wp-hygiene | `040_acl_stub_hygiene.md` | make the half-installed seam unrepresentable: a repo-hygiene rule plus 17 fixture migrations | `010` (enforces adoption of the helper it introduces) |
-
-It is separate because it is a mechanical 18-file change that would swamp the
-review of a 22-failure bug fix. It fixes no failing test; it stops the next one.
+`010_defect_acl_seam.md` and `040_acl_stub_hygiene.md` are **RETRACTED** (`007`).
+Between them they would have added a test helper and rewritten 18 test files to
+prevent a defect that does not exist.
 
 ## Research
 

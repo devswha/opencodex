@@ -1,3 +1,9 @@
+> **RETRACTED — see 007_acl_defect_retracted.md.** The defect described here does
+> not exist. The icacls runners are never invoked by this fixture (measured: 0
+> invocations with both runners stubbed), and the 22 failures came from a Windows
+> handle held by a process I killed. Kept as the record of a diagnosis that matched
+> a corpus case exactly and was still wrong.
+
 # 040 — Follow-up: make the half-installed ACL seam unrepresentable
 
 Implementation phase, split out of `010` because it is a mechanical migration of

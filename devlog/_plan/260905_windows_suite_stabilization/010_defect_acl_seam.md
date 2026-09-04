@@ -1,3 +1,9 @@
+> **RETRACTED — see 007_acl_defect_retracted.md.** The defect described here does
+> not exist. The icacls runners are never invoked by this fixture (measured: 0
+> invocations with both runners stubbed), and the 22 failures came from a Windows
+> handle held by a process I killed. Kept as the record of a diagnosis that matched
+> a corpus case exactly and was still wrong.
+
 # 010 — Defect 2: the ACL stub seam can be installed half-way
 
 Implementation phase. Independent of `020` and `030` — no shared file, no
