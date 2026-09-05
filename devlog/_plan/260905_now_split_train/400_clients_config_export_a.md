@@ -408,7 +408,7 @@ Bottom layer; no parent PR. Review this layer's diff only. This layer tracks `de
 
 ## P stale-check (2026-09-05, wp400)
 
-origin/dev 3191fe1aa; config-export.ts unchanged since 445742966 (1990 lines). Base `dev` (S13 bottom; 410 #b, 420, 430, 440 chain on it). src/clients has no subdirectory today; the plan's `src/clients/config-export/` mirrors the src/codex/prompt-layers/ precedent from L300 — the audit confirms. 003 INTERMEDIATE-RESIDUAL-01 applies (1990 → 1299 → 273 after #b). Note: origin/dev currently carries 4 upstream test failures from #3588 (management-route-registry ×3, quota-reset-notify ×1); they are unrelated to this layer and will appear in the lidge receipt until dev is fixed. Executor rules: no bun run test; OCX_TEST_NO_QUEUE=1; CI hygiene requires a test change.
+Historical stale check at origin/dev 3191fe1aa: config-export.ts unchanged since 445742966 (1990 lines). Base `dev` (S13 bottom; 410 #b, 420, 430, 440 chain on it). The planned subdirectory mirrors the src/codex/prompt-layers/ precedent from L300. 003 INTERMEDIATE-RESIDUAL-01 applies. Known upstream failures were management-route-registry ×3 and quota-reset-notify ×1. The earlier OCX_TEST_NO_QUEUE=1 instruction is withdrawn: it contaminates lock tests and must be unset for remote verification. No local suites; CI hygiene requires a test change.
 
 ## A audit synthesis (2026-09-05, wp400)
 
@@ -419,3 +419,25 @@ Hooke (`01a06f9f-f57f-7fc3-9261-b07f291929be`, requested gpt-6-astra high) retur
 Accepted findings: replace the stale raw-churn escalation with the binding ≤150 non-move gate; explicitly retain original blank line 33 and mark projected line counts as pre-pruning estimates. No blocker was rebutted. Re-review confirmed both closures at docs HEAD `38ad3cf5a` plus the working diff. `git diff --check` exited 0 after those edits; no local test suite was run.
 
 Operational audit by Wegener (`01a06fa6-5e3c-7840-8172-8587e853dcc7`, explicitly `model=gpt-6-astra`, `reasoning_effort=high`) found two blockers: checkout-local source identity was incompatible with the prior separate execution tree, and the remote recipe switched a shared checkout. Both were accepted and folded into 003 WORKTREE-EVIDENCE-01 and 000. Re-audit returned PASS, with no blocker to entering B. A documentation-only delta must not stand in for implementation evidence from another checkout. The shared-remote command above is superseded and must not be executed. Pre-C hold: independently review the actual isolated runner, exact-SHA and clean-tree checks, and failure propagation before running it. Approval of the plan is not proof that remote verification passed.
+
+## B implementation record (2026-09-05)
+
+Franklin (`01a06fac-95ee-77a0-8916-f7546c2b8996`, explicitly gpt-6-astra high) implemented only the approved source/test paths in a2c0 and handed them back without Git mutations or local tests. Main inspected the diff and measured all leaves. Source owner search and the A inventory were reused; no new algorithm or parallel implementation was introduced.
+
+| File | Change and impact | Measured lines |
+|---|---|---:|
+| `src/clients/config-export.ts` | Retains dispatch/compatibility exports, imports moved owners; caller paths unchanged | 1298 |
+| `src/clients/config-export/contracts.ts` | Canonical shared types, no runtime behavior | 150 |
+| `src/clients/config-export/constants.ts` | Single constant/default-object owner | 69 |
+| `src/clients/config-export/model-metadata.ts` | Existing normalization/modality/admission helpers moved intact | 113 |
+| `src/clients/config-export/omp.ts` | Existing OMP builder, summary and owned fragment | 104 |
+| `src/clients/config-export/zcode.ts` | Existing ZCode builder, summary and owned fragment | 92 |
+| `src/clients/config-export/dsh.ts` | Existing DSH builder, summary and owned fragment | 132 |
+| `src/clients/config-export/mcode.ts` | Existing MCode builder, summary and owned fragment | 83 |
+| `tests/config/client-config-export.test.ts` | Adds identity and independent fixed-byte/fragment assertions; original assertions/fixtures unchanged | 919 |
+
+The worker's AST inventory reports 153 unique owners (63 moved, 90 retained), 96 public exports (47 types, 49 values), 707 moved original lines and 109 non-move lines (36 leaf glue + 18 facade additions + 3 removals + 52 test additions). Actual facade size is one below the estimate because the unused provider import was removed. `git diff --check` passed. The existing test file was already over 400; its scoped extension is not a claim to resolve test-file debt. Final independent graph/syntax and runtime gates remain pending; the worker's combined graph/syntax command hit an AST no-match exit and did not establish a pass.
+
+Verification runner: `.codexclaw/evidence/01a06e97-b9d8-7250-8204-bb788338c288/wp400-check.sh` invokes the reviewed `wp400-remote-check.sh` only over SSH. Wegener closed the pre-C hold after four clean-tree substitutions were changed to standalone Git-status assignments and the no-queue override was removed. Both scripts pass `bash -n`; runtime success is not implied.
+
+Baseline evidence: isolated remote `/tmp/ocx-wp400.4dKWtB/repo`, exact base `850afb2e9f84979c87e914b248de482f44b34cd6`; typecheck, 440 focused tests across 21 files and privacy scan passed. Full suite exited 1. The initial runner mistakenly exported OCX_TEST_NO_QUEUE=1, inducing four lock-test failures in addition to the known upstream route-registry/rollover failures. That run is contaminated and cannot certify all gates. The variable is now explicitly unset; corrected verification is required. Full baseline output is retained as `wp400-base-check.log` in the same evidence directory. No local suite was run.
