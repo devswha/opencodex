@@ -83,6 +83,11 @@ This applies to both tee inspection and eager relay, including Windows rewrite t
 even when the upstream read rejects before the response-body cancellation hook runs.
 A terminal captured during the bounded post-disconnect drain retains its actual outcome.
 
+If native passthrough rewriting fails, including when it exceeds the translation
+buffer budget, the relay reports the failure without waiting for upstream inspection
+to finish. It cancels the upstream work and emits `response.failed` followed by
+`data: [DONE]`; a budget overflow uses the `translation_buffer_limit` error code.
+
 Client-facing Responses SSE frames are limited to 4 MiB per frame, measured in raw bytes before the
 SSE block delimiter. On HTTP, an unterminated upstream frame that exceeds the limit fails closed
 with a synthetic `response.failed` event followed by `data: [DONE]`. On the Responses WebSocket
