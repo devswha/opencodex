@@ -90,6 +90,29 @@ reads the `TEST_SHARD` env line.
 
 ## Superseded: MODIFY `.github/workflows/ci.yml` (`platform-windows`) — raise to 40
 
+---
+
+## Result: run 33936695508 on the six-shard head (`293f3e675`)
+
+| shard | wall | result |
+|---|---|---|
+| 1/6 | 19.1 min | SUCCESS |
+| 2/6 | 16.0 min | SUCCESS |
+| 3/6 | 16.0 min | SUCCESS |
+| 4/6 | 18.6 min | SUCCESS |
+| 5/6 | 7.7 min | SUCCESS |
+| 6/6 | 10.4 min | SUCCESS |
+
+All six green, every shard under the unchanged 25-minute ceiling, slowest at
+19.1 with ~6 minutes of margin (the four-shard slowest was 25.2, which is to
+say none). The spread (7.7 to 19.1) shows Bun's round-robin does not tile the
+suite evenly by cost — the codex-integration files cluster — but the worst
+shard is now where the four-shard AVERAGE used to be.
+
+That is the first all-green Windows run since the stack rebased onto current
+`dev`. Run 33937730205 is dispatched on the same head as the second
+consecutive, which is `c-1`.
+
 ```yaml
 -    timeout-minutes: 25
 +    # 25 cancelled a green 3/4 at 25m12s on run 33934756997 — the same truncation the
