@@ -378,3 +378,4 @@ export async function describeImagesInPlace(
   }
   syncRawBodyImageDescriptions(parsed, descriptions);
 }
+
