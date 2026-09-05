@@ -392,13 +392,13 @@ Drafting verification is document-only: required heading order, complete symbol 
 
 Title: `refactor(clients): extract low-fanout client formats and dependency foundations (split S13 L1/5)`
 
-Branch: `codex/split-clients-config-export-a`. Replanned base: `codex/win-7-postmerge-stability` (open prerequisite PR #3610; pinned `afdd38ff43c64696153372fc2e27a38aff208c73`). Closes: none.
+Branch: `codex/split-clients-config-export-a`. Current replanned base: `dev`, pinned `be81013fab6d83ff630ca5f38e7881678a303871` after prerequisite #3610 landed. Closes: none.
 
 Use all sections of `.github/PULL_REQUEST_TEMPLATE.md` (Summary, Verification, Checklist), including the size-gate disposition and DEV-STACK-03 map below. This draft creates no PR; placeholder PR numbers are intentional.
 
 | # | PR | Layer | Branch | Base | Review focus |
 |---|---|---|---|---|---|
-| 1 | #3611 | 400 — this layer | `codex/split-clients-config-export-a` | `codex/win-7-postmerge-stability` (#3610) | extract low-fanout client formats and dependency foundations |
+| 1 | #3611 | 400 — this layer | `codex/split-clients-config-export-a` | `dev` | extract low-fanout client formats and dependency foundations |
 | 2 | #TBD-S13-L2 | 410 | `codex/split-clients-config-export-b` | `codex/split-clients-config-export-a` | finish client path and format partitions |
 | 3 | #TBD-S13-L3 | 420 | `codex/split-cli-opencode` | `codex/split-clients-config-export-b` | separate OpenCode config and catalog from launch |
 | 4 | #TBD-S13-L4 | 430 | `codex/split-cli-minimax` | `codex/split-cli-opencode` | isolate MMX protocol and termination owners |
@@ -413,6 +413,10 @@ Historical stale check at origin/dev 3191fe1aa: config-export.ts unchanged since
 ## A audit synthesis (2026-09-05, wp400)
 
 ### C→P replan on user-requested continuation
+
+Latest replan: the user authorized continuing verification without further permission stops. #3610 was externally merged as5ab8aa9a2; #3611 auto-retargeted todev. Pin the fetched integration tip `be81013fab6d83ff630ca5f38e7881678a303871`, which containsafdd and the previously omitted dev changes, including #3622 quota-fixture reconciliation and #3623 failure diagnostics. The unsplit config-export source and original focused test remain byte-identical betweenafdd and this newbase. This supersedes the temporary older-foundation choice below.
+
+Replay only our commits afterafdd ontobe810 in the existing a2c0 worktree, with --no-update-refs and a preserved7d4 reference. Candidate graph/import audit must usebe810 dependencies plus the unchanged split overlay; after rebase, compare all nine source/test blobs and the parent-relative path set. Require new resulting-head remote receipt and CI. The previously cancelled CI retry was authorized and started, then cancelled by Main as obsolete once the merged-base change was confirmed. Do not treat that cancellation as another missing permission. Future scoped check reruns are authorized; no local suite or merge is part of this action.
 
 The previous C result remains failed, not completed. The safe public contract split is preserved at244663568. Full remote checks failed on the four baseline quota/route tests; current GitHub CI additionally reports a quota-window fixture mismatch, under separate read-only RCA. These results cannot certify a new head.
 
