@@ -392,25 +392,37 @@ Drafting verification is document-only: required heading order, complete symbol 
 
 Title: `refactor(clients): extract low-fanout client formats and dependency foundations (split S13 L1/5)`
 
-Branch: `codex/split-clients-config-export-a`. Base: `dev`. Closes: none.
+Branch: `codex/split-clients-config-export-a`. Replanned base: `codex/win-7-postmerge-stability` (open prerequisite PR #3610; pinned `afdd38ff43c64696153372fc2e27a38aff208c73`). Closes: none.
 
 Use all sections of `.github/PULL_REQUEST_TEMPLATE.md` (Summary, Verification, Checklist), including the size-gate disposition and DEV-STACK-03 map below. This draft creates no PR; placeholder PR numbers are intentional.
 
 | # | PR | Layer | Branch | Base | Review focus |
 |---|---|---|---|---|---|
-| 1 | #TBD-S13-L1 | 400 — this layer | `codex/split-clients-config-export-a` | `dev` | extract low-fanout client formats and dependency foundations |
+| 1 | #3611 | 400 — this layer | `codex/split-clients-config-export-a` | `codex/win-7-postmerge-stability` (#3610) | extract low-fanout client formats and dependency foundations |
 | 2 | #TBD-S13-L2 | 410 | `codex/split-clients-config-export-b` | `codex/split-clients-config-export-a` | finish client path and format partitions |
 | 3 | #TBD-S13-L3 | 420 | `codex/split-cli-opencode` | `codex/split-clients-config-export-b` | separate OpenCode config and catalog from launch |
 | 4 | #TBD-S13-L4 | 430 | `codex/split-cli-minimax` | `codex/split-cli-opencode` | isolate MMX protocol and termination owners |
 | 5 | #TBD-S13-L5 | 440 | `codex/split-integrations-state` | `codex/split-clients-config-export-b` | separate classification from state reads |
 
-Bottom layer; no parent PR. Review this layer's diff only. This layer tracks `dev` directly and has no parent-layer cascade; re-verify its tip/base ref after a base update while preserving checkout ownership. Bottom-up merging remains a separate user-authorized action and is out of scope.
+Bottom S13 layer, with an explicit external verification prerequisite #3610. Review this layer's diff only. No S13 child has been published yet. After a base change, re-verify the layer tip and parent-relative diff; after the prerequisite lands, restack/retarget to dev. Merging remains out of scope.
 
 ## P stale-check (2026-09-05, wp400)
 
 Historical stale check at origin/dev 3191fe1aa: config-export.ts unchanged since 445742966 (1990 lines). Base `dev` (S13 bottom; 410 #b, 420, 430, 440 chain on it). The planned subdirectory mirrors the src/codex/prompt-layers/ precedent from L300. 003 INTERMEDIATE-RESIDUAL-01 applies. Known upstream failures were management-route-registry ×3 and quota-reset-notify ×1. The earlier OCX_TEST_NO_QUEUE=1 instruction is withdrawn: it contaminates lock tests and must be unset for remote verification. No local suites; CI hygiene requires a test change.
 
 ## A audit synthesis (2026-09-05, wp400)
+
+### C→P replan on user-requested continuation
+
+The previous C result remains failed, not completed. The safe public contract split is preserved at244663568. Full remote checks failed on the four baseline quota/route tests; current GitHub CI additionally reports a quota-window fixture mismatch, under separate read-only RCA. These results cannot certify a new head.
+
+Decision: use #3610 as an explicit verification prerequisite while keeping its fixes and this module split in separate PRs. Pin `afdd38ff43c64696153372fc2e27a38aff208c73`, not a moving ref. Read-only fetch and `git diff 850afb2e9 <parent> -- src/clients/config-export.ts` show the source being split is byte-identical.
+
+Ancestry disposition: the parent's merge base with850 is593978db0. It lacks3191fe1aa,45045623b,f8ba644f3,850afb2e9, including changes across eight catalog/provider/router source files. Main explicitly accepts this older verification foundation for this dependent draft PR; no claim is made that it is equivalent to850. Those commits are not replayed into our parent-relative diff. Original850-based results remain historical, and neither their graph proof nor runtime results substitute for the new basis. Audit required imports and the entire reachable candidate graph against the pinned parent before B.
+
+Build action: in the same a2c0 worktree, rebase only this branch's own commits after850 onto the pinned parent, preserving original244663568 in git history/references. No other branch/worktree is rebased, reset, overwritten or merged. Inspect the resulting parent-relative diff for exactly the approved split/test/document paths. Publish with an exact-old-head force-with-lease, keeping #3611 draft and retargeting only it to the open prerequisite branch. No S13 upper branches exist to cascade yet.
+
+Check action: independently review the resulting interdiff/base, then run the reviewed isolated remote verifier with the new40-character head. Require fresh typecheck, focused tests, privacy, full-suite receipt and exact-head CI. Restore failures by diagnosis, never by skips or reduced assertions. The earlier mutation proof may be cited only if the mutated source and relevant test blobs remain byte-identical; otherwise repeat it remotely. After prerequisite landing, the normal restack/retarget and exact-head checks still apply.
 
 Execution basis is now pinned to `850afb2e9f84979c87e914b248de482f44b34cd6`. Hooke rechecked the eight-source-file delta from `3191fe1aa`: config-export.ts and its required declarations are unchanged, and traversal including inline/type/re-export edges found no return cycle. Final verdict: PASS. The complete preserved roadmap is at immutable commit `dc44b08cafbbd45da81f940f1e8c00a9e5f61ce1` on `codex/260905-modular-debt-ledger-docs`; use `git show <commit>:devlog/_plan/260905_now_split_train/<document>` for roadmap documents not carried in this layer's PR. The current a2c0 branch is `codex/split-clients-config-export-a`, created in place from that pinned basis; no managed worktree or session-state relocation occurred. Remote preflight found `/usr/local/bin/bun`, the expected origin URL and a clean shared seed; it did not run tests or switch the seed checkout.
 

@@ -154,6 +154,8 @@ measure.
 
 ## WORKTREE-EVIDENCE-01 — real implementation and receipt identity
 
+WP400 replan exception: PR #3610 (`codex/win-7-postmerge-stability`) is an explicit verification prerequisite. WP400's PR targets that open head branch, pinned to `afdd38ff43c64696153372fc2e27a38aff208c73` for the replan. This is not a runtime dependency or a change to other stacks. Replay only WP400's own commits; do not modify, carry as our own, merge or enable auto-merge for #3610. See400 for the audited ancestry tradeoff and fresh-proof requirement. When the prerequisite lands, perform the normal scoped restack/retarget to dev and reverify affected heads.
+
 The original dedicated-worktree execution choice conflicts with the FSM's
 checkout-local source identity. Operational audit by Wegener found no
 separate supported execution-root binding: `--cwd` selects both state and
