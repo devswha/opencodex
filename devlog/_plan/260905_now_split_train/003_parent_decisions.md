@@ -104,9 +104,11 @@ base `dev`, new bottom of S04)**: move `DesktopExecutorConfig`
 inline `import("../adapters/cursor/native-exec-desktop").DesktopExecutorConfig`
 at `src/types/provider.ts:701` to the contract file. Type-only, zero runtime
 effect; breaks the provider → desktop-implementation edge for good. 110's
-base becomes `codex/split-cursor-desktop-executor-contract`; S04 depth
-becomes 6, the one documented exception to the depth-5 heuristic (the layer
-is a 15-line type move; it is not worth a separate stack).
+base becomes `codex/split-cursor-desktop-executor-contract`. S04 has six
+members including 105. The original linear proposal called that depth 6 and
+made an exception; STACK-INDEPENDENCE-01 below superseded that topology.
+Current planned parents are 105→dev, 110/120/130→105, 140→130, 150→110.
+Thus S04's maximum dependent depth is 3, and the five-layer cap still applies.
 
 ## COMPANION-EDIT-01 — allowed edits outside the split file
 
@@ -154,9 +156,18 @@ measure.
 
 ## WORKTREE-EVIDENCE-01 — real implementation and receipt identity
 
-The WP400 external prerequisite has now landed. Its temporary #3610 parent exception is historical: #3611 targetsdev again, pinned tobe81013fab6d83ff630ca5f38e7881678a303871 for the resumed restack. All original verification requirements remain; user authorization now explicitly covers continuing scoped CI reruns and repair work without repeat permission questions.
+Current WP400 authority: branch `codex/split-clients-config-export-a`, PR #3611,
+base `dev` at `be81013fab6d83ff630ca5f38e7881678a303871`. This is the base
+commit, not the tested layer head; the verifier derives the latter from the
+clean current branch and matches it to the fetched remote branch. #3610 has
+landed as `5ab8aa9a2d9d2a3926469f9d8c82387b43c6d0e9`; it is no longer an
+open prerequisite or a retargeting destination. Scoped CI reruns and repair
+work are authorized; no local suite or merge is requested.
 
-WP400 replan exception: PR #3610 (`codex/win-7-postmerge-stability`) is an explicit verification prerequisite. WP400's PR targets that open head branch, pinned to `afdd38ff43c64696153372fc2e27a38aff208c73` for the replan. This is not a runtime dependency or a change to other stacks. Replay only WP400's own commits; do not modify, carry as our own, merge or enable auto-merge for #3610. See400 for the audited ancestry tradeoff and fresh-proof requirement. When the prerequisite lands, perform the normal scoped restack/retarget to dev and reverify affected heads.
+Historical only: WP400 temporarily used #3610 at
+`afdd38ff43c64696153372fc2e27a38aff208c73` to separate a verification fix
+from the split. That older basis and its open-parent workflow are retired.
+The historical evidence remains in400; do not execute it as the current plan.
 
 The original dedicated-worktree execution choice conflicts with the FSM's
 checkout-local source identity. Operational audit by Wegener found no
@@ -182,9 +193,9 @@ code, including SSH transport failures. Failed or incomplete gates keep the
 layer unverified; do not synthesize a passing receipt. Retain temporary
 checkouts/evidence until scoped cleanup is authorized.
 
-Invoke `cxc receipt test --cwd /Users/jun/.codex/worktrees/a2c0/opencodex
---session 01a06e97-b9d8-7250-8204-bb788338c288 -- bash <reviewed-runner> <SHA>`
-from C. The runner verifies local HEAD, remote HEAD, and branch/CI head agree;
-no local Bun test command is allowed. This supersedes shared-checkout recipes
-in 002 and older decade docs; each current plan must name the isolated runner
-before execution. Remote availability and success require real evidence.
+Use the complete isolated Bash recipe in400's Verification section from C.
+It checks the clean local layer HEAD, fetched remote HEAD and final remote
+state, while preserving output and failures inside the receipt command.
+No local Bun test command is allowed. Older shared-checkout recipes must not
+be reused; each current plan must supply its isolated verifier. Availability
+and success require real execution evidence.

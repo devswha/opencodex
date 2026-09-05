@@ -2,14 +2,14 @@
 
 ## Loop spec
 
-- Archetype: `pure-move`. Bounded delegated **docs-only C3** task; parent owns orchestration, loop and goal state.
+- Archetype: `pure-move`, C3 implementation with explicit security regression review for the relocated admission/credential helpers. Main owns orchestration and goal state.
 - Goal: extract low-fanout client formats and dependency foundations, preserving the original public import path and behavior.
 - Non-goals: behavior fixes, exported renames, signature changes, new validation, changed credentials/admission policy, changed config paths, new framework, caller migration, merges or releases. Preserve function bodies verbatim, including >50-line functions; function redesign is not this pure-move train.
-- Verifier: `002_layer_map.md` **Per-layer gate**, instantiated below; every layer must pass independently at its actual tip. Full suite on `ssh lidge` only, never locally.
-- Stop: exact-tip acceptance evidence recorded; do not merge. This drafting task stops after document checks and runs no tests, code entrypoints, or Git mutations.
+- Verifier: this document's authoritative Verification section; every layer must pass independently at its actual tip. All tests run on `ssh lidge`, never locally.
+- Stop: exact-tip acceptance evidence and CI recorded, then close the work phase; do not merge. The earlier docs-only drafting pass is historical.
 - Size gate: the binding `003_parent_decisions.md` PURE-MOVE-SIZE-01 resolves the original 500-line churn conflict. Non-move changes must stay **≤150 lines**, with move-aware diff review and unique-owner evidence for every inventory symbol. Raw added+deleted churn is not claimed to meet 500. Stale source, a leaf >400, any new cycle, any behavioral difference, or non-move changes above the bound stop implementation.
 
-Basis: task docs HEAD `4cc219549`; code `origin/dev=1362b1a3841b4de20177e5d65865a513dd7936c4`. Read 000, 001, S13 rows/Per-layer gate of 002, and the relevant records in `devlog/_plan/260905_modular_debt_ledger/016_lane_cli_storage_usage_update_lab_scripts.md`. Source was read with `git show origin/dev:<path>`; `git diff origin/dev -- src/clients/config-export.ts src/cli/opencode.ts src/cli/minimax.ts src/integrations/state.ts` was empty. Older tips in 000/001 are historical, not this plan's code basis.
+Inventory basis (historical): task docs HEAD `4cc219549`; code `origin/dev=1362b1a3841b4de20177e5d65865a513dd7936c4`. The drafting pass read 000, 001, S13 rows/Per-layer gate of 002, and the relevant records in `devlog/_plan/260905_modular_debt_ledger/016_lane_cli_storage_usage_update_lab_scripts.md`. Source was read with `git show origin/dev:<path>`; `git diff origin/dev -- src/clients/config-export.ts src/cli/opencode.ts src/cli/minimax.ts src/integrations/state.ts` was empty. Current execution uses the dev base in the PR section; the inventoried source bytes were checked unchanged.
 
 Structural decision (cxc-dev §1/§5, architecture ARCH-MAP-01/ARCH-DECISION-01): 1990 lines mix distinct concerns. Reject deleting/configuring the feature (does not preserve behavior), and generic helpers/index barrels (do not establish ownership). Reuse every existing algorithm and lower-level dependency; only relocate declarations. Inspected conventions: `src/config/paths.ts`, `src/config/process-state.ts`, `src/cli/launcher-context.ts`, `src/cli/account-extended.ts`, `src/integrations/ownership-policy.ts`. Use the domain subfolder `src/clients/config-export/` without an index barrel. The original remains an existing compatibility boundary, not an internal import shortcut.
 
@@ -340,7 +340,7 @@ Discovery: `rg -l 'src/clients/config-export' tests --glob '*.ts'`, followed by 
 - `tests/clients/prime-client.test.ts` — unchanged.
 - `tests/clients/sync-client-integrations.test.ts` — unchanged.
 - `tests/config/client-config-export-new-clients.test.ts` — unchanged.
-- `tests/config/client-config-export.test.ts` — unchanged.
+- `tests/config/client-config-export.test.ts` — original import/assertions retained; facade identity and fixed-byte regressions added.
 - `tests/config/client-config-new-clients.test.ts` — unchanged.
 - `tests/gui/integrations-invariants.test.ts` — unchanged.
 - `tests/providers/aside-client.test.ts` — unchanged.
@@ -354,28 +354,67 @@ No source-text reader of src/clients/config-export.ts was found. `tests/config/c
 
 C-phase red proof: temporarily treat incompatible audio-only input as text in the moved metadata function and observe `tests/clients/client-export-modality-enum.test.ts:96` fail; restore. Temporarily retain none in the moved MCode effort list and observe `tests/providers/minimax-clients.test.ts:117` fail; restore.
 
-These are future implementation checks, not tests run by this docs author. No new test file is required. Facade/leaf identity assertions may be added in an existing focused test; if a new test file is required, parent must explicitly expand scope to include both test-layout registry files (`scripts/test-layout/layout.json`, `tests/fixtures/test-layout-expected.json`). Never commit red-proof mutations.
+The implementation uses the existing focused test file; no new test file was needed. Original assertions remain intact. The recorded red/restored-green proof applies to the unchanged tested source and test blobs; repeat it if those change. Never commit mutation probes. A future new test file requires both layout registry entries.
 
 ## Verification
 
-Future implementation gate only, in the dedicated layer worktree at its actual tip. Domains: ci-workflows, cli, clients, config, gui, providers, server. Explicit source-reader and subprocess coverage is not replaced by test:changed.
+Run the following Bash recipe from this session's bound checkout while its FSM is at C, after committing and publishing the layer head. The session identifier below belongs to this task; another task must use its own latest SessionStart binding. All Bun commands run on `lidge`, inside a fresh temporary clone. No shared seed checkout is switched. The local commands only validate identity, transport the verifier and retain output.
 
-```sh
+```bash
+set -euo pipefail
+wp400_root=$(git rev-parse --show-toplevel)
+wp400_expected=$(git rev-parse HEAD)
+wp400_status=$(git status --porcelain)
+test -z "$wp400_status"
+wp400_log="$wp400_root/.codexclaw/evidence/01a06e97-b9d8-7250-8204-bb788338c288/wp400-remote-check-$wp400_expected.log"
+mkdir -p "$(dirname "$wp400_log")"
+cxc receipt test --cwd "$wp400_root" --session 01a06e97-b9d8-7250-8204-bb788338c288 -- bash -c '
+set -euo pipefail
+test "$(git rev-parse HEAD)" = "$1"
+local_status=$(git status --porcelain)
+test -z "$local_status"
+ssh lidge bash -s -- "$1" 2>&1 | tee "$2"
+test "$(git rev-parse HEAD)" = "$1"
+local_status=$(git status --porcelain)
+test -z "$local_status"
+' -- "$wp400_expected" "$wp400_log" <<'REMOTE'
+set -euo pipefail
+expected=${1:?expected SHA required}
+[[ "$expected" =~ ^[0-9a-f]{40}$ ]]
+run_dir=$(mktemp -d /tmp/ocx-wp400.XXXXXX)
+printf 'RETAINED_RUN_DIR=%s\n' "$run_dir"
+git clone --no-checkout https://github.com/lidge-jun/opencodex.git "$run_dir/repo"
+cd "$run_dir/repo"
+git fetch origin refs/heads/codex/split-clients-config-export-a
+test "$(git rev-parse FETCH_HEAD)" = "$expected"
+git checkout --detach "$expected"
+bun --version
+bun install --frozen-lockfile
+(cd gui && bun install --frozen-lockfile)
+tree_status=$(git status --porcelain)
+test -z "$tree_status"
+printf 'CHECKOUT=%s\nHEAD=%s\n' "$PWD" "$(git rev-parse HEAD)"
+unset OCX_TEST_NO_QUEUE
 bun run typecheck
 bun test tests/ci-workflows/dsh-path-contract.test.ts tests/ci-workflows/dsh-writer-lock.test.ts tests/cli/cli-help.test.ts tests/clients/client-export-modality-enum.test.ts tests/clients/integrations-state.test.ts tests/clients/integrations-writer.test.ts tests/clients/omp-path-contract.test.ts tests/clients/pi-path-contract.test.ts tests/clients/prime-client.test.ts tests/clients/sync-client-integrations.test.ts tests/config/client-config-export-new-clients.test.ts tests/config/client-config-export.test.ts tests/config/client-config-new-clients.test.ts tests/gui/integrations-invariants.test.ts tests/providers/aside-client.test.ts tests/providers/minimax-clients.test.ts tests/providers/zcode-client.test.ts tests/server/management-client-config-route.test.ts tests/server/management-integration-journal-delete.test.ts tests/server/management-integration-routes.test.ts tests/cli/cli-export-command.test.ts
 bun run privacy:scan
-wc -l src/clients/config-export/contracts.ts src/clients/config-export/constants.ts src/clients/config-export/model-metadata.ts src/clients/config-export/omp.ts src/clients/config-export/zcode.ts src/clients/config-export/dsh.ts src/clients/config-export/mcode.ts src/clients/config-export.ts
-# Compare resolved old-path consumer identities/counts with the list in this plan
-rg -n 'clients/config-export' src gui/src scripts tests
-# Full suite on lidge only; parent serializes access to this shared remote checkout
-ssh lidge 'cd ~/ocx-ci/opencodex && git fetch origin codex/split-clients-config-export-a && git checkout -q FETCH_HEAD && bun install --frozen-lockfile >/dev/null && bun run test'
+if bun run test; then
+  test_rc=0
+else
+  test_rc=$?
+fi
+printf 'SUITE_EXIT=%s\n' "$test_rc"
+if [ "$test_rc" -ne 0 ]; then exit "$test_rc"; fi
+test "$(git rev-parse HEAD)" = "$expected"
+tree_status=$(git status --porcelain)
+test -z "$tree_status"
+printf 'VERIFIED_HEAD=%s\n' "$expected"
+REMOTE
 ```
 
-The remote command intentionally keeps bun run test last, preserving its exit code instead of masking failure behind tail. Parent records remote HEAD and full output. Every command exits 0; focused/full tests report 0 failures. Delivery requires a green exact-head GitHub CI rollup, not an empty required-check list.
+The local pipeline propagates SSH and log-write failure to the receipt producer. Remote commands stop on failure; full-suite status is printed and returned. Final remote HEAD and Git status must still match the clean layer head. Keep the temporary clone and full output as evidence. A receipt proves the command actually run, not this prose; require fresh current-head CI and independent review before closure.
 
-Per 002, `bun test tests/lab/core-lab-boundary.test.ts` is conditional on source edits under `src/server|src/router|src/lib`: **not applicable** to this approved layer touch set. Do not edit its PROTECTED roots. If implementation expands into those directories, parent must approve scope and run that guard explicitly. Preserve the 33 original direct consumer files; new facade-to-leaf imports are not caller churn. The grep is a discovery list, not by itself a proof of consumer identity: resolve relative and dynamic paths as in the inventory method. Repeat lane 016 method G on the final imports to prove zero new cycles; typecheck alone is not a cycle detector.
-
-Drafting verification is document-only: required heading order, complete symbol ranges/ownership, projected line arithmetic, export coverage, referenced test paths, unique leaf paths and assigned-file scope. No test, typecheck, privacy scan or remote command above was executed in this drafting task.
+Local read-only structural checks are `git diff --check`, `wc -l` for the eight source files, and importer discovery with `rg -n 'clients/config-export' src gui/src scripts tests`. Resolve actual import edges when comparing consumers; a grep count alone is insufficient. New leaves must have no facade return edge, including type-only and literal dynamic imports. The full suite includes the core/Lab guard; do not weaken its protected roots. This layer's own source delta does not touch those protected files.
 
 ## Accept criteria
 
@@ -394,7 +433,7 @@ Title: `refactor(clients): extract low-fanout client formats and dependency foun
 
 Branch: `codex/split-clients-config-export-a`. Current replanned base: `dev`, pinned `be81013fab6d83ff630ca5f38e7881678a303871` after prerequisite #3610 landed. Closes: none.
 
-Use all sections of `.github/PULL_REQUEST_TEMPLATE.md` (Summary, Verification, Checklist), including the size-gate disposition and DEV-STACK-03 map below. This draft creates no PR; placeholder PR numbers are intentional.
+Use all sections of `.github/PULL_REQUEST_TEMPLATE.md` (Summary, Verification, Checklist), including the size-gate disposition and DEV-STACK-03 map below. This layer is PR #3611; placeholder rows refer only to future layers.
 
 | # | PR | Layer | Branch | Base | Review focus |
 |---|---|---|---|---|---|
@@ -404,7 +443,7 @@ Use all sections of `.github/PULL_REQUEST_TEMPLATE.md` (Summary, Verification, C
 | 4 | #TBD-S13-L4 | 430 | `codex/split-cli-minimax` | `codex/split-cli-opencode` | isolate MMX protocol and termination owners |
 | 5 | #TBD-S13-L5 | 440 | `codex/split-integrations-state` | `codex/split-clients-config-export-b` | separate classification from state reads |
 
-Bottom S13 layer, with an explicit external verification prerequisite #3610. Review this layer's diff only. No S13 child has been published yet. After a base change, re-verify the layer tip and parent-relative diff; after the prerequisite lands, restack/retarget to dev. Merging remains out of scope.
+Bottom S13 layer against `dev`. The former prerequisite #3610 has landed and the retarget/restack is complete. Review this layer's diff only. No S13 child had been published at this checkpoint. Future base changes require normal scoped restack and fresh verification; no open-prerequisite retargeting action remains. Merging stays out of scope.
 
 ## P stale-check (2026-09-05, wp400)
 
@@ -412,35 +451,29 @@ Historical stale check at origin/dev 3191fe1aa: config-export.ts unchanged since
 
 ## A audit synthesis (2026-09-05, wp400)
 
-### C→P replan on user-requested continuation
+### Current execution authority
 
-Latest replan: the user authorized continuing verification without further permission stops. #3610 was externally merged as5ab8aa9a2; #3611 auto-retargeted todev. Pin the fetched integration tip `be81013fab6d83ff630ca5f38e7881678a303871`, which containsafdd and the previously omitted dev changes, including #3622 quota-fixture reconciliation and #3623 failure diagnostics. The unsplit config-export source and original focused test remain byte-identical betweenafdd and this newbase. This supersedes the temporary older-foundation choice below.
+The current branch is `codex/split-clients-config-export-a`, PR #3611, base `dev` at `be81013fab6d83ff630ca5f38e7881678a303871`. That SHA is the integration base, not the layer head. The restack has already been performed. For current verification, use the clean layer HEAD and the isolated recipe above; do not repeat the retired parent rebase below. #3610 has landed as `5ab8aa9a2d9d2a3926469f9d8c82387b43c6d0e9`.
 
-Replay only our commits afterafdd ontobe810 in the existing a2c0 worktree, with --no-update-refs and a preserved7d4 reference. Candidate graph/import audit must usebe810 dependencies plus the unchanged split overlay; after rebase, compare all nine source/test blobs and the parent-relative path set. Require new resulting-head remote receipt and CI. The previously cancelled CI retry was authorized and started, then cancelled by Main as obsolete once the merged-base change was confirmed. Do not treat that cancellation as another missing permission. Future scoped check reruns are authorized; no local suite or merge is part of this action.
+### Historical replan record — not executable
 
-The previous C result remains failed, not completed. The safe public contract split is preserved at244663568. Full remote checks failed on the four baseline quota/route tests; current GitHub CI additionally reports a quota-window fixture mismatch, under separate read-only RCA. These results cannot certify a new head.
+The original `244663568` split on the `850afb2e9` foundation passed focused checks but failed the full suite on four inherited quota/route cases. A temporary stack used the then-open #3610 head `afdd38ff43c64696153372fc2e27a38aff208c73`; its older foundation omitted four intervening dev commits, an explicitly recorded and audited tradeoff. The historical review anchors `7953e6d4` and `7d4a37544` belong to that retired parent arrangement.
 
-Decision: use #3610 as an explicit verification prerequisite while keeping its fixes and this module split in separate PRs. Pin `afdd38ff43c64696153372fc2e27a38aff208c73`, not a moving ref. Read-only fetch and `git diff 850afb2e9 <parent> -- src/clients/config-export.ts` show the source being split is byte-identical.
+After #3610 landed, the user authorized continued scoped verification and repair. Main replayed only its own commits onto the current dev base, preserving old refs and using `--no-update-refs` plus an exact-old-head lease. The actual `412dcba4` tree was identity-checked against the audited dev-base overlay. Its remote gates passed. Subsequent documentation repairs require a new current-head receipt; the historical hashes here are evidence anchors, never checkout or retargeting instructions.
 
-Ancestry disposition: the parent's merge base with850 is593978db0. It lacks3191fe1aa,45045623b,f8ba644f3,850afb2e9, including changes across eight catalog/provider/router source files. Main explicitly accepts this older verification foundation for this dependent draft PR; no claim is made that it is equivalent to850. Those commits are not replayed into our parent-relative diff. Original850-based results remain historical, and neither their graph proof nor runtime results substitute for the new basis. Audit required imports and the entire reachable candidate graph against the pinned parent before B.
-
-Build action: in the same a2c0 worktree, rebase only this branch's own commits after850 onto the pinned parent, preserving original244663568 in git history/references. No other branch/worktree is rebased, reset, overwritten or merged. Inspect the resulting parent-relative diff for exactly the approved split/test/document paths. Publish with an exact-old-head force-with-lease, keeping #3611 draft and retargeting only it to the open prerequisite branch. No S13 upper branches exist to cascade yet.
-
-Check action: independently review the resulting interdiff/base, then run the reviewed isolated remote verifier with the new40-character head. Require fresh typecheck, focused tests, privacy, full-suite receipt and exact-head CI. Restore failures by diagnosis, never by skips or reduced assertions. The earlier mutation proof may be cited only if the mutated source and relevant test blobs remain byte-identical; otherwise repeat it remotely. After prerequisite landing, the normal restack/retarget and exact-head checks still apply.
-
-Historical pre-replan execution basis was pinned to `850afb2e9f84979c87e914b248de482f44b34cd6`. Hooke rechecked the eight-source-file delta from `3191fe1aa`: config-export.ts and its required declarations are unchanged, and traversal including inline/type/re-export edges found no return cycle. Final verdict: PASS. The complete preserved roadmap is at immutable commit `dc44b08cafbbd45da81f940f1e8c00a9e5f61ce1` on `codex/260905-modular-debt-ledger-docs`; use `git show <commit>:devlog/_plan/260905_now_split_train/<document>` for roadmap documents not carried in this layer's PR. The current a2c0 branch is `codex/split-clients-config-export-a`, created in place from that pinned basis; no managed worktree or session-state relocation occurred. Remote preflight found `/usr/local/bin/bun`, the expected origin URL and a clean shared seed; it did not run tests or switch the seed checkout.
+The complete initial roadmap remains in the preserved documentation branch, at immutable local commit `dc44b08cafbbd45da81f940f1e8c00a9e5f61ce1`. Only this layer's governing documents are carried in its PR; other roadmap documents are read from that preserved ref. Implementation and receipts remain in the existing a2c0 directory, never in a replacement managed worktree.
 
 Hooke (`01a06f9f-f57f-7fc3-9261-b07f291929be`, requested gpt-6-astra high) returned GO-WITH-FIXES with zero blockers, then PASS after the two documentation corrections above. The read-only audit matched all 153 inventory ranges, assigned all 63 moved declarations uniquely, checked seven leaf and seven facade import lists, and preserved 96 public exports (47 types, 49 values). Its dependency traversal reported no return path from the external owners to the facade at base `3191fe1aa`. These are plan-audit results, not implementation or test results.
 
 Accepted findings: replace the stale raw-churn escalation with the binding ≤150 non-move gate; explicitly retain original blank line 33 and mark projected line counts as pre-pruning estimates. No blocker was rebutted. Re-review confirmed both closures at docs HEAD `38ad3cf5a` plus the working diff. `git diff --check` exited 0 after those edits; no local test suite was run.
 
-Operational audit by Wegener (`01a06fa6-5e3c-7840-8172-8587e853dcc7`, explicitly `model=gpt-6-astra`, `reasoning_effort=high`) found two blockers: checkout-local source identity was incompatible with the prior separate execution tree, and the remote recipe switched a shared checkout. Both were accepted and folded into 003 WORKTREE-EVIDENCE-01 and 000. Re-audit returned PASS, with no blocker to entering B. A documentation-only delta must not stand in for implementation evidence from another checkout. The shared-remote command above is superseded and must not be executed. Pre-C hold: independently review the actual isolated runner, exact-SHA and clean-tree checks, and failure propagation before running it. Approval of the plan is not proof that remote verification passed.
+Operational audit by Wegener (`01a06fa6-5e3c-7840-8172-8587e853dcc7`, explicitly `model=gpt-6-astra`, `reasoning_effort=high`) found two blockers: checkout-local source identity was incompatible with the prior separate execution tree, and the remote recipe switched a shared checkout. Both were accepted and folded into 003 WORKTREE-EVIDENCE-01 and 000. Re-audit returned PASS, with no blocker to entering B. A documentation-only delta must not stand in for implementation evidence from another checkout. The unsafe shared-checkout command has been removed; Verification now contains the isolated recipe. The actual runner received independent exact-SHA, clean-tree and failure-propagation review; changes to that recipe require the same checks. Approval of the plan is not proof that remote verification passed.
 
 ## B implementation record (2026-09-05)
 
-### Replanned stack checkpoint
+### Historical temporary-stack checkpoint
 
-The scoped rebase completed at review anchor `7953e6d4e18b0e7c90c0c5cdb0a4256c22a25dd0`, with integration base `afdd38ff43c64696153372fc2e27a38aff208c73`. PR #3611 now targets the open `codex/win-7-postmerge-stability` branch (#3610). Only this branch was rebased/pushed; exact-old-head lease244663568 protected publication, and `--no-update-refs` preserved the old244 and audit67 snapshot branches.
+At historical review anchor `7953e6d4e18b0e7c90c0c5cdb0a4256c22a25dd0`, the integration base was `afdd38ff43c64696153372fc2e27a38aff208c73` and PR #3611 temporarily targeted the then-open #3610 branch. That arrangement is retired. Only our branch was rebased/pushed; the exact-old-head lease protected publication and `--no-update-refs` preserved the old snapshots.
 
 Independent reviewer Heisenberg confirmed identical blob IDs for all nine source/test paths versus244, exactly those nine paths plus three documents in the parent-relative diff, and an actual-tree traversal of4979edges/349facade-reachable files with no new return cycle or unresolved reachable import. Static verdict PASS; not a runtime-pass claim. This documentation checkpoint adds no source/test changes after that review anchor.
 

@@ -42,8 +42,11 @@ the closeout tallies both and only the first counts as resolved.
   the user for this loop; **merge never** (DEV-STACK-04 ESCALATE). Cascade
   with `git rebase --update-refs` + `--force-with-lease` when a lower layer
   changes (DEV-STACK-02).
-- Open-stack depth cap 5: no stack in 002 exceeds 5 layers, so the cap is
-  satisfied by construction; 21 stacks run as parallel trains off `dev`.
+- Open-stack depth cap: 5 dependent PRs. S04 contains six total layers,
+  including prerequisite layer 105, but STACK-INDEPENDENCE-01 replaced the initial
+  six-deep linear proposal: its longest current base chain is 3. Across the
+  77-layer map, the longest planned chain is 4. The former S04 depth-six
+  exception is historical, not permission to create a six-deep stack now.
 - From WP400 onward, code and receipts use the existing a2c0 worktree in
   place (003 WORKTREE-EVIDENCE-01). Preserve each previous branch before
   selecting the next layer branch. Never relocate or recreate a2c0.
@@ -53,7 +56,7 @@ the closeout tallies both and only the first counts as resolved.
 | WP | Deliverable | Depends on | Verifier |
 |---|---|---|---|
 | wp1 | 000–002 + every layer's decade doc (010…750) at diff level | — | docs checks (numbered only, every layer has a doc, every NOW file appears in exactly one stack); privacy scan |
-| wp2… | one layer per work-phase, in 002 order within a stack; stacks are independent and may be interleaved (S01 L1, S02 L1, … then L2s) so that no open stack waits on another | its layer below | per-layer acceptance (003 §"Per-layer gate") |
+| wp2… | one layer per work-phase, dependency-ordered by the base edges in 002; independent groups may be interleaved | its declared base layer, if any | the current decade document's Verification and Accept criteria sections |
 
 Total: 77 implementation layers across 21 stacks (002_layer_map.md; 105 and
 625 appended per 003).
