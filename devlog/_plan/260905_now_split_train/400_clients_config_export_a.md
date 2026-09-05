@@ -434,6 +434,14 @@ Operational audit by Wegener (`01a06fa6-5e3c-7840-8172-8587e853dcc7`, explicitly
 
 ## B implementation record (2026-09-05)
 
+### Replanned stack checkpoint
+
+The scoped rebase completed at review anchor `7953e6d4e18b0e7c90c0c5cdb0a4256c22a25dd0`, with integration base `afdd38ff43c64696153372fc2e27a38aff208c73`. PR #3611 now targets the open `codex/win-7-postmerge-stability` branch (#3610). Only this branch was rebased/pushed; exact-old-head lease244663568 protected publication, and `--no-update-refs` preserved the old244 and audit67 snapshot branches.
+
+Independent reviewer Heisenberg confirmed identical blob IDs for all nine source/test paths versus244, exactly those nine paths plus three documents in the parent-relative diff, and an actual-tree traversal of4979edges/349facade-reachable files with no new return cycle or unresolved reachable import. Static verdict PASS; not a runtime-pass claim. This documentation checkpoint adds no source/test changes after that review anchor.
+
+The prerequisite itself was separately verified in remote `/tmp/ocx-wp400.T036h8/repo` at exactafdd38ff: typecheck0,440focusedpass/0fail, privacy0, full suite SUITE_EXIT=0 and final HEAD/clean-tree checks passed. Full output: `wp400-prerequisite-check.log` in the session evidence directory. No local suite ran. Fresh resulting-head verification and GitHub CI for #3611 are still required.
+
 Franklin (`01a06fac-95ee-77a0-8916-f7546c2b8996`, explicitly gpt-6-astra high) implemented only the approved source/test paths in a2c0 and handed them back without Git mutations or local tests. Main inspected the diff and measured all leaves. Source owner search and the A inventory were reused; no new algorithm or parallel implementation was introduced.
 
 | File | Change and impact | Measured lines |
