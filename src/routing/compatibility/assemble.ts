@@ -52,11 +52,24 @@ export function assemblePolicyCandidateEvidence(
   return profile.candidates.map(candidate => {
     const key = `${candidate.provider}/${candidate.model}`;
     const compatibility = compatibilityByCandidate?.get(key);
+    const provider = config.providers[candidate.provider];
+    let routed: OcxProviderConfig | undefined;
+    if (provider && provider.disabled !== true) {
+      try {
+        routed = options.routedProviderConfig(candidate.provider, provider);
+      } catch {
+        // An unresolved transport proves no capabilities. Do not abort healthy
+        // siblings: if this candidate is selected, normal route validation still
+        // reports its concrete error before dispatch.
+      }
+    }
 
     return {
       provider: candidate.provider,
       model: candidate.model,
-      capability: candidateCapabilityEvidence(config, candidate.provider, candidate.model),
+      capability: routed
+        ? candidateCapabilityEvidence(config, candidate.provider, candidate.model, routed)
+        : undefined,
       health: policyCandidateHealthEvidence(config, candidate, now),
       quota: quotaEvidenceForCandidate({
         provider: candidate.provider,

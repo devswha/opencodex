@@ -38,6 +38,11 @@ cap outcome.
 
 ## Dry-run a saved profile
 
+Candidate capabilities use the effective provider configuration after registry
+overrides are applied. Locality requirements (`localOnly` and `remoteAllowed`)
+therefore use the effective upstream address. If that address cannot be classified,
+the profile's `unknownEvidence.capability` setting decides eligibility.
+
 Select a saved profile and use **Dry-run evaluation** to add request evidence such as context-window size, tool use, image input, or structured output. Dry-run evaluates eligibility and scoring but never sends an upstream model request.
 
 Unsaved edits are not used by dry-run. Save the profile first so the displayed revision and evaluation refer to the same configuration.
