@@ -50,3 +50,5 @@ merge of reviewed PR). All reviewers: gpt-6-astra, high.
 Terminal outcome: **DONE** for the objective's scope, with #3556's three macOS jobs still queued
 on the hosted runner at closeout (every executed job on the stack is green).
 
+
+Goalplan criteria c-1..c-3 met at 2026-09-05T00:11Z (see ledger.jsonl).
