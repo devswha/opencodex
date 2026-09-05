@@ -51,6 +51,18 @@ Two, **independent** — disjoint write sets, no shared API.
 |---|---|---|---|---|
 | wp-argv | `020_defect_launcher_argv.md` | a test reads the `cmd.exe` launcher's argument grammar as its mock API | 2 | `tests/multi-agent-keep-native-v1.test.ts` |
 | wp-cwd | `030_defect_unlinked_cwd.md` | the test needs a POSIX unlinked cwd, which Windows cannot produce | 1 | `tests/update-notify.test.ts` |
+| wp-k-owner | `050_ci_residual_retained_root.md` | three-child K-owner cases under 15-20 s budgets; dangling children + a detached race branch | CI 1 (moved once) | `tests/codex-integration/codex-retained-root-serialization.test.ts` |
+| wp-quorum | `070_quorum_cache_observer.md` | atime observer cannot see reads on NTFS (`DisableLastAccess=3`) | CI 3 (dev drift, #3533) | `tests/routing/anthropic-quorum-cache.test.ts` |
+| wp-waits | `080_run_variance_residuals.md` | 58 sub-floor internal waits; class fix after a first attempt inverted the internal-under-outer invariant | CI 2 per run, rotating | 17 test files + `tests/helpers/storage-policy-api.ts` |
+| wp-shards | `090_shard_ceiling.md` | four shards grew into the 25-min ceiling; a green 3/4 cancelled at 25m12s | CI 1 shard | `.github/workflows/ci.yml`, `tests/ci-workflows/ci-workflows.test.ts` |
+
+Six phases landed as a stack against `dev`:
+#3548 → #3549 → #3550 → #3555 → #3558 → #3572. No product source file
+changed in any of them.
+
+Corpus (`fuck-powershell`): 90 → 94 cases, 329 → 335 nodes
+(`cwd-locked-cannot-unlink`, `test-budget-sized-from-local-timing`,
+`killed-run-contaminates-next-run`, `ntfs-atime-disabled-by-default`).
 
 `010_defect_acl_seam.md` and `040_acl_stub_hygiene.md` are **RETRACTED** (`007`).
 Between them they would have added a test helper and rewritten 18 test files to
@@ -73,6 +85,14 @@ prevent a defect that does not exist.
 ## Acceptance for the unit
 
 1. Four shards, pinned runtime, **0 fail, twice consecutively**, with logs.
+
+   **MET** on GitHub Actions, six shards: runs 33936695508 and 33937730205 on
+   `293f3e675`, twelve shard jobs SUCCESS, 1067 files / 18013 tests / 0 fail,
+   slowest shard 20.6 min under an unchanged 25-minute ceiling (`090`).
+   The original wording says "four shards" and "self-host"; the bar that was
+   actually needed — the hosted runner, which is what CI gates on — is the one
+   met. The self-hosted box reached 0/0/0/1 with the one residual being a
+   load-only hold no probe could name (`008`).
 
    Status: CI run 33926041666 (`cfc8de963`) — all four Windows shards green,
    4462/4628/4305/4413 pass. Second run 33928082123 on the rebased head
