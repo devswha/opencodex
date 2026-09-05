@@ -78,4 +78,3 @@ export function decodeBasicString(literal: string): string | null {
   }
   return out;
 }
-

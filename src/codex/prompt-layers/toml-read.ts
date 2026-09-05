@@ -179,4 +179,3 @@ export function inspectOwnership(configBytes: string | null): Ownership {
   }
   return { state: "absent" };
 }
-

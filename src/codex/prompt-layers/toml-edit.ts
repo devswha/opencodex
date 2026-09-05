@@ -161,4 +161,3 @@ export function removeUnownedProjection(content: string): string {
   }
   return joinLines(lines, eol);
 }
-

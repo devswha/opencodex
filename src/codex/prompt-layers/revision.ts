@@ -53,4 +53,3 @@ export function computeRevision(configBytes: string | null, storeBytes: string |
 }
 
 export { readFileOrNull as readFileBytes };
-

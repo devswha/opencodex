@@ -52,4 +52,3 @@ export function journalPathFor(storePath: string): string {
 export function lockPathFor(storePath: string): string {
   return `${storePath.replace(/\.json$/, "")}.lock`;
 }
-
