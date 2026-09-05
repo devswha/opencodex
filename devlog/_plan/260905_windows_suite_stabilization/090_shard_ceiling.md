@@ -113,6 +113,27 @@ That is the first all-green Windows run since the stack rebased onto current
 `dev`. Run 33937730205 is dispatched on the same head as the second
 consecutive, which is `c-1`.
 
+## Second consecutive: run 33937730205, same head
+
+| shard | wall | files | tests | fail |
+|---|---|---|---|---|
+| 1/6 | 20.6 min | 178 | 3266 | 0 |
+| 2/6 | 15.7 min | 178 | 3331 | 0 |
+| 3/6 | 16.1 min | 178 | 2766 | 0 |
+| 4/6 | 18.5 min | 178 | 3138 | 0 |
+| 5/6 | 8.6 min | 178 | 2887 | 0 |
+| 6/6 | 12.0 min | 177 | 2625 | 0 |
+| **total** | | **1067** | **18013** | **0** |
+
+Two consecutive dispatches on `293f3e675`, all twelve Windows shard jobs
+SUCCESS, every one under the 25-minute ceiling (worst 20.6, ~4.4 minutes of
+margin — thinner than the first run's 19.1, and consistent with the 2×
+variance this unit measured everywhere). `c-1` is met on the hosted runner.
+
+The 1067 files across six shards match the 1058-file count Bun reported for
+the four-shard split plus the nine files this stack added or moved; the
+tiling invariant `ci-workflows.test.ts` pins is holding.
+
 ```yaml
 -    timeout-minutes: 25
 +    # 25 cancelled a green 3/4 at 25m12s on run 33934756997 — the same truncation the
