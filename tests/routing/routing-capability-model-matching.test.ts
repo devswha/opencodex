@@ -231,13 +231,34 @@ describe("policy capability evidence uses the effective provider", () => {
     expect(evidence[2]?.capability).toBeUndefined();
   });
 
-  test("a selected invalid transport still fails the normal route validation", () => {
+  test.each(["allow", "penalize", "exclude"] as const)(
+    "an unresolved first candidate is excluded when unknown capabilities are %s",
+    capability => {
+      const config = policyConfig("ollama", {
+        adapter: "openai-chat", baseUrl: loopback,
+      }, "local-model", {});
+      config.providers.ollama!.baseUrl = " ";
+      config.providers.local = { adapter: "openai-chat", baseUrl: loopback, allowPrivateNetwork: true };
+      const profile = config.routingProfiles!.guarded!;
+      profile.candidates.push({ provider: "local", model: "local-model" });
+      profile.unknownEvidence = { ...profile.unknownEvidence, capability };
+
+      const route = routeModel(config, "policy/guarded");
+      expect(route.providerName).toBe("local");
+      expect(route.routeDecision?.candidates.map(candidate => candidate.eligible)).toEqual([false, true]);
+      expect(route.routeDecision?.candidates[0]?.exclusions).toContainEqual({ code: "route-unavailable" });
+      expect(JSON.stringify(route.routeDecision)).not.toContain("Invalid baseUrl");
+    },
+  );
+
+  test("all unresolved candidates produce a policy exclusion while explicit routing keeps validation", () => {
     const config = policyConfig("ollama", {
       adapter: "openai-chat", baseUrl: loopback,
     }, "local-model", {});
     config.providers.ollama!.baseUrl = " ";
 
-    expect(() => routeModel(config, "policy/guarded")).toThrow('Invalid baseUrl for provider "ollama"');
+    expect(() => routeModel(config, "policy/guarded")).toThrow(NoEligiblePolicyCandidateError);
+    expect(() => routeModel(config, "ollama/local-model")).toThrow('Invalid baseUrl for provider "ollama"');
   });
 });
 

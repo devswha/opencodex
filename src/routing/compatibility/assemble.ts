@@ -54,19 +54,21 @@ export function assemblePolicyCandidateEvidence(
     const compatibility = compatibilityByCandidate?.get(key);
     const provider = config.providers[candidate.provider];
     let routed: OcxProviderConfig | undefined;
+    let routeResolutionFailed = false;
     if (provider && provider.disabled !== true) {
       try {
         routed = options.routedProviderConfig(candidate.provider, provider);
       } catch {
-        // An unresolved transport proves no capabilities. Do not abort healthy
-        // siblings: if this candidate is selected, normal route validation still
-        // reports its concrete error before dispatch.
+        // This is known unavailability, not unknown capability evidence. Keep
+        // the failure separate so permissive unknown policies cannot select it.
+        routeResolutionFailed = true;
       }
     }
 
     return {
       provider: candidate.provider,
       model: candidate.model,
+      ...(routeResolutionFailed ? { routeResolutionFailed: true } : {}),
       capability: routed
         ? candidateCapabilityEvidence(config, candidate.provider, candidate.model, routed)
         : undefined,

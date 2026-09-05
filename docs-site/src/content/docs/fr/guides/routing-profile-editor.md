@@ -39,8 +39,10 @@ résultat du plafond.
 
 Les capacités des candidats utilisent la configuration effective du fournisseur,
 après application du registre. Les exigences de localité (`localOnly` et
-`remoteAllowed`) utilisent donc l'adresse amont effective. Si elle ne peut pas être
-classée, `unknownEvidence.capability` détermine l'admissibilité du candidat.
+`remoteAllowed`) utilisent donc l’adresse amont effective. Si elle ne peut pas être
+classée, `unknownEvidence.capability` détermine l’admissibilité du candidat.
+Une configuration de fournisseur invalide qui ne peut pas être résolue est toujours
+exclue avec `route-unavailable`, même si les capacités inconnues sont autorisées.
 
 Sélectionnez un profil enregistré et utilisez **Évaluation à sec** pour ajouter des éléments propres à la requête, tels que la taille de la fenêtre de contexte, l’utilisation d’outils, l’entrée d’images ou la sortie structurée. La simulation évalue l’admissibilité et la notation, mais n’envoie jamais de requête à un modèle en amont.
 
