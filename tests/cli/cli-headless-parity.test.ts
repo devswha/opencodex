@@ -313,6 +313,22 @@ describe("headless GUI parity CLI", () => {
     }]);
   });
 
+  test.each(["on", "off"])("provider edit --xai-chat %s shares the GUI wire selector", async value => {
+    const runtime = fakeRuntime();
+    expect(await handleProviderRuntimeCommand("edit", ["xai", "--xai-chat", value, "--json"], runtime.deps)).toBe(0);
+    expect(runtime.requests).toEqual([{
+      path: "/api/providers?name=xai", method: "PATCH", body: { xaiResponsesOptIn: value === "off" },
+    }]);
+  });
+
+  test.each([
+    ["xai", "--xai-chat", "maybe"], ["xai", "--xai-chat"], ["other", "--xai-chat", "on"],
+  ])("invalid xAI wire option %j makes no request", async (...args) => {
+    const runtime = fakeRuntime();
+    expect(await handleProviderRuntimeCommand("edit", args, runtime.deps)).toBe(2);
+    expect(runtime.requests).toHaveLength(0);
+  });
+
   test("provider edit --headers sends the parsed block and - clears it", async () => {
     const runtime = fakeRuntime();
     const code = await handleProviderRuntimeCommand("edit", [

@@ -37,7 +37,7 @@ const COCKPIT_IMPORT_MAX_BYTES = 256 * 1024;
 const EMPTY_OAUTH_ACCOUNTS: OAuthAccountRow[] = [];
 const EMPTY_API_KEYS: ApiKeyRow[] = [];
 
-function XaiResponsesOptInControl({
+function XaiChatOptInControl({
   initialState,
   onUpdateProvider,
 }: {
@@ -57,7 +57,7 @@ function XaiResponsesOptInControl({
 
   const toggle = async () => {
     if (!onUpdateProvider || saving) return;
-    const next = state !== true;
+    const next = state === false;
     setSaving(true);
     setError("");
     try {
@@ -77,19 +77,19 @@ function XaiResponsesOptInControl({
   return (
     <div className="pwi-auth-optin-row">
       <div className="pwi-auth-optin-copy">
-        <span className="pwi-auth-optin-label">{t("pws.xaiResponsesOptIn")}</span>
+        <span className="pwi-auth-optin-label">{t("pws.xaiChatOptIn")}</span>
         <span className="pwi-auth-row-secondary">
-          {t("pws.xaiResponsesOptInDesc")}
-          {mixed && <span className="pwi-auth-optin-mixed"> {t("pws.xaiResponsesOptInMixed")}</span>}
+          {t("pws.xaiChatOptInDesc")}
+          {mixed && <span className="pwi-auth-optin-mixed"> {t("pws.xaiChatOptInMixed")}</span>}
         </span>
         {error && <span className="pwi-auth-optin-error" role="alert">{error}</span>}
       </div>
       <Switch
-        on={state === true}
+        on={state === false}
         mixed={mixed}
         onClick={() => { void toggle(); }}
         disabled={!onUpdateProvider || saving}
-        label={t("pws.xaiResponsesOptIn")}
+        label={t("pws.xaiChatOptIn")}
       />
     </div>
   );
@@ -377,8 +377,8 @@ export default function ProviderAuthPanel({
       </div>
       <div className="pwi-auth-body">
         {item.name === "xai" && (
-          <XaiResponsesOptInControl
-            initialState={item.xaiResponsesOptInState ?? false}
+          <XaiChatOptInControl
+            initialState={item.xaiResponsesOptInState ?? true}
             onUpdateProvider={onUpdateProvider}
           />
         )}

@@ -11,7 +11,7 @@ import {
   XAI_GROK_CLIENT_VERSION,
 } from "../../../src/providers/xai-transport";
 import { getProviderRegistryEntry } from "../../../src/providers/registry";
-import { XAI_RESPONSES_OPT_IN_MODELS } from "../../../src/providers/xai-responses-opt-in";
+import { XAI_RESPONSES_OPT_IN_MODELS, xaiResponsesOptInState } from "../../../src/providers/xai-responses-opt-in";
 import { resolveWireProtocolOverride } from "../../../src/server/adapter-resolve";
 import type { OcxAssistantMessage, OcxParsedRequest, OcxProviderConfig } from "../../../src/types";
 
@@ -72,6 +72,17 @@ describe("xAI Responses destination detection", () => {
     "not a URL",
   ])("rejects a non-xAI or malformed destination %s", baseUrl => {
     expect(isXaiResponsesDestination({ baseUrl })).toBe(false);
+  });
+});
+
+describe("xAI effective wire control state", () => {
+  test("defaults and overrides agree with Responses-inbound routing", () => {
+    expect(xaiResponsesOptInState(provider("oauth"))).toBe(true);
+    expect(xaiResponsesOptInState(provider("key"))).toBe(false);
+    expect(xaiResponsesOptInState({ ...provider("oauth"), modelAdapters: { "grok-4.6": "openai-responses" } })).toBe(true);
+    expect(xaiResponsesOptInState({ ...provider("oauth"), modelAdapters: { "grok-4.6": "openai-chat" } })).toBe("mixed");
+    expect(xaiResponsesOptInState({ ...provider("oauth"), modelAdapters: { "grok-4.6": "invalid" } })).toBe(true);
+    expect(xaiResponsesOptInState({ ...provider("oauth"), modelAdapters: { "grok-4.6": "openai-chat", "grok-4.5": "openai-chat" } })).toBe(false);
   });
 });
 

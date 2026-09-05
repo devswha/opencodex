@@ -39,6 +39,8 @@ import { nextAtomicTempSequence } from "../../src/config/atomic-write";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { DEFAULT_SUBAGENT_MODELS, migrateSubagentModels } from "../../src/config/subagent-models";
 import { migrateStartupSubagentModels } from "../../src/server/subagent-models-startup";
+import { migrateXaiResponsesDefault } from "../../src/providers/xai-responses-opt-in";
+import { migrateStartupXaiResponses } from "../../src/server/xai-responses-startup";
 import * as configStore from "../../src/config";
 import { runClaudeAuthModeMigration } from "../../src/claude/auth-mode-migration";
 import { providerManagementConfigError } from "../../src/server/auth-cors";
@@ -199,6 +201,89 @@ describe("Astra-first subagent upgrade", () => {
       mutation.mockRestore();
       warn.mockRestore();
     }
+  });
+});
+
+describe("one-time Grok Responses upgrade", () => {
+  function legacy() {
+    return {
+      ...getDefaultConfig(),
+      providers: {
+        xai: {
+          adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", authMode: "oauth" as const,
+          xaiResponsesDefaultVersion: undefined as number | undefined,
+          modelAdapters: { "grok-4.6": "openai-chat", "grok-4.5": "openai-chat", "other": "openai-chat" },
+        },
+      },
+      defaultProvider: "xai",
+    };
+  }
+
+  test("read-only load preserves legacy choices; startup flips both once and saves the marker", () => {
+    saveConfig(legacy());
+    const before = readFileSync(getConfigPath(), "utf8");
+    const config = loadConfig();
+    expect(config.providers.xai!.modelAdapters!["grok-4.6"]).toBe("openai-chat");
+    expect(readConfigDiagnostics().config.providers.xai!.xaiResponsesDefaultVersion).toBeUndefined();
+    expect(readFileSync(getConfigPath(), "utf8")).toBe(before);
+    const upgraded = migrateStartupXaiResponses(config);
+    expect(upgraded.providers.xai!.modelAdapters).toEqual({ other: "openai-chat" });
+    expect(upgraded.providers.xai!.xaiResponsesDefaultVersion).toBe(1);
+    expect(loadConfig().providers.xai).toEqual(upgraded.providers.xai);
+    expect(config.providers.xai!.modelAdapters).toEqual(legacy().providers.xai.modelAdapters);
+    expect(migrateXaiResponsesDefault(upgraded)).toBe(false);
+  });
+
+  test.each([1, 2])("later Chat choices and future version %i survive startup", version => {
+    const config = legacy();
+    config.providers.xai.xaiResponsesDefaultVersion = version;
+    saveConfig(config);
+    expect(migrateStartupXaiResponses(loadConfig()).providers.xai).toEqual(config.providers.xai);
+    expect(loadConfig().providers.xai!.xaiResponsesDefaultVersion).toBe(version);
+  });
+
+  test("migration does not touch key auth, other adapters or custom provider IDs", () => {
+    for (const change of [{ authMode: "key" }, { adapter: "anthropic" }]) {
+      const config = legacy();
+      Object.assign(config.providers.xai, change);
+      const before = structuredClone(config);
+      expect(migrateXaiResponsesDefault(config)).toBe(false);
+      expect(config).toEqual(before);
+    }
+    const source = legacy();
+    const custom = { ...source, defaultProvider: "custom-xai", providers: { "custom-xai": source.providers.xai } };
+    expect(migrateXaiResponsesDefault(custom)).toBe(false);
+  });
+
+  test("fresh disk state wins over stale startup and preserves a concurrent completed opt-in", () => {
+    saveConfig(legacy());
+    const stale = loadConfig();
+    const fresh = loadConfig();
+    fresh.port = 23456;
+    fresh.providers.xai!.xaiResponsesDefaultVersion = 2;
+    saveConfig(fresh);
+    const upgraded = migrateStartupXaiResponses(stale);
+    expect(upgraded.port).toBe(23456);
+    expect(upgraded.providers.xai).toEqual(fresh.providers.xai);
+    expect(loadConfig().providers.xai).toEqual(fresh.providers.xai);
+  });
+
+  test("unavailable or throwing persistence preserves disk and returns an isolated projection", () => {
+    const config = legacy();
+    writeConfig("{ invalid");
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(migrateStartupXaiResponses(config).providers.xai!.xaiResponsesDefaultVersion).toBe(1);
+      expect(readFileSync(getConfigPath(), "utf8")).toBe("{ invalid");
+      expect(config.providers.xai.modelAdapters).toEqual(legacy().providers.xai.modelAdapters);
+      const mutation = spyOn(configStore, "mutatePersistedConfig").mockImplementation(() => {
+        throw new Error("private path must not be logged");
+      });
+      try {
+        expect(migrateStartupXaiResponses(config).providers.xai!.xaiResponsesDefaultVersion).toBe(1);
+        expect(warn).toHaveBeenLastCalledWith("[xai-responses-migration] Persistence failed; using Responses in memory only.");
+      } finally { mutation.mockRestore(); }
+    } finally { warn.mockRestore(); }
   });
 });
 

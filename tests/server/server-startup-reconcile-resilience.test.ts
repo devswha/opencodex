@@ -21,6 +21,7 @@ import { getConfigPath, loadConfig, saveConfig } from "../../src/config";
 import { OAUTH_PROVIDERS, reconcileOAuthProviders } from "../../src/oauth";
 import { runModelRenameStartupMigration } from "../../src/providers/model-rename-startup";
 import { startServer } from "../../src/server";
+import { resolveWireProtocolOverride } from "../../src/server/adapter-resolve";
 import { CURSOR_STATIC_MODELS, cursorModelIds } from "../../src/adapters/cursor/discovery";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -61,6 +62,33 @@ test.skipIf(!CAN_BIND)("startServer persists the Astra-first legacy roster upgra
   } finally {
     await server.stop(true);
   }
+});
+
+test.skipIf(!CAN_BIND)("startServer migrates old Grok Chat choices once and preserves later opt-in", async () => {
+  saveConfig({
+    ...staleConfig(), defaultProvider: "xai",
+    providers: { xai: {
+      adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", authMode: "oauth",
+      modelAdapters: { "grok-4.6": "openai-chat", "grok-4.5": "openai-chat" },
+    } },
+  });
+  const server = startServer(0);
+  try {
+    const upgraded = loadConfig();
+    expect(upgraded.providers.xai!.xaiResponsesDefaultVersion).toBe(1);
+    for (const model of ["grok-4.6", "grok-4.5"]) {
+      expect(resolveWireProtocolOverride("xai", model, upgraded.providers.xai!).adapter).toBe("openai-responses");
+    }
+    upgraded.providers.xai!.modelAdapters = { "grok-4.6": "openai-chat", "grok-4.5": "openai-chat" };
+    saveConfig(upgraded);
+  } finally { await server.stop(true); }
+  const restarted = startServer(0);
+  try {
+    const optedIn = loadConfig();
+    for (const model of ["grok-4.6", "grok-4.5"]) {
+      expect(resolveWireProtocolOverride("xai", model, optedIn.providers.xai!).adapter).toBe("openai-chat");
+    }
+  } finally { await restarted.stop(true); }
 });
 
 let testDir = "";

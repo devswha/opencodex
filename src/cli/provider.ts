@@ -448,6 +448,8 @@ Examples:
   ocx provider add my-ollama --adapter openai-chat --base-url http://localhost:11434/v1
   ocx provider show anthropic --json
   ocx provider set-default anthropic
+  ocx provider edit xai --xai-chat on   # opt Grok 4.5/4.6 into Chat Completions
+  ocx provider edit xai --xai-chat off  # use Responses again
   ocx provider remove my-ollama`;
 
 export async function handleProviderCommand(args: string[]): Promise<void> {

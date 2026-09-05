@@ -1255,20 +1255,20 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     // than the seeded ones do.
     supportsVerbosity: false,
     defaultModel: "grok-4.5",
-    // Keep 4.6/4.5 Responses callers on the compatibility Chat wire until xAI can replay
-    // opaque reasoning continuation and compaction state across later turns. Multi-agent has
-    // no Chat wire, so Responses callers use its only working wire under both auth modes.
+    // Grok 4.6/4.5 subscription Responses callers use the native wire with the existing
+    // namespace/web-search/replay normalization. Chat remains an explicit modelAdapters
+    // opt-in. Multi-agent has no Chat wire and uses Responses under both auth modes.
     // Caller-owned service tiers stay off the unclassified OAuth subscription route; key-auth
     // Fast remains proxy-owned and is still selected through keyAuthServiceTier above.
     modelWireDefaults: {
       "grok-4.6": {
-        wire: "openai-chat",
+        wire: "openai-responses",
         inbound: ["responses"],
         authModes: ["oauth"],
         forwardCallerServiceTier: false,
       },
       "grok-4.5": {
-        wire: "openai-chat",
+        wire: "openai-responses",
         inbound: ["responses"],
         authModes: ["oauth"],
         forwardCallerServiceTier: false,

@@ -267,9 +267,9 @@ describe("resolveFastPolicy matrix", () => {
           baseUrl: "https://api.x.ai/v1",
           authMode: "oauth" as const,
         },
-        adapter: "openai-chat",
+        adapter: "openai-responses",
         forwardCallerTier: false,
-        callerTier: undefined,
+        callerTier: "flex",
         settledCallerTier: undefined,
       },
       {

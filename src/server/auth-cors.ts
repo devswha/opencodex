@@ -833,6 +833,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   modelPreferHostedTools: "editor",
   supportsOpenAiWebSearchToolFields: "editor",
   xaiResponsesXSearch: "editor",
+  xaiResponsesDefaultVersion: "runtime",
   supportsResponsesCustomTools: "editor",
   responsesSnapshotRepair: "editor",
   reasoningEffortMap: "editor",

@@ -104,6 +104,7 @@ import { refreshUserCostOverlays } from "../../usage/user-cost-overlays";
 import { redactSecretString } from "../../lib/redact";
 import {
   XAI_RESPONSES_OPT_IN_MODELS,
+  XAI_RESPONSES_DEFAULT_VERSION,
   xaiResponsesOptInState,
 } from "../../providers/xai-responses-opt-in";
 import { dropProviderCustomModels } from "../../providers/provider-id-rewrite";
@@ -397,10 +398,11 @@ function applyProviderPatchFields(
     const modelAdapters = { ...(next.modelAdapters ?? {}) };
     for (const model of XAI_RESPONSES_OPT_IN_MODELS) {
       if (rawBody.xaiResponsesOptIn) modelAdapters[model] = "openai-responses";
-      else delete modelAdapters[model];
+      else modelAdapters[model] = "openai-chat";
     }
     if (Object.keys(modelAdapters).length > 0) next.modelAdapters = modelAdapters;
     else delete next.modelAdapters;
+    next.xaiResponsesDefaultVersion = Math.max(next.xaiResponsesDefaultVersion ?? 0, XAI_RESPONSES_DEFAULT_VERSION);
     touched = true;
   }
   if (Object.hasOwn(rawBody, "requestPacing")) {
@@ -1006,6 +1008,17 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     // completed during that wait remains authoritative instead of being overwritten by the
     // older ownership snapshot used to admit this POST.
     restorePersistedAliasOverlays(prov, config.providers[name]);
+    // The add/edit form omits wire choices. Read after DNS so a concurrent switch
+    // remains authoritative, including the marker that protects it on the next boot.
+    if (name === "xai") {
+      const latest = config.providers[name];
+      if (!Object.hasOwn(body.provider, "modelAdapters") && latest?.modelAdapters) {
+        prov.modelAdapters = { ...latest.modelAdapters };
+      }
+      if (latest?.xaiResponsesDefaultVersion !== undefined) {
+        prov.xaiResponsesDefaultVersion = latest.xaiResponsesDefaultVersion;
+      }
+    }
     initializeProviderModelSelection(name, prov, config.providers[name], config);
     config.providers[name] = stripRegistryOnlyStaticHeaders(name, prov);
     if (body.setDefault === true) config.defaultProvider = name;

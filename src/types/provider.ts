@@ -521,6 +521,8 @@ export interface OcxProviderConfig {
    * from the web-search sidecar's `search.xSearch` options and never widens caller tool selectors.
    */
   xaiResponsesXSearch?: boolean;
+  /** One-time Grok subscription wire upgrade; later explicit Chat choices remain authoritative. */
+  xaiResponsesDefaultVersion?: number;
   /**
    * Whether the Responses upstream accepts native custom tools and custom_tool_call items.
    * Set false only for a provider whose native contract rejects them; absence preserves

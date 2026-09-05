@@ -3515,7 +3515,7 @@ describe("provider management validation", () => {
     });
   });
 
-  test("xAI Responses opt-in reports mixed state and atomically normalizes both model adapters", async () => {
+  test("xAI wire selection reports effective state and persists later Chat opt-in across provider overwrite", async () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -3528,8 +3528,9 @@ describe("provider management validation", () => {
           adapter: "openai-chat",
           baseUrl: "https://api.x.ai/v1",
           authMode: "oauth",
+          xaiResponsesDefaultVersion: 2,
           modelAdapters: {
-            "grok-4.6": "openai-responses",
+            "grok-4.6": "openai-chat",
             "other-model": "openai-chat",
           },
         },
@@ -3604,8 +3605,25 @@ describe("provider management validation", () => {
         name: "xai",
         xaiResponsesOptInState: false,
       });
-      expect(liveConfig.providers.xai?.modelAdapters).toEqual({ "other-model": "openai-chat" });
-      expect(loadConfig().providers.xai?.modelAdapters).toEqual({ "other-model": "openai-chat" });
+      const chatAdapters = { "grok-4.6": "openai-chat", "grok-4.5": "openai-chat", "other-model": "openai-chat" };
+      expect(liveConfig.providers.xai?.modelAdapters).toEqual(chatAdapters);
+      expect(loadConfig().providers.xai?.modelAdapters).toEqual(chatAdapters);
+      expect(loadConfig().providers.xai?.xaiResponsesDefaultVersion).toBe(2);
+      for (const model of ["grok-4.6", "grok-4.5"]) {
+        expect(resolveWireProtocolOverride("xai", model, liveConfig.providers.xai!).adapter).toBe("openai-chat");
+      }
+      const overwrite = new Request("http://127.0.0.1/api/providers", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "xai", provider: {
+          adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", authMode: "oauth", note: "edited",
+        } }),
+      });
+      const overwritten = await handleManagementAPI(overwrite, new URL(overwrite.url), liveConfig, {
+        createManagementConvergeCodex: catalogConvergenceFactory(),
+      });
+      expect(overwritten?.status).toBe(200);
+      expect(loadConfig().providers.xai?.modelAdapters).toEqual(chatAdapters);
+      expect(loadConfig().providers.xai?.xaiResponsesDefaultVersion).toBe(2);
     } finally {
       destinationProbe.mockRestore();
     }

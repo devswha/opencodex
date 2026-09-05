@@ -297,19 +297,25 @@ different custom destination does not inherit its upstream assumptions. Object-f
 also narrow the decision by inbound protocol and authentication mode; an auth-scoped default must
 not leak from a subscription transport into an API-key or forwarded-credential route.
 
-xAI keeps `openai-chat` as both its provider-wide compatibility wire and the default for Grok 4.5
-and 4.6 subscription traffic. The official Grok CLI catalog declares those models as Responses
-backends, but the current gateway rejects opaque reasoning continuation and compaction state on
-later turns. Operators may still select `openai-responses` with an explicit model adapter override
-while that compatibility work continues. The OAuth route drops caller-owned `service_tier` even
-when an override selects Responses, and native Responses OAuth 401 replay remains available to
-explicit opt-ins. API-key requests, translated Chat/Anthropic callers, and other Grok models retain
-their existing wire and tier policy.
+xAI keeps `openai-chat` as its provider-wide compatibility wire, but Grok 4.5/4.6 subscription
+Responses requests default to native `openai-responses`. Existing namespace, hosted-search and
+reasoning-replay normalization remains in force. The reserved `xai` OAuth transport is name-pinned
+to the Grok CLI gateway even if its saved base URL differs; custom provider IDs do not inherit this
+default. API-key requests, translated Chat/Anthropic defaults and other Grok models retain their
+existing wire and tier policy. OAuth still drops caller-owned `service_tier` on either wire.
 
-The dashboard's xAI Responses opt-in switch is the GUI surface of this same `modelAdapters` lane,
-not a separate tier policy. One write sets or clears the Grok 4.5 and 4.6 entries together while
-preserving unrelated overrides; a pre-existing one-entry state is reported as mixed until the next
-switch write normalizes both.
+Startup removes legacy Grok 4.5/4.6 Chat overrides once and persists the provider-owned
+`xaiResponsesDefaultVersion` marker. Later explicit Chat choices survive restarts. The migration
+rebases under the config mutation lock; unavailable persistence warns and uses an isolated in-memory
+projection without overwriting invalid disk state. Read-only config loading does not migrate.
+
+The dashboard's Chat Completions switch and `ocx provider edit xai --xai-chat on|off` share the
+existing `modelAdapters` lane. On writes Chat for both models; off writes Responses. Unrelated
+overrides remain intact. The legacy PATCH field `xaiResponsesOptIn` retains its direction:
+true selects Responses, false now writes explicit Chat rather than deleting entries. Its derived
+`xaiResponsesOptInState` reflects effective Responses-inbound routing, including registry defaults;
+only genuinely different effective wires report mixed. A switch write also records the migration
+version (without lowering a future version), and provider-form overwrites retain omitted choices.
 
 [Decision Log]
 - 목적과 의도: Keep Codex hosted web search usable on xAI's public Responses endpoint without forwarding private OpenAI-only fields that xAI rejects.

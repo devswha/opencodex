@@ -40,6 +40,7 @@ const USAGE = `Usage:
       [--api-key-transport <x-api-key|bearer|->]
       [--headers <json>] [--enabled <on|off>] [--live-models <on|off>]
       [--retain-models <id,id|->]
+      [--xai-chat <on|off>]
       [--allow-private-network <on|off>] [--json]
   ocx provider test <name> [--json]
   ocx provider quota [--refresh] [--json]
@@ -70,7 +71,12 @@ async function edit(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   const enabled = takeBooleanOption(args, "--enabled");
   const liveModels = takeBooleanOption(args, "--live-models");
   const allowPrivateNetwork = takeBooleanOption(args, "--allow-private-network");
+  const xaiChat = takeBooleanOption(args, "--xai-chat");
   rejectArgs(args, USAGE);
+  if (xaiChat !== undefined) {
+    if (name !== "xai") throw new CliUsageError("--xai-chat is valid only for provider xai", USAGE);
+    patch.xaiResponsesOptIn = !xaiChat;
+  }
   if (adapter !== undefined) patch.adapter = adapter;
   if (baseUrl !== undefined) patch.baseUrl = baseUrl;
   if (defaultModel !== undefined) patch.defaultModel = defaultModel;

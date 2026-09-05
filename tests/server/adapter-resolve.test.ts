@@ -100,10 +100,10 @@ describe("registry per-model wire defaults", () => {
     });
   }
 
-  test("keeps current xAI subscription models on Chat by default", () => {
+  test("routes current xAI subscription Responses callers through Responses by default", () => {
     for (const model of ["grok-4.6", "grok-4.5"]) {
       expect(resolveWireProtocolOverride("xai", model, xai("oauth"), "responses").adapter)
-        .toBe("openai-chat");
+        .toBe("openai-responses");
     }
   });
 
@@ -124,6 +124,23 @@ describe("registry per-model wire defaults", () => {
       expect(resolveWireProtocolOverride("xai", model, provider, "responses").adapter)
         .toBe("openai-responses");
     }
+  });
+
+  test("explicit Chat opts out of the xAI Responses default without changing other models", () => {
+    for (const model of ["grok-4.6", "grok-4.5"]) {
+      const configured = xai("oauth", { modelAdapters: { [model]: "openai-chat" } });
+      expect(resolveWireProtocolOverride("xai", model, configured).adapter).toBe("openai-chat");
+      expect(resolveWireProtocolOverride("xai", "grok-4.20-multi-agent-0309", configured).adapter)
+        .toBe("openai-responses");
+    }
+  });
+
+  test("xAI wire defaults are name-pinned, not inherited by custom provider IDs", () => {
+    const configured = xai("oauth", { baseUrl: "https://gateway.example.test/v1" });
+    expect(resolveWireProtocolOverride("custom-xai", "grok-4.6", configured).adapter).toBe("openai-chat");
+    expect(resolveWireProtocolOverride("xai", "grok-4.6", configured).adapter).toBe("openai-responses");
+    expect(resolveWireProtocolOverride("xai", "grok-4.6", xai("oauth", { authMode: undefined })).adapter)
+      .toBe("openai-responses");
   });
 
   function deepseek(overrides: Partial<OcxProviderConfig> = {}): OcxProviderConfig {
