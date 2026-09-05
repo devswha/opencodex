@@ -591,5 +591,6 @@ test("tool-definitions preserves leaf identities and naming stays the dependency
   expect(cursorToolWireName).toBe(leafWireName);
   expect(cursorToolInputSchema).toBe(leafInputSchema);
   expect(buildCursorToolGuidanceSystemNote).toBe(leafGuidance);
-  expect(readFileSync(repoPath("src/adapters/cursor/tool-naming.ts"), "utf8")).not.toContain('from "./tool-');
+  // Quote-agnostic: the naming leaf is the DAG root and must not import any sibling tool-* leaf.
+  expect(readFileSync(repoPath("src/adapters/cursor/tool-naming.ts"), "utf8")).not.toMatch(/from\s+["']\.\/tool-/);
 });
