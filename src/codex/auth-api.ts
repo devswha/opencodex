@@ -103,6 +103,7 @@ import {
   type MainAccountInfo,
 } from "./main-account-cache";
 export { clearMainAccountInfoCache } from "./main-account-cache";
+import type { CodexQuotaRefreshOutcome } from "./quota-refresh-outcome";
 import { getMainAccountHardLockStatus, type MainAccountHardLockStatus } from "./main-account-hard-lock";
 import { maskEmail } from "../lib/privacy";
 import { codexWarmupFailureReason, warmCodexAccount } from "./warmup";
@@ -774,6 +775,8 @@ async function readMainAuthErrorCode(resp: Response): Promise<unknown> {
 
 interface MainAccountInfoFetchResult {
   info: MainAccountInfo;
+  /** Ephemeral result of this attempt, omitted when no WHAM request was made. */
+  quotaRefresh?: CodexQuotaRefreshOutcome;
   /** Whether this attempt safely inspected the physical native-main credential. */
   credentialChecked: boolean;
   /** Meaningful only when credentialChecked is true. */
@@ -789,12 +792,14 @@ interface MainAccountInfoFetchResult {
 export interface MainAccountInfoSnapshot {
   info: MainAccountInfo;
   mainIdentityGeneration: number;
+  quotaRefresh?: CodexQuotaRefreshOutcome;
 }
 
 export async function fetchMainAccountInfoSnapshot(forceRefresh = false): Promise<MainAccountInfoSnapshot> {
   const result = await fetchMainAccountInfoAttempt(forceRefresh, 1);
   return {
     info: result.info,
+    ...(result.quotaRefresh ? { quotaRefresh: result.quotaRefresh } : {}),
     mainIdentityGeneration: result.identityGeneration ?? captureMainAccountIdentityGeneration(),
   };
 }
@@ -896,10 +901,13 @@ async function fetchMainAccountInfoWhileOwned(
   const mainQuotaWriter = requestAccountId === tokens.account_id
     ? observeMainQuotaCredential(tokens.access_token, tokens.account_id)
     : undefined;
+  // Keep diagnostics separate from authentication and freshness policy. Never serialize errors.
+  const quotaSignal = AbortSignal.timeout(WHAM_REQUEST_TIMEOUT_MS);
+  let quotaPhase: "request" | "body" | "decode" | "publish" = "request";
   try {
     const resp = await fetch("https://chatgpt.com/backend-api/wham/usage", {
       headers: { Authorization: `Bearer ${tokens.access_token}`, "ChatGPT-Account-Id": tokens.account_id },
-      signal: AbortSignal.timeout(WHAM_REQUEST_TIMEOUT_MS),
+      signal: quotaSignal,
     });
     if (!resp.ok) {
       const terminalAuthFailure = await isTerminalMainAuthResponse(resp, isMainAccountTokenVerifiablyLive());
@@ -909,15 +917,21 @@ async function fetchMainAccountInfoWhileOwned(
         clearMainAccountInfoCache();
         markAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID, writerGeneration);
       }
-      return { info: EMPTY_MAIN_ACCOUNT_INFO, credentialChecked: true, hasCredential: true };
+      return {
+        info: EMPTY_MAIN_ACCOUNT_INFO, credentialChecked: true, hasCredential: true,
+        quotaRefresh: { status: "http_error", httpStatus: resp.status },
+      };
     }
+    quotaPhase = "body";
     const data = (await resp.json()) as WhamUsageResponse;
+    quotaPhase = "decode";
     const retried = await retryMainAccountInfoIfIdentityChanged(requestAccountId, retriesRemaining, nativeMainLease, explicitRefresh);
     if (retried) return retried;
     const plan = nonEmptyPlan(data.plan_type) ?? nonEmptyPlan(cached?.plan) ?? nonEmptyPlan(getMainAccountPlan());
     const usage = { ...data, ...(plan ? { plan_type: plan } : {}) };
     const quota = parseUsageQuota(usage);
     const policyQuota = parseMainPolicyUsageQuota(usage);
+    quotaPhase = "publish";
     const freshResetCredits = quota?.resetCredits;
     // Tag the count with the identity it was read from, so a later response that omits the
     // summary can restore the badge without ever crossing an account boundary.
@@ -947,14 +961,24 @@ async function fetchMainAccountInfoWhileOwned(
     }
     return {
       info: result,
+      quotaRefresh: { status: quota ? "ok" : "not_reported" },
       credentialChecked: true,
       hasCredential: true,
       ...(quota ? { freshQuota: quota } : {}),
       ...(freshResetCredits !== undefined ? { freshResetCredits } : {}),
     };
-  } catch {
+  } catch (error) {
     const retried = await retryMainAccountInfoIfIdentityChanged(requestAccountId, retriesRemaining, nativeMainLease, explicitRefresh);
-    return retried ?? { info: EMPTY_MAIN_ACCOUNT_INFO, credentialChecked: true, hasCredential: true };
+    if (retried) return retried;
+    let status: CodexQuotaRefreshOutcome["status"] = "internal_error";
+    if (quotaSignal.aborted) status = "timeout";
+    else if (quotaPhase === "request") status = "network_error";
+    else if (quotaPhase === "body") status = error instanceof SyntaxError ? "invalid_response" : "network_error";
+    else if (quotaPhase === "decode") status = "invalid_response";
+    return {
+      info: EMPTY_MAIN_ACCOUNT_INFO, credentialChecked: true, hasCredential: true,
+      quotaRefresh: { status },
+    };
   }
 }
 
@@ -1051,6 +1075,7 @@ export interface CodexAuthAccountDto {
   healthSummary: string;
   healthAction?: string;
   quotaProbeSkipped?: true;
+  quotaRefresh?: CodexQuotaRefreshOutcome;
   mainAccountHardLock?: MainAccountHardLockStatus;
 }
 
@@ -1760,6 +1785,7 @@ export async function listCodexAuthAccountsSnapshot(
     id: MAIN_CODEX_ACCOUNT_ID,
     email: maskEmail(mainInfo.email) ?? "Codex App login",
     plan: mainInfo.plan,
+    ...(mainSnapshotLive && mainResult.quotaRefresh ? { quotaRefresh: mainResult.quotaRefresh } : {}),
     logLabel: "main",
     isMain: true,
     paused: isCodexAccountPaused(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),

@@ -14,7 +14,7 @@ import {
   handleCodexAuthAPI, updateAccountQuota, getAccountQuota,
   checkAccountIdCollision, getMainChatgptAccountId,
   markAccountNeedsReauth, isAccountNeedsReauth, clearAccountNeedsReauth, clearAccountQuota,
-  clearMainAccountInfoCache, maskEmail, fetchMainAccountInfo,
+  clearMainAccountInfoCache, maskEmail, fetchMainAccountInfo, fetchMainAccountInfoSnapshot,
   clearCodexQuotaPrimeState, primeCodexPoolQuotas, seedCodexAuthAdmissionForTests,
   type CodexAuthAccountDto,
   listCodexAuthAccounts,
@@ -254,6 +254,61 @@ function seedPoolAccount(
     chatgptAccountId: account.chatgptAccountId ?? `acct-${account.id}`,
   });
 }
+
+describe("main quota refresh diagnostics", () => {
+  function writeMain(): void {
+    writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
+      tokens: { access_token: jwtWithExp(Math.floor(Date.now() / 1000) + 3600), account_id: "fixture-account" },
+    }));
+  }
+
+  test.each([401, 403, 429, 503])("HTTP %s is diagnostic, not proof of sign-out", async status => {
+    writeMain();
+    globalThis.fetch = (async () => new Response("private-upstream-canary", { status })) as typeof fetch;
+    const main = (await listCodexAuthAccounts(makeConfig(), true)).find(row => row.isMain);
+    expect(main).toMatchObject({ quotaRefresh: { status: "http_error", httpStatus: status },
+      plan: null, quota: null, hasCredential: true, needsReauth: false });
+    expect(JSON.stringify(main)).not.toContain("private-upstream-canary");
+  });
+
+  test.each(["network_error", "invalid_response", "not_reported", "body_reset"] as const)("classifies %s without serializing errors", async kind => {
+    writeMain();
+    globalThis.fetch = (async () => {
+      if (kind === "network_error") throw new TypeError("private-network-canary");
+      if (kind === "body_reset") return new Response(new ReadableStream({
+        start(controller) { controller.error(new TypeError("private-stream-canary")); },
+      }));
+      return kind === "invalid_response" ? new Response("private-json-canary") : Response.json({});
+    }) as typeof fetch;
+    const result = await fetchMainAccountInfoSnapshot(true);
+    expect(result.quotaRefresh).toEqual({ status: kind === "body_reset" ? "network_error" : kind });
+    expect(result.info.quota).toBeNull();
+    expect(JSON.stringify(result)).not.toContain("canary");
+  });
+
+  test("timeout reports only the fixed category", async () => {
+    writeMain();
+    const signal = AbortSignal.abort(new DOMException("private-timeout-canary", "TimeoutError"));
+    const timeout = spyOn(AbortSignal, "timeout").mockReturnValue(signal);
+    globalThis.fetch = (async () => { throw signal.reason; }) as typeof fetch;
+    try {
+      expect((await fetchMainAccountInfoSnapshot(true)).quotaRefresh).toEqual({ status: "timeout" });
+    } finally { timeout.mockRestore(); }
+  });
+
+  test("fresh success reports ok while cache reuse never claims another probe", async () => {
+    writeMain();
+    let reads = 0;
+    globalThis.fetch = (async () => { reads++; return Response.json({ plan_type: "plus",
+      rate_limit: { primary_window: { used_percent: 37 } } }); }) as typeof fetch;
+    const fresh = await fetchMainAccountInfoSnapshot(true);
+    expect(fresh.quotaRefresh).toEqual({ status: "ok" });
+    const cached = await fetchMainAccountInfoSnapshot(false);
+    expect(cached.quotaRefresh).toBeUndefined();
+    expect(cached.info.quota).toEqual(fresh.info.quota);
+    expect(reads).toBe(1);
+  });
+});
 
 beforeEach(() => {
   resetLifecycleDrainStateForTests();

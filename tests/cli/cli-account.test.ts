@@ -584,6 +584,30 @@ afterEach(() => {
 });
 
 describe("ocx account CLI (issue #180 matrix)", () => {
+  test("main quota diagnostics survive opt-in JSON without copying upstream data", async () => {
+    codexAccounts = [{ id: "__main__", isMain: true, quota: null,
+      quotaRefresh: { status: "http_error", httpStatus: 503, message: RAW_SENTINEL } }];
+    const result = await run(["list", "openai", "--quota", "--refresh", "--json"]);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout).accounts[0].quotaRefresh).toEqual({ status: "http_error", httpStatus: 503 });
+    expect(result.output).not.toContain(RAW_SENTINEL);
+    const ordinary = await run(["list", "openai", "--json"]);
+    expect(JSON.parse(ordinary.stdout).accounts[0]).not.toHaveProperty("quotaRefresh");
+  });
+
+  test.each([
+    { status: "private-status-canary" },
+    { status: "http_error", httpStatus: "503" },
+    { status: "http_error", httpStatus: 999 },
+    { status: "http_error", httpStatus: 503.5 },
+    null,
+  ])("invalid quota diagnostic is omitted: %j", async quotaRefresh => {
+    codexAccounts = [{ id: "__main__", isMain: true, quota: null, quotaRefresh }];
+    const result = await run(["list", "openai", "--quota", "--json"]);
+    expect(JSON.parse(result.stdout).accounts[0]).not.toHaveProperty("quotaRefresh");
+    expect(result.output).not.toContain("canary");
+  });
+
   test("1: list renders all three account families, main alias, and padded columns", async () => {
     const result = await run(["list"]);
 
